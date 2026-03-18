@@ -34,7 +34,7 @@ fn usz tokenize_content(String content, Token[] tokens)
 }
 
 // Find the token at a byte offset in a token stream.
-fn bool find_token_at(Token[] tokens, usz count, usz offset, Token* result, usz* idx) @private
+fn bool find_token_at(Token[] tokens, usz count, usz offset, Token* result, usz* idx)
 {
 	for (usz i = 0; i < count; i++)
 	{
@@ -50,7 +50,7 @@ fn bool find_token_at(Token[] tokens, usz count, usz offset, Token* result, usz*
 }
 
 // Build a Location JSON for a token found in a file.
-fn void emit_location(String uri, String content, Token tok, DString* out) @private
+fn void emit_location(String uri, String content, Token tok, DString* out)
 {
 	LineOffsets* lo = mem::new(LineOffsets);
 	defer mem::free(lo);

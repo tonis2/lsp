@@ -75,6 +75,10 @@ fn void handle_message(LspServer* server, String message) {
 		handle_definition(server, msg, id_json);
 	} else if (method == "textDocument/declaration") {
 		handle_definition(server, msg, id_json);
+	} else if (method == "textDocument/documentHighlight") {
+		handle_document_highlight(server, msg, id_json);
+	} else if (method == "textDocument/references") {
+		handle_references(server, msg, id_json);
 	} else if (method == "textDocument/signatureHelp") {
 		handle_signature_help(server, msg, id_json);
 	} else if (id_json != "null") {
