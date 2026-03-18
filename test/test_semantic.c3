@@ -177,3 +177,22 @@ fn void test_encode_number() @test {
 	// INTEGER → type 11, at (0,0), len 2
 	assert(out.str_view() == "0,0,2,11,0");
 }
+
+fn void test_encode_multiline_block_comment() @test {
+	DString out = dstring::temp();
+	// "/* a\nb */" is a 3-line block comment split across line 0 and line 1
+	// Line 0: "/* a" (4 chars), Line 1: "b */" (4 chars)
+	// Both segments are type 9 (comment)
+	// Seg1: deltaLine=0, deltaStart=0, len=4, type=9
+	// Seg2: deltaLine=1, deltaStart=0, len=4, type=9
+	encode_semantic_tokens("/* a\nb */", &out);
+	assert(out.str_view() == "0,0,4,9,0,1,0,4,9,0", "got: %s", out.str_view());
+}
+
+fn void test_encode_multiline_string() @test {
+	DString out = dstring::temp();
+	// Backtick string spanning two lines: `a\nb`
+	// Line 0: "`a" (2 chars), Line 1: "b`" (2 chars)
+	encode_semantic_tokens("`a\nb`", &out);
+	assert(out.str_view() == "0,0,2,10,0,1,0,2,10,0", "got: %s", out.str_view());
+}

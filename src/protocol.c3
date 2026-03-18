@@ -3,16 +3,24 @@ module lsp;
 import std::core::dstring;
 import std::encoding::json;
 import std::collections::object;
+import std::time;
 
 struct LspServer {
 	bool initialized;
 	bool shutdown_requested;
 	bool running;
 	DocumentStore documents;
+	String stdlib_path;
+	long diag_delay_ms;
+	Time last_diag_time;
 }
 
-fn void LspServer.init(&self) {
-	*self = { .running = true };
+fn void LspServer.init(&self, String stdlib_path, long diag_delay_ms) {
+	*self = {
+		.running = true,
+		.stdlib_path = stdlib_path,
+		.diag_delay_ms = diag_delay_ms,
+	};
 }
 
 fn void handle_message(LspServer* server, String message) {
@@ -38,7 +46,7 @@ fn void handle_message(LspServer* server, String message) {
 	String method = msg.get_string("method") ?? "";
 
 	if (method == "initialize") {
-		handle_initialize(server, id_json);
+		handle_initialize(server, msg, id_json);
 	} else if (method == "initialized") {
 		// No-op notification
 	} else if (method == "shutdown") {
@@ -51,6 +59,8 @@ fn void handle_message(LspServer* server, String message) {
 		handle_did_change(server, msg);
 	} else if (method == "textDocument/didClose") {
 		handle_did_close(server, msg);
+	} else if (method == "textDocument/didSave") {
+		handle_did_save(server, msg);
 	} else if (method == "textDocument/semanticTokens/full") {
 		handle_semantic_tokens(server, msg, id_json);
 	} else if (method == "textDocument/foldingRange") {
@@ -61,6 +71,12 @@ fn void handle_message(LspServer* server, String message) {
 		handle_hover(server, msg, id_json);
 	} else if (method == "textDocument/completion") {
 		handle_completion(server, msg, id_json);
+	} else if (method == "textDocument/definition") {
+		handle_definition(server, msg, id_json);
+	} else if (method == "textDocument/declaration") {
+		handle_definition(server, msg, id_json);
+	} else if (method == "textDocument/signatureHelp") {
+		handle_signature_help(server, msg, id_json);
 	} else if (id_json != "null") {
 		send_error(id_json, -32601, "Method not found");
 	}
