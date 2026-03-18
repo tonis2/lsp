@@ -2,9 +2,12 @@ module lsp;
 
 import std::core::dstring;
 
-fn void json_escape_into(DString* out, String s) {
-	foreach (c : s) {
-		switch (c) {
+fn void json_escape_into(DString* out, String s)
+{
+	foreach (c : s)
+	{
+		switch (c)
+		{
 			case '"': out.append("\\\"");
 			case '\\': out.append("\\\\");
 			case '\n': out.append("\\n");

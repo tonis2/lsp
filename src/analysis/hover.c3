@@ -223,7 +223,7 @@ fn void extract_docs_at(String content, Token[] tokens, usz count, usz decl_idx,
 		for (usz i = decl_start_idx; i > 0; i--)
 		{
 			TokenType t = tokens[i - 1].type;
-			if (t == LINE_COMMENT || t == BLOCK_COMMENT)
+			if (t == LINE_COMMENT || t == BLOCK_COMMENT || t == CONTRACT)
 			{
 				first_comment = i - 1;
 			}
@@ -235,7 +235,7 @@ fn void extract_docs_at(String content, Token[] tokens, usz count, usz decl_idx,
 
 		for (usz i = first_comment; i < decl_start_idx; i++)
 		{
-			if (tokens[i].type == LINE_COMMENT || tokens[i].type == BLOCK_COMMENT)
+			if (tokens[i].type == LINE_COMMENT || tokens[i].type == BLOCK_COMMENT || tokens[i].type == CONTRACT)
 			{
 				String text = content[tokens[i].offset:tokens[i].len];
 				String cleaned = strip_comment_markers(text);
@@ -284,6 +284,26 @@ fn String strip_comment_markers(String text) @private
 			rest = rest[:rest.len - 2]; // Remove trailing */
 		}
 		// Trim whitespace
+		while (rest.len > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r'))
+		{
+			rest = rest[1..];
+		}
+		while (rest.len > 0 && (rest[rest.len - 1] == ' ' || rest[rest.len - 1] == '\t' || rest[rest.len - 1] == '\n' || rest[rest.len - 1] == '\r'))
+		{
+			rest = rest[:rest.len - 1];
+		}
+		return rest;
+	}
+	// Contract/doc comment: <* ... *>
+	if (text.len >= 4 && text[0] == '<' && text[1] == '*')
+	{
+		// Remove <* and *>
+		String rest = text[2..];
+		if (rest.len >= 2 && rest[rest.len - 2] == '*' && rest[rest.len - 1] == '>')
+		{
+			rest = rest[:rest.len - 2];
+		}
+		// Trim leading/trailing whitespace
 		while (rest.len > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r'))
 		{
 			rest = rest[1..];

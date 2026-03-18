@@ -130,3 +130,37 @@ fn void test_hover_cross_file_doc_comment() @test {
 
 	ds.close("file:///lib.c3");
 }
+
+fn void test_hover_contract_doc_comment() @test {
+	DString out = dstring::temp();
+	DocumentStore* ds = mem::new(DocumentStore);
+	defer mem::free(ds);
+	String content = `<*
+ Check if a substring is found.
+
+ @param [in] s
+ @return "true if found"
+*>
+fn bool contains(String s) {}
+contains("x");`;
+	// Cursor on "contains" in the call — after the declaration
+	// Declaration ends at "}\n" then "contains" starts
+	// Let's find offset: the contract + fn line + call
+	// "<*\n Check if...\n*>\nfn bool contains(String s) {}\ncontains("x");"
+	// Count: contract block + fn line = variable, cursor on last "contains"
+	encode_hover("file:///test.c3", content, 109, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("Check if a substring is found"), "expected contract doc, got: %s", result);
+	assert(result.contains("fn bool contains(String s)"), "expected signature, got: %s", result);
+}
+
+fn void test_hover_contract_doc_single_line() @test {
+	DString out = dstring::temp();
+	DocumentStore* ds = mem::new(DocumentStore);
+	defer mem::free(ds);
+	String content = "<* Returns the length. *>\nfn usz length() {}\nlength();";
+	// Cursor on "length" in the call at offset 45
+	encode_hover("file:///test.c3", content, 45, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("Returns the length"), "expected contract doc, got: %s", result);
+}
