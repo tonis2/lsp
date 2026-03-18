@@ -92,6 +92,34 @@ fn void test_definition_uri_in_result() @test {
 	assert(result.contains(`file:///my/file.c3`), "got: %s", result);
 }
 
+fn void test_definition_enum_member() @test {
+	DString out = dstring::temp();
+	DocumentStore* ds = mem::new(DocumentStore);
+	defer mem::free(ds);
+	String content = "enum TokenType { LBRACE, RBRACE }\nTokenType t = LBRACE;";
+	// Cursor on "LBRACE" in usage at offset 48
+	encode_definition("file:///test.c3", content, 48, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+fn void test_definition_enum_member_cross_file() @test {
+	DString out = dstring::temp();
+	DocumentStore* ds = mem::new(DocumentStore);
+	defer mem::free(ds);
+	ds.open("file:///types.c3", "enum Color { RED, GREEN, BLUE }", 1);
+
+	String content = "Color c = RED;";
+	// Cursor on "RED" at offset 10
+	encode_definition("file:///test.c3", content, 10, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`file:///types.c3`), "got: %s", result);
+	assert(result.contains(`"character":13`), "got: %s", result);
+
+	ds.close("file:///types.c3");
+}
+
 fn void test_definition_cross_file() @test {
 	DString out = dstring::temp();
 	DocumentStore* ds = mem::new(DocumentStore);

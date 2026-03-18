@@ -133,9 +133,27 @@ fn usz find_declaration(Token[] tokens, usz token_count, Token target, usz targe
 				}
 			}
 		case CONST_IDENT:
+			// constdef NAME
 			for (usz i = 0; i + 1 < token_count; i++) {
 				if (tokens[i].type == CONSTDEF && tokens[i + 1].type == CONST_IDENT && tokens[i + 1].text == name) {
 					return i + 1;
+				}
+			}
+			// enum member: enum Foo { NAME, ... }
+			for (usz i = 0; i + 1 < token_count; i++) {
+				if (tokens[i].type != ENUM && tokens[i].type != FAULTDEF) continue;
+				// Find the opening brace
+				usz brace = i + 1;
+				while (brace < token_count && tokens[brace].type != LBRACE) brace++;
+				if (brace >= token_count) continue;
+				// Scan enum body for matching CONST_IDENT
+				usz depth = 1;
+				for (usz j = brace + 1; j < token_count && depth > 0; j++) {
+					if (tokens[j].type == LBRACE) { depth++; continue; }
+					if (tokens[j].type == RBRACE) { depth--; continue; }
+					if (depth == 1 && tokens[j].type == CONST_IDENT && tokens[j].text == name) {
+						return j;
+					}
 				}
 			}
 		case IDENT:
