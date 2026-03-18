@@ -8,7 +8,7 @@ import std::encoding::json;
 import std::collections::object;
 import c3::lexer;
 
-fn void encode_hover(String uri, String content, usz offset, DocumentStore* docs, String stdlib_path, DString* out)
+fn void encode_hover(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, DString* out)
 {
 	LineOffsets* lo = mem::new(LineOffsets);
 	defer mem::free(lo);
@@ -72,16 +72,16 @@ fn void encode_hover(String uri, String content, usz offset, DocumentStore* docs
 
 // Search for the declaration of a token and extract its doc comment + signature.
 // Searches: current file -> open documents -> project files -> stdlib.
-fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentStore* docs, String stdlib_path, DString* out) @private
+fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out) @private
 {
 	// 1. Current file
 	if (try_extract_docs_from(content, cursor_tok, out)) return;
 
 	// 2. Open documents
-	for (usz d = 0; d < docs.count; d++)
+	for (usz d = 0; d < docs.size; d++)
 	{
-		if (docs.docs[d].uri == uri) continue;
-		if (try_extract_docs_from(docs.docs[d].content, cursor_tok, out)) return;
+		if (docs.entries[d].uri == uri) continue;
+		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out)) return;
 	}
 
 	// 3. Project files on disk

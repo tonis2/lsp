@@ -54,7 +54,7 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 
 // Encode references (cross-file occurrences of the symbol under cursor).
 // Output: JSON array of Location objects, or empty string if none.
-fn void encode_references(String uri, String content, usz offset, DocumentStore* docs, String stdlib_path, bool include_decl, DString* out)
+fn void encode_references(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, bool include_decl, DString* out)
 {
 	Token[] tokens = mem::new_array(Token, DEF_MAX_TOKENS);
 	defer mem::free(tokens);
@@ -74,13 +74,13 @@ fn void encode_references(String uri, String content, usz offset, DocumentStore*
 	collect_refs_in_tokens(uri, content, tokens, token_count, cursor_tok, out, &first);
 
 	// 2. Open documents
-	for (usz d = 0; d < docs.count; d++)
+	for (usz d = 0; d < docs.size; d++)
 	{
-		if (docs.docs[d].uri == uri) continue;
+		if (docs.entries[d].uri == uri) continue;
 
 		Token[] other_tokens = mem::new_array(Token, DEF_MAX_TOKENS);
-		usz other_count = tokenize_content(docs.docs[d].content, other_tokens);
-		collect_refs_in_tokens(docs.docs[d].uri, docs.docs[d].content, other_tokens, other_count, cursor_tok, out, &first);
+		usz other_count = tokenize_content(docs.entries[d].content, other_tokens);
+		collect_refs_in_tokens(docs.entries[d].uri, docs.entries[d].content, other_tokens, other_count, cursor_tok, out, &first);
 		mem::free(other_tokens);
 	}
 

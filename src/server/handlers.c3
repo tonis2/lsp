@@ -132,7 +132,7 @@ fn void handle_semantic_tokens(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, `{"data":[]}`);
@@ -152,7 +152,7 @@ fn void handle_folding_range(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "[]");
@@ -172,7 +172,7 @@ fn void handle_document_symbol(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "[]");
@@ -192,7 +192,7 @@ fn void handle_hover(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -231,7 +231,7 @@ fn void handle_completion(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, `{"isIncomplete":false,"items":[]}`);
@@ -266,7 +266,7 @@ fn void handle_definition(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -305,7 +305,7 @@ fn void handle_signature_help(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -344,7 +344,7 @@ fn void handle_document_highlight(LspServer* server, Object* msg, String id_json
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -383,7 +383,7 @@ fn void handle_references(LspServer* server, Object* msg, String id_json)
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.get(uri);
+	Document* doc = server.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");

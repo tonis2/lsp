@@ -97,7 +97,7 @@ fn void test_highlight_const_ident() @test {
 
 fn void test_references_same_file() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	String content = "fn void hello() {}\nhello();\nhello();";
 	// Cursor on "hello" at offset 19
@@ -119,7 +119,7 @@ fn void test_references_same_file() @test {
 
 fn void test_references_cross_file() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	ds.open("file:///other.c3", "fn void greet() { hello(); }", 1);
 
@@ -136,7 +136,7 @@ fn void test_references_cross_file() @test {
 
 fn void test_references_keyword_empty() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	encode_references("file:///test.c3", "fn void hello() {}", 0, ds, "", true, &out);
 	assert(out.str_view() == "", "expected empty for keyword, got: %s", out.str_view());
@@ -144,7 +144,7 @@ fn void test_references_keyword_empty() @test {
 
 fn void test_references_type_ident() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	ds.open("file:///other.c3", "Foo y;", 1);
 

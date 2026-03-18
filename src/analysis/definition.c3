@@ -67,7 +67,7 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 
 // Encodes a go-to-definition / go-to-declaration response.
 // Searches: current file -> open documents -> project files on disk -> stdlib.
-fn void encode_definition(String uri, String content, usz offset, DocumentStore* docs, String stdlib_path, DString* out)
+fn void encode_definition(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, DString* out)
 {
 	Token[] tokens = mem::new_array(Token, DEF_MAX_TOKENS);
 	defer mem::free(tokens);
@@ -91,17 +91,17 @@ fn void encode_definition(String uri, String content, usz offset, DocumentStore*
 	}
 
 	// 2. Search all other open documents
-	for (usz d = 0; d < docs.count; d++)
+	for (usz d = 0; d < docs.size; d++)
 	{
-		if (docs.docs[d].uri == uri) continue;
+		if (docs.entries[d].uri == uri) continue;
 
 		Token[] other_tokens = mem::new_array(Token, DEF_MAX_TOKENS);
-		usz other_count = tokenize_content(docs.docs[d].content, other_tokens);
+		usz other_count = tokenize_content(docs.entries[d].content, other_tokens);
 
 		usz found = find_declaration_in(other_tokens[..other_count > 0 ? other_count - 1 : 0], other_count, cursor_tok);
 		if (found < other_count)
 		{
-			emit_location(docs.docs[d].uri, docs.docs[d].content, other_tokens[found], out);
+			emit_location(docs.entries[d].uri, docs.entries[d].content, other_tokens[found], out);
 			mem::free(other_tokens);
 			return;
 		}

@@ -10,7 +10,7 @@ struct LspServer
 	bool initialized;
 	bool shutdown_requested;
 	bool running;
-	DocumentStore documents;
+	DocumentList documents;
 	String stdlib_path;
 	String compiler_path;
 	long diag_delay_ms;

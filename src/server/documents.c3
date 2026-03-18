@@ -1,8 +1,7 @@
 module lsp;
 
 import std::core::mem;
-
-const MAX_DOCUMENTS = 64;
+import std::collections::list;
 
 struct Document
 {
@@ -11,25 +10,20 @@ struct Document
 	int version;
 }
 
-struct DocumentStore
-{
-	Document[MAX_DOCUMENTS] docs;
-	usz count;
-}
+alias DocumentList = List{Document};
 
-fn void DocumentStore.open(&self, String uri, String content, int version)
+fn void DocumentList.open(&self, String uri, String content, int version)
 {
 	// Check if already open, update instead
-	for (usz i = 0; i < self.count; i++)
+
+	foreach (entry : self)
 	{
-		if (self.docs[i].uri == uri)
+		if (entry.uri == uri)
 		{
 			self.update(uri, content, version);
 			return;
 		}
 	}
-
-	if (self.count >= MAX_DOCUMENTS) return;
 
 	// Allocate copies
 	char[] uri_copy = mem::new_array(char, uri.len);
@@ -37,63 +31,57 @@ fn void DocumentStore.open(&self, String uri, String content, int version)
 	char[] content_copy = mem::new_array(char, content.len);
 	content_copy[..] = content[..];
 
-	self.docs[self.count] = { .uri = (String)uri_copy, .content = (String)content_copy, .version = version, };
-	self.count++;
+	self.push({ .uri = (String)uri_copy, .content = (String)content_copy, .version = version });
 }
 
-fn void DocumentStore.update(&self, String uri, String content, int version)
+fn void DocumentList.update(&self, String uri, String content, int version)
 {
-	for (usz i = 0; i < self.count; i++)
+	for (usz i = 0; i < self.size; i++)
 	{
-		if (self.docs[i].uri == uri)
+		if (self.entries[i].uri == uri)
 		{
 			// Free old content, allocate new
-			if (self.docs[i].content.len > 0)
+			if (self.entries[i].content.len > 0)
 			{
-				mem::free((char*)self.docs[i].content.ptr);
+				mem::free((char*)self.entries[i].content.ptr);
 			}
 			char[] content_copy = mem::new_array(char, content.len);
 			content_copy[..] = content[..];
-			self.docs[i].content = (String)content_copy;
-			self.docs[i].version = version;
+			self.entries[i].content = (String)content_copy;
+			self.entries[i].version = version;
 			return;
 		}
 	}
 }
 
-fn void DocumentStore.close(&self, String uri)
+fn void DocumentList.close(&self, String uri)
 {
-	for (usz i = 0; i < self.count; i++)
+	for (usz i = 0; i < self.size; i++)
 	{
-		if (self.docs[i].uri == uri)
+		if (self.entries[i].uri == uri)
 		{
 			// Free allocated memory
-			if (self.docs[i].uri.len > 0)
+			if (self.entries[i].uri.len > 0)
 			{
-				mem::free((char*)self.docs[i].uri.ptr);
+				mem::free((char*)self.entries[i].uri.ptr);
 			}
-			if (self.docs[i].content.len > 0)
+			if (self.entries[i].content.len > 0)
 			{
-				mem::free((char*)self.docs[i].content.ptr);
+				mem::free((char*)self.entries[i].content.ptr);
 			}
-			// Compact: move last element here
-			if (i < self.count - 1)
-			{
-				self.docs[i] = self.docs[self.count - 1];
-			}
-			self.count--;
+			self.remove_at(i);
 			return;
 		}
 	}
 }
 
-fn Document* DocumentStore.get(&self, String uri)
+fn Document* DocumentList.find(&self, String uri)
 {
-	for (usz i = 0; i < self.count; i++)
+	for (usz i = 0; i < self.size; i++)
 	{
-		if (self.docs[i].uri == uri)
+		if (self.entries[i].uri == uri)
 		{
-			return &self.docs[i];
+			return &self.entries[i];
 		}
 	}
 	return null;

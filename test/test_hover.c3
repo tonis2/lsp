@@ -5,7 +5,7 @@ import std::core::mem;
 
 fn void test_hover_keyword() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	encode_hover("file:///test.c3", "defer x();", 0, ds, "", &out);
 	String result = out.str_view();
@@ -15,7 +15,7 @@ fn void test_hover_keyword() @test {
 
 fn void test_hover_builtin_type() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	encode_hover("file:///test.c3", "int x = 0;", 0, ds, "", &out);
 	String result = out.str_view();
@@ -24,7 +24,7 @@ fn void test_hover_builtin_type() @test {
 
 fn void test_hover_identifier() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	// "fn foo" — hover on "foo" at offset 3
 	encode_hover("file:///test.c3", "fn foo", 3, ds, "", &out);
@@ -35,7 +35,7 @@ fn void test_hover_identifier() @test {
 
 fn void test_hover_type_ident() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	// "struct MyType {}" — hover on MyType at offset 7
 	encode_hover("file:///test.c3", "struct MyType {}", 7, ds, "", &out);
@@ -46,7 +46,7 @@ fn void test_hover_type_ident() @test {
 
 fn void test_hover_ct_keyword() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	encode_hover("file:///test.c3", "$sizeof(int)", 0, ds, "", &out);
 	String result = out.str_view();
@@ -55,7 +55,7 @@ fn void test_hover_ct_keyword() @test {
 
 fn void test_hover_no_hover_on_whitespace() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	encode_hover("file:///test.c3", "fn x", 2, ds, "", &out);
 	assert(out.str_view() == "", "got: %s", out.str_view());
@@ -63,7 +63,7 @@ fn void test_hover_no_hover_on_whitespace() @test {
 
 fn void test_hover_empty() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	encode_hover("file:///test.c3", "", 0, ds, "", &out);
 	assert(out.str_view() == "");
@@ -71,7 +71,7 @@ fn void test_hover_empty() @test {
 
 fn void test_hover_const_ident() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	encode_hover("file:///test.c3", "constdef MAX = 1;", 9, ds, "", &out);
 	String result = out.str_view();
@@ -81,7 +81,7 @@ fn void test_hover_const_ident() @test {
 
 fn void test_hover_function_with_doc_comment() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	String content = "// Greets the user with a message.\nfn void greet() {}\ngreet();";
 	// Cursor on "greet" in the call at offset 54 (after \n before greet())
@@ -93,7 +93,7 @@ fn void test_hover_function_with_doc_comment() @test {
 
 fn void test_hover_function_with_block_comment() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	String content = "/* Processes input data. */\nfn void process() {}\nprocess();";
 	// Cursor on "process" in the call
@@ -104,7 +104,7 @@ fn void test_hover_function_with_block_comment() @test {
 
 fn void test_hover_function_no_comment() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	String content = "fn void bare() {}\nbare();";
 	// Cursor on "bare" in the call
@@ -117,7 +117,7 @@ fn void test_hover_function_no_comment() @test {
 
 fn void test_hover_cross_file_doc_comment() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	ds.open("file:///lib.c3", "// Computes the sum of two numbers.\nfn int add(int a, int b) { return a + b; }", 1);
 
@@ -133,7 +133,7 @@ fn void test_hover_cross_file_doc_comment() @test {
 
 fn void test_hover_contract_doc_comment() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	String content = `<*
  Check if a substring is found.
@@ -156,7 +156,7 @@ contains("x");`;
 
 fn void test_hover_contract_doc_single_line() @test {
 	DString out = dstring::temp();
-	DocumentStore* ds = mem::new(DocumentStore);
+	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	String content = "<* Returns the length. *>\nfn usz length() {}\nlength();";
 	// Cursor on "length" in the call at offset 45
