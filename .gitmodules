@@ -1,0 +1,6 @@
+[submodule "lib/lexel.c3l"]
+	path = lib/lexel.c3l
+	url = git@github.com:konimarti/lexer.c3l.git
+[submodule "lib/lexer.c3l"]
+	path = lib/lexer.c3l
+	url = git@github.com:konimarti/lexer.c3l.git
