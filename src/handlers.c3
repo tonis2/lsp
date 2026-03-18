@@ -248,7 +248,7 @@ fn void handle_definition(LspServer* server, Object* msg, String id_json) {
 	}
 
 	DString data = dstring::temp();
-	encode_definition(uri, doc.content, offset, &data);
+	encode_definition(uri, doc.content, offset, &server.documents, server.stdlib_path, &data);
 
 	if (data.str_view().len == 0) {
 		send_response(id_json, "null");
