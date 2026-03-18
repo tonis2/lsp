@@ -53,6 +53,14 @@ fn void handle_message(LspServer* server, String message) {
 		handle_did_close(server, msg);
 	} else if (method == "textDocument/semanticTokens/full") {
 		handle_semantic_tokens(server, msg, id_json);
+	} else if (method == "textDocument/foldingRange") {
+		handle_folding_range(server, msg, id_json);
+	} else if (method == "textDocument/documentSymbol") {
+		handle_document_symbol(server, msg, id_json);
+	} else if (method == "textDocument/hover") {
+		handle_hover(server, msg, id_json);
+	} else if (method == "textDocument/completion") {
+		handle_completion(server, msg, id_json);
 	} else if (id_json != "null") {
 		send_error(id_json, -32601, "Method not found");
 	}

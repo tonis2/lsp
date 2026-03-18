@@ -1,6 +1,7 @@
 module lsp;
 
 import std::core::dstring;
+import std::core::mem;
 import std::collections::object;
 
 const TOKEN_TYPES_LEGEND = `["namespace","type","enum","struct","variable","function","macro","keyword","decorator","comment","string","number","operator"]`;
@@ -16,7 +17,12 @@ fn void handle_initialize(LspServer* server, String id_json) {
 	result.append(TOKEN_TYPES_LEGEND);
 	result.append(`,"tokenModifiers":[]},`);
 	result.append(`"full":true`);
-	result.append(`}},`);
+	result.append(`},`);
+	result.append(`"foldingRangeProvider":true,`);
+	result.append(`"documentSymbolProvider":true,`);
+	result.append(`"hoverProvider":true,`);
+	result.append(`"completionProvider":{"triggerCharacters":[".","$","@","#"]}`);
+	result.append(`},`);
 	result.append(`"serverInfo":{"name":"c3-lsp","version":"0.1.0"}}`);
 
 	send_response(id_json, result.str_view());
@@ -77,4 +83,104 @@ fn void handle_semantic_tokens(LspServer* server, Object* msg, String id_json) {
 	DString result = dstring::temp();
 	result.appendf(`{"data":[%s]}`, data.str_view());
 	send_response(id_json, result.str_view());
+}
+
+fn void handle_folding_range(LspServer* server, Object* msg, String id_json) {
+	Object* td = msg.get("params")!!.get("textDocument")!!;
+	String uri = td.get_string("uri") ?? "";
+
+	Document* doc = server.documents.get(uri);
+	if (doc == null) {
+		send_response(id_json, "[]");
+		return;
+	}
+
+	DString data = dstring::temp();
+	encode_folding_ranges(doc.content, &data);
+
+	DString result = dstring::temp();
+	result.appendf("[%s]", data.str_view());
+	send_response(id_json, result.str_view());
+}
+
+fn void handle_document_symbol(LspServer* server, Object* msg, String id_json) {
+	Object* td = msg.get("params")!!.get("textDocument")!!;
+	String uri = td.get_string("uri") ?? "";
+
+	Document* doc = server.documents.get(uri);
+	if (doc == null) {
+		send_response(id_json, "[]");
+		return;
+	}
+
+	DString data = dstring::temp();
+	encode_document_symbols(doc.content, &data);
+
+	DString result = dstring::temp();
+	result.appendf("[%s]", data.str_view());
+	send_response(id_json, result.str_view());
+}
+
+fn void handle_hover(LspServer* server, Object* msg, String id_json) {
+	Object* td = msg.get("params")!!.get("textDocument")!!;
+	String uri = td.get_string("uri") ?? "";
+
+	Document* doc = server.documents.get(uri);
+	if (doc == null) {
+		send_response(id_json, "null");
+		return;
+	}
+
+	Object* pos = msg.get("params")!!.get("position")!!;
+	int line = pos.get_int("line") ?? 0;
+	int character = pos.get_int("character") ?? 0;
+
+	LineOffsets* lo = mem::new(LineOffsets);
+	defer mem::free(lo);
+	build_line_offsets(doc.content, lo);
+
+	usz offset = 0;
+	if ((usz)line < lo.count) {
+		offset = lo.offsets[(usz)line] + (usz)character;
+	}
+
+	DString data = dstring::temp();
+	encode_hover(doc.content, offset, &data);
+
+	if (data.str_view().len == 0) {
+		send_response(id_json, "null");
+	} else {
+		send_response(id_json, data.str_view());
+	}
+}
+
+fn void handle_completion(LspServer* server, Object* msg, String id_json) {
+	Object* td = msg.get("params")!!.get("textDocument")!!;
+	String uri = td.get_string("uri") ?? "";
+
+	Document* doc = server.documents.get(uri);
+	if (doc == null) {
+		send_response(id_json, `{"isIncomplete":false,"items":[]}`);
+		return;
+	}
+
+	Object* pos = msg.get("params")!!.get("position")!!;
+	int line = pos.get_int("line") ?? 0;
+	int character = pos.get_int("character") ?? 0;
+
+	LineOffsets* lo = mem::new(LineOffsets);
+	defer mem::free(lo);
+	build_line_offsets(doc.content, lo);
+
+	usz offset = 0;
+	if ((usz)line < lo.count) {
+		offset = lo.offsets[(usz)line] + (usz)character;
+	}
+	if (offset > doc.content.len) {
+		offset = doc.content.len;
+	}
+
+	DString data = dstring::temp();
+	encode_completions(doc.content, offset, &data);
+	send_response(id_json, data.str_view());
 }
