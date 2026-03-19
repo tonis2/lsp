@@ -22,9 +22,10 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
 
 	bool first = true;
 	out.append("[");
@@ -35,8 +36,8 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 			if (!first) out.append(",");
 			first = false;
 
-			usz line = find_line(lo, tok.offset);
-			usz col = tok.offset - lo.offsets[line];
+			usz line = find_line(&lo, tok.offset);
+			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
 			out.appendf(`{"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}},"kind":1}`, line, col, line, end_col);
@@ -109,9 +110,10 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 // Collect all tokens matching target name+type from a pre-tokenized stream, emitting Location JSON.
 fn void collect_refs_in_tokens(String uri, String content, TokenList* tokens, Token target, DString* out, bool* first) @private
 {
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
 
 	foreach (tok : tokens)
 	{
@@ -120,8 +122,8 @@ fn void collect_refs_in_tokens(String uri, String content, TokenList* tokens, To
 			if (!*first) out.append(",");
 			*first = false;
 
-			usz line = find_line(lo, tok.offset);
-			usz col = tok.offset - lo.offsets[line];
+			usz line = find_line(&lo, tok.offset);
+			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
 			out.append(`{"uri":"`);
@@ -186,9 +188,10 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 // Collect rename edits for matching tokens in a single file, emitting a URI-keyed TextEdit array.
 fn void collect_rename_edits(String uri, String content, TokenList* tokens, Token target, String new_name, DString* out, bool* first_uri) @private
 {
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
 
 	bool found_any = false;
 	bool first_edit = true;
@@ -209,8 +212,8 @@ fn void collect_rename_edits(String uri, String content, TokenList* tokens, Toke
 			if (!first_edit) out.append(",");
 			first_edit = false;
 
-			usz line = find_line(lo, tok.offset);
-			usz col = tok.offset - lo.offsets[line];
+			usz line = find_line(&lo, tok.offset);
+			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
 			out.appendf(`{"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}},"newText":"`, line, col, line, end_col);

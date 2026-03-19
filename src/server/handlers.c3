@@ -9,10 +9,11 @@ const TOKEN_TYPES_LEGEND = `["namespace","type","enum","struct","variable","func
 
 fn usz position_to_offset(String content, int line, int character)
 {
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
-	if ((usz)line < lo.count) return lo.offsets[(usz)line] + (usz)character;
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
+	if ((usz)line < lo.size) return lo.entries[(usz)line] + (usz)character;
 	return 0;
 }
 

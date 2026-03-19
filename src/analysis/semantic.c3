@@ -2,27 +2,20 @@ module lsp;
 
 import std::core::dstring;
 import std::core::mem;
+import std::collections::list;
 import c3::lexer;
 
-const usz MAX_LINE_OFFSETS = 100000;
-
-struct LineOffsets
-{
-	usz[MAX_LINE_OFFSETS] offsets;
-	usz count;
-}
+alias LineOffsets = List{usz};
 
 fn void build_line_offsets(String content, LineOffsets* lo)
 {
-	lo.count = 1;
-	lo.offsets[0] = 0; // Line 0 starts at byte 0
+	lo.push(0); // Line 0 starts at byte 0
 
-	for (usz i = 0; i < content.len && lo.count < MAX_LINE_OFFSETS; i++)
+	for (usz i = 0; i < content.len; i++)
 	{
 		if (content[i] == '\n')
 		{
-			lo.offsets[lo.count] = i + 1;
-			lo.count++;
+			lo.push(i + 1);
 		}
 	}
 }
@@ -30,11 +23,11 @@ fn void build_line_offsets(String content, LineOffsets* lo)
 fn usz find_line(LineOffsets* lo, usz offset)
 {
 	usz low = 0;
-	usz high = lo.count;
+	usz high = lo.size;
 	while (low < high)
 	{
 		usz mid = (low + high) / 2;
-		if (lo.offsets[mid] <= offset)
+		if (lo.entries[mid] <= offset)
 		{
 			low = mid + 1;
 		}
@@ -48,9 +41,10 @@ fn usz find_line(LineOffsets* lo, usz offset)
 
 fn void encode_semantic_tokens(String content, DString* out)
 {
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
 
 	TokenList tokens;
 	tokens.init(mem);
@@ -78,13 +72,13 @@ fn void encode_semantic_tokens(String content, DString* out)
 
 		usz tok_start = tok.offset;
 		usz tok_end = tok.offset + tok.len;
-		usz start_line = find_line(lo, tok_start);
-		usz end_line = find_line(lo, tok_end > 0 ? tok_end - 1 : 0);
+		usz start_line = find_line(&lo, tok_start);
+		usz end_line = find_line(&lo, tok_end > 0 ? tok_end - 1 : 0);
 
 		if (start_line == end_line)
 		{
 			// Single-line token — emit directly
-			usz start_char = tok_start - lo.offsets[start_line];
+			usz start_char = tok_start - lo.entries[start_line];
 			usz delta_line = start_line - prev_line;
 			usz delta_start_char = delta_line == 0 ? start_char - prev_start_char : start_char;
 
@@ -109,7 +103,7 @@ fn void encode_semantic_tokens(String content, DString* out)
 				}
 				else
 				{
-					seg_start = lo.offsets[ln];
+					seg_start = lo.entries[ln];
 				}
 
 				if (ln == end_line)
@@ -119,7 +113,7 @@ fn void encode_semantic_tokens(String content, DString* out)
 				else
 				{
 					// End at the newline (or next line's offset)
-					seg_end = ln + 1 < lo.count ? lo.offsets[ln + 1] : tok_end;
+					seg_end = ln + 1 < lo.size ? lo.entries[ln + 1] : tok_end;
 					// Don't include the newline character itself
 					if (seg_end > seg_start && seg_end <= content.len && content[seg_end - 1] == '\n')
 					{
@@ -133,7 +127,7 @@ fn void encode_semantic_tokens(String content, DString* out)
 
 				if (seg_end <= seg_start) continue;
 
-				usz seg_char = seg_start - lo.offsets[ln];
+				usz seg_char = seg_start - lo.entries[ln];
 				usz seg_len = seg_end - seg_start;
 				usz delta_line = ln - prev_line;
 				usz delta_start_char = delta_line == 0 ? seg_char - prev_start_char : seg_char;

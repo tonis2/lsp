@@ -8,9 +8,10 @@ import c3::lexer;
 
 fn void encode_hover(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, DString* out)
 {
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
 
 	Lexer lex;
 	lex.init(content);
@@ -55,10 +56,10 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 
 					if (doc.str_view().len > 0)
 					{
-						usz line = find_line(lo, tok.offset);
-						usz start_char = tok.offset - lo.offsets[line];
-						usz end_line = find_line(lo, tok_end > 0 ? tok_end - 1 : 0);
-						usz end_char = tok_end - lo.offsets[end_line];
+						usz line = find_line(&lo, tok.offset);
+						usz start_char = tok.offset - lo.entries[line];
+						usz end_line = find_line(&lo, tok_end > 0 ? tok_end - 1 : 0);
+						usz end_char = tok_end - lo.entries[end_line];
 
 						out.append(`{"contents":{"kind":"markdown","value":"`);
 						json_escape_into(out, doc.str_view());
@@ -71,10 +72,10 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 				String desc = get_token_description(tok.type, tok.text);
 				if (desc.len == 0) return;
 
-				usz line = find_line(lo, tok.offset);
-				usz start_char = tok.offset - lo.offsets[line];
-				usz end_line = find_line(lo, tok_end > 0 ? tok_end - 1 : 0);
-				usz end_char = tok_end - lo.offsets[end_line];
+				usz line = find_line(&lo, tok.offset);
+				usz start_char = tok.offset - lo.entries[line];
+				usz end_line = find_line(&lo, tok_end > 0 ? tok_end - 1 : 0);
+				usz end_char = tok_end - lo.entries[end_line];
 
 				out.append(`{"contents":{"kind":"markdown","value":"`);
 				json_escape_into(out, desc);

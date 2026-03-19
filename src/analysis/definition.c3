@@ -214,12 +214,13 @@ fn bool find_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
 // Build a Location JSON for a token found in a file.
 fn void emit_location(String uri, String content, Token tok, DString* out)
 {
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
 
-	usz line = find_line(lo, tok.offset);
-	usz col = tok.offset - lo.offsets[line];
+	usz line = find_line(&lo, tok.offset);
+	usz col = tok.offset - lo.entries[line];
 	usz end_col = col + tok.len;
 
 	out.append(`{"uri":"`);

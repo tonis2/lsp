@@ -8,9 +8,10 @@ const usz MAX_LOOKAHEAD = 64;
 
 fn void encode_document_symbols(String content, DString* out)
 {
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
 
 	TokenList tokens;
 	tokens.init(mem);
@@ -186,13 +187,13 @@ fn void encode_document_symbols(String content, DString* out)
 		}
 
 		// Build range and selectionRange using line offsets
-		usz decl_line = find_line(lo, decl_offset);
-		usz decl_char = decl_offset - lo.offsets[decl_line];
-		usz end_line = find_line(lo, end_offset > 0 ? end_offset - 1 : 0);
-		usz end_char = (end_offset > 0 ? end_offset : 1) - lo.offsets[end_line];
+		usz decl_line = find_line(&lo, decl_offset);
+		usz decl_char = decl_offset - lo.entries[decl_line];
+		usz end_line = find_line(&lo, end_offset > 0 ? end_offset - 1 : 0);
+		usz end_char = (end_offset > 0 ? end_offset : 1) - lo.entries[end_line];
 
-		usz sel_line = find_line(lo, name_offset);
-		usz sel_char = name_offset - lo.offsets[sel_line];
+		usz sel_line = find_line(&lo, name_offset);
+		usz sel_char = name_offset - lo.entries[sel_line];
 		usz sel_end_line = sel_line;
 		usz sel_end_char = sel_char + name_len;
 
