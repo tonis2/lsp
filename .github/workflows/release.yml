@@ -69,10 +69,7 @@ jobs:
       - name: Install C3 Compiler
         run: |
           curl -L -o /tmp/c3-macos.zip "https://github.com/c3lang/c3c/releases/download/${{ env.C3_VERSION }}/c3-macos.zip"
-          mkdir -p "$HOME/c3"
-          unzip -o /tmp/c3-macos.zip -d "$HOME/c3-tmp"
-          mv "$HOME/c3-tmp"/c3-macos/* "$HOME/c3/"
-          rm -rf "$HOME/c3-tmp" /tmp/c3-macos.zip
+          unzip -o /tmp/c3-macos.zip -d "$HOME"
           echo "$HOME/c3" >> "$GITHUB_PATH"
 
       - name: Build macOS aarch64
