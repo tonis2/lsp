@@ -2,6 +2,8 @@ module lsp;
 
 import std::io;
 
+const String VERSION = "0.1.0";
+
 // Extracts the value from a CLI argument.
 // For --flag=value, returns the part after '='.
 // For --flag value, returns args[i+1] if available.
@@ -25,6 +27,10 @@ fn int main(String[] args) {
 
 	// Parse CLI arguments (supports both --flag=value and --flag value)
 	for (usz i = 1; i < args.len; i++) {
+		if (args[i] == "--version") {
+			io::printfn("%s", VERSION);
+			return 0;
+		}
 		String val = get_arg_value(args, i);
 		if (args[i].starts_with("--stdlib-path")) {
 			if (val.len > 0) { stdlib_path = val; }

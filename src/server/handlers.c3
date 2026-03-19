@@ -65,7 +65,7 @@ fn void handle_initialize(LspServer* server, Object* msg, String id_json)
 	result.append(`"renameProvider":true,`);
 	result.append(`"signatureHelpProvider":{"triggerCharacters":["(",","]}`);
 	result.append(`},`);
-	result.append(`"serverInfo":{"name":"c3-lsp","version":"0.1.0"}}`);
+	result.appendf(`"serverInfo":{"name":"c3-lsp","version":"%s"}}`, VERSION);
 
 	send_response(id_json, result.str_view());
 }

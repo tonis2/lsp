@@ -17,6 +17,59 @@ struct ProjectDirs
 	usz count;
 }
 
+// Strip // and /* */ comments from JSON, respecting quoted strings.
+fn String strip_json_comments(String input) @private
+{
+	DString out = dstring::temp();
+	usz i = 0;
+	bool in_string = false;
+	while (i < input.len)
+	{
+		char c = input[i];
+		if (in_string)
+		{
+			if (c == '\\' && i + 1 < input.len)
+			{
+				out.append_char(c);
+				out.append_char(input[i + 1]);
+				i += 2;
+				continue;
+			}
+			if (c == '"') in_string = false;
+			out.append_char(c);
+			i++;
+		}
+		else
+		{
+			if (c == '"')
+			{
+				in_string = true;
+				out.append_char(c);
+				i++;
+			}
+			else if (c == '/' && i + 1 < input.len && input[i + 1] == '/')
+			{
+				// Skip to end of line
+				i += 2;
+				while (i < input.len && input[i] != '\n') i++;
+			}
+			else if (c == '/' && i + 1 < input.len && input[i + 1] == '*')
+			{
+				// Skip to */
+				i += 2;
+				while (i + 1 < input.len && !(input[i] == '*' && input[i + 1] == '/')) i++;
+				if (i + 1 < input.len) i += 2; // skip */
+			}
+			else
+			{
+				out.append_char(c);
+				i++;
+			}
+		}
+	}
+	return out.str_view();
+}
+
 // Extract a directory from a source path and add it to search dirs.
 // Handles globs ("src/**"), individual files ("./helpers/context.c3"), and plain dirs ("src").
 fn void add_source_dir(String src, ProjectDirs* result) @private
@@ -95,7 +148,8 @@ fn void get_project_search_dirs(String file_path, ProjectDirs* result)
 	if (try data = project_json_data)
 	{
 		defer mem::free(data);
-		if (try pjson = json::tparse_string((String)data))
+		String clean_json = strip_json_comments((String)data);
+		if (try pjson = json::tparse_string(clean_json))
 		{
 			if (try deps = pjson.get("dependency-search-paths"))
 			{

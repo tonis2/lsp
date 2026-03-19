@@ -215,6 +215,33 @@ fn void test_definition_method_call_alias_resolved() @test {
 	ds.close("file:///base.c3");
 }
 
+fn void test_strip_json_comments_line() @test {
+	String input = `{"key": "value" // this is a comment
+}`;
+	String result = strip_json_comments(input);
+	assert(result.contains(`"key": "value"`), "got: %s", result);
+	assert(!result.contains("//"), "got: %s", result);
+	assert(!result.contains("this is a comment"), "got: %s", result);
+}
+
+fn void test_strip_json_comments_block() @test {
+	String input = `{"key": /* block comment */ "value"}`;
+	String result = strip_json_comments(input);
+	assert(result == `{"key":  "value"}`, "got: %s", result);
+}
+
+fn void test_strip_json_comments_preserves_strings() @test {
+	String input = `{"url": "http://example.com"}`;
+	String result = strip_json_comments(input);
+	assert(result == input, "got: %s", result);
+}
+
+fn void test_strip_json_comments_no_comments() @test {
+	String input = `{"sources": ["src", "lib"]}`;
+	String result = strip_json_comments(input);
+	assert(result == input, "got: %s", result);
+}
+
 fn void test_definition_at_ident_macro() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);
