@@ -239,41 +239,75 @@ fn void publish_compiler_diagnostics(LspServer* server, String uri)
 // Check if a filesystem path matches a file:// URI.
 // Compares from the end to handle symlink prefix differences
 // (e.g. /home/user vs /var/home/user).
+// Treats / and \ as equivalent (file_path may use \ on Windows).
 fn bool path_matches_uri(String file_path, String uri) @private
 {
 	String uri_path = uri_to_path(uri);
 	if (file_path == uri_path) return true;
 	if (file_path.len == 0 || uri_path.len == 0) return false;
 
-	// Count matching characters from the end
+	// Count matching characters from the end, treating / and \ as equal
 	usz fi = file_path.len;
 	usz ui = uri_path.len;
-	while (fi > 0 && ui > 0 && file_path[fi - 1] == uri_path[ui - 1])
+	while (fi > 0 && ui > 0)
 	{
-		fi--;
-		ui--;
+		char fc = file_path[fi - 1];
+		char uc = uri_path[ui - 1];
+		if (fc == uc || (is_path_separator(fc) && is_path_separator(uc)))
+		{
+			fi--;
+			ui--;
+		}
+		else
+		{
+			break;
+		}
 	}
 	usz matched = file_path.len - fi;
 	if (matched == 0) return false;
 
-	// The divergence point must be at a '/' boundary in both paths
-	if (fi != 0 && file_path[fi] != '/') return false;
-	if (ui != 0 && uri_path[ui] != '/') return false;
+	// The divergence point must be at a separator boundary in both paths
+	if (fi != 0 && !is_path_separator(file_path[fi])) return false;
+	if (ui != 0 && !is_path_separator(uri_path[ui])) return false;
 
-	// The matched suffix must contain at least one '/' (filename + directory)
+	// The matched suffix must contain at least one separator (filename + directory)
 	for (usz k = fi; k < file_path.len; k++)
 	{
-		if (file_path[k] == '/') return true;
+		if (is_path_separator(file_path[k])) return true;
 	}
 	return false;
 }
 
+// Append a file:// URI for a filesystem path to a DString.
+// For Windows drive-letter paths (C:/foo), uses file:///C:/foo.
+// For Unix paths (/home/foo), uses file:///home/foo (file:// + /home/foo).
+fn void append_file_uri(DString* out, String path)
+{
+	if (is_windows_drive_path(path))
+	{
+		out.append("file:///");
+	}
+	else
+	{
+		out.append("file://");
+	}
+	out.append(path);
+}
+
 // Convert file:// URI to filesystem path.
+// On Windows, file:///C:/foo -> C:/foo (strips the leading / before drive letter).
+// On Unix, file:///home/foo -> /home/foo (unchanged).
 fn String uri_to_path(String uri)
 {
 	if (uri.starts_with("file:///"))
 	{
-		return uri[7..]; // "file:///path" -> "/path"
+		String result = uri[7..]; // "file:///path" -> "/path"
+		// Strip leading / before Windows drive letter: /C:/foo -> C:/foo
+		if (result.len >= 3 && is_windows_drive_path(result[1..]))
+		{
+			return result[1..];
+		}
+		return result;
 	}
 	if (uri.starts_with("file://"))
 	{

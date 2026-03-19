@@ -293,7 +293,7 @@ fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name
 				tokenize_content(content, &tokens);
 
 				DString uri = dstring::temp();
-				uri.appendf("file://%s", full_path);
+				append_file_uri(&uri, full_path);
 				collect_rename_edits(uri.str_view(), content, &tokens, target, new_name, out, first_uri);
 
 				tokens.free();
@@ -371,7 +371,7 @@ fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, boo
 				tokenize_content(content, &tokens);
 
 				DString uri = dstring::temp();
-				uri.appendf("file://%s", full_path);
+				append_file_uri(&uri, full_path);
 				collect_refs_in_tokens(uri.str_view(), content, &tokens, target, out, first);
 
 				tokens.free();

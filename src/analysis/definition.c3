@@ -28,7 +28,7 @@ fn void add_source_dir(String src, ProjectDirs* result) @private
 	{
 		if (src[j] == '*') { dir_end = j; break; }
 	}
-	if (dir_end > 0 && src[dir_end - 1] == '/') dir_end--;
+	if (dir_end > 0 && is_path_separator(src[dir_end - 1])) dir_end--;
 
 	// If path ends with .c3 or .c3i, extract the parent directory
 	if (dir_end >= 3)
@@ -36,12 +36,12 @@ fn void add_source_dir(String src, ProjectDirs* result) @private
 		String s = src[:dir_end];
 		if (s.ends_with(".c3") || s.ends_with(".c3i"))
 		{
-			// Find last '/'
+			// Find last separator
 			usz last_slash = 0;
 			bool found_slash = false;
 			for (usz j = s.len; j > 0; j--)
 			{
-				if (s[j - 1] == '/') { last_slash = j - 1; found_slash = true; break; }
+				if (is_path_separator(s[j - 1])) { last_slash = j - 1; found_slash = true; break; }
 			}
 			if (found_slash && last_slash > 0)
 			{
@@ -78,7 +78,7 @@ fn void get_project_search_dirs(String file_path, ProjectDirs* result)
 	char[]? project_json_data;
 	for (int depth = 0; depth < 10; depth++)
 	{
-		if (check_dir.len == 0 || check_dir == "/") break;
+		if (check_dir.len == 0 || check_dir == "/" || (is_windows_drive_path(check_dir) && check_dir.len == 3)) break;
 		DString pj = dstring::temp();
 		pj.appendf("%s/project.json", check_dir);
 		if (try data = file::load(mem, pj.str_view()))
@@ -701,7 +701,7 @@ fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int dept
 				{
 					// Build file:// URI from path
 					DString uri = dstring::temp();
-					uri.appendf("file://%s", full_path);
+					append_file_uri(&uri, full_path);
 					emit_location(uri.str_view(), content, tokens.entries[found], out);
 					tokens.free();
 					mem::free(file_content);
@@ -727,14 +727,16 @@ fn String parent_dir(String path) @private
 {
 	if (path.len == 0) return "";
 	usz end = path.len;
-	// Remove trailing slash
-	if (end > 1 && path[end - 1] == '/') end--;
-	// Find last slash
-	while (end > 0 && path[end - 1] != '/')
+	// Remove trailing separator
+	if (end > 1 && is_path_separator(path[end - 1])) end--;
+	// Find last separator
+	while (end > 0 && !is_path_separator(path[end - 1]))
 	{
 		end--;
 	}
 	if (end == 0) return "";
 	if (end == 1) return "/";
+	// Don't strip the trailing / from a drive root like C:/
+	if (end == 3 && is_windows_drive_path(path)) return path[:3];
 	return path[:end - 1];
 }

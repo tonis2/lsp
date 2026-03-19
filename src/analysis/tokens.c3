@@ -67,6 +67,21 @@ fn SemanticCategory map_token_type(TokenType t)
 	}
 }
 
+// Check if a character is a path separator (/ or \).
+fn bool is_path_separator(char c)
+{
+	return c == '/' || c == '\\';
+}
+
+// Check if a string starts with a Windows drive letter pattern (e.g. "C:/" or "C:\").
+fn bool is_windows_drive_path(String s)
+{
+	if (s.len < 3) return false;
+	char c = s[0];
+	if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) return false;
+	return s[1] == ':' && is_path_separator(s[2]);
+}
+
 // Checks if a token is a base type or type identifier (used for variable declarations).
 fn bool is_type_token(TokenType t)
 {
