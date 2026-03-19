@@ -56,7 +56,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 			else
 			{
 				// This is the opening paren of our call
-				if (i > 0 && tokens.entries[i - 1].type == IDENT)
+				if (i > 0 && is_ident(tokens.entries[i - 1].type))
 				{
 					call_name_idx = i - 1;
 					active_param = comma_count;
@@ -95,7 +95,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 		if (lparen_idx == 0) continue;
 
 		// Check if the IDENT before LPAREN matches
-		if (tokens.entries[lparen_idx - 1].type != IDENT || tokens.entries[lparen_idx - 1].text != fn_name) continue;
+		if (!is_ident(tokens.entries[lparen_idx - 1].type) || tokens.entries[lparen_idx - 1].text != fn_name) continue;
 
 		// Found the declaration. Extract signature from FUNC to closing RPAREN or LBRACE
 		usz sig_start = tokens.entries[i].offset;
@@ -200,7 +200,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 	for (usz i = 0; i + 1 < tokens.size; i++)
 	{
 		if (tokens.entries[i].type != MACRO) continue;
-		if (tokens.entries[i + 1].type != IDENT || tokens.entries[i + 1].text != fn_name) continue;
+		if (!is_ident(tokens.entries[i + 1].type) || tokens.entries[i + 1].text != fn_name) continue;
 		if (i + 2 >= tokens.size || tokens.entries[i + 2].type != LPAREN) continue;
 
 		usz sig_start = tokens.entries[i].offset;

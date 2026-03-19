@@ -20,7 +20,7 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 	if (!find_token_at(&tokens, offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
-	if (ct != IDENT && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
 	LineOffsets* lo = mem::new(LineOffsets);
 	defer mem::free(lo);
@@ -65,7 +65,7 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 	if (!find_token_at(&tokens, offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
-	if (ct != IDENT && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
 	bool first = true;
 	out.append("[");
@@ -148,7 +148,7 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 	}
 
 	TokenType ct = cursor_tok.type;
-	if (ct != IDENT && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
 	bool first_uri = true;
 	out.append(`{"changes":{`);

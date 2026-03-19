@@ -178,7 +178,7 @@ fn String find_variable_type(TokenList* tokens, String var_name) @private
 	for (usz i = 0; i + 1 < tokens.size; i++)
 	{
 		if (tokens.entries[i].type == TYPE_IDENT &&
-			tokens.entries[i + 1].type == IDENT && tokens.entries[i + 1].text == var_name)
+			is_ident(tokens.entries[i + 1].type) && tokens.entries[i + 1].text == var_name)
 		{
 			if (i + 2 < tokens.size)
 			{
@@ -300,6 +300,31 @@ fn String resolve_alias_in_project(String file_path, String type_name) @private
 	return "";
 }
 
+// Detect method call context (IDENT DOT IDENT) and resolve the receiver type.
+// Returns the resolved type name (e.g. "List"), or empty string if not a method call.
+fn String resolve_method_type(TokenList* tokens, usz cursor_idx, String uri, DocumentList* docs)
+{
+	if (cursor_idx < 2) return "";
+	if (tokens.entries[cursor_idx - 1].type != DOT) return "";
+	if (!is_ident(tokens.entries[cursor_idx - 2].type)) return "";
+
+	String receiver_name = tokens.entries[cursor_idx - 2].text;
+	String type_name = find_variable_type(tokens, receiver_name);
+	if (type_name.len == 0) return "";
+
+	String resolved = resolve_type_alias_across(tokens, type_name, docs);
+	if (resolved.len == 0)
+	{
+		String file_path = uri_to_path(uri);
+		if (file_path.len > 0)
+		{
+			resolved = resolve_alias_in_project(file_path, type_name);
+		}
+	}
+	if (resolved.len > 0 && resolved != type_name) return resolved;
+	return type_name;
+}
+
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
 // Returns true if a definition was found and emitted.
 fn bool try_find_definition(
@@ -372,46 +397,19 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 
 	// Only navigate for identifier-like tokens
 	TokenType ct = cursor_tok.type;
-	if (ct != IDENT && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
 	// Method call resolution: variable.method(
-	if (ct == IDENT && cursor_idx >= 2 &&
-		tokens.entries[cursor_idx - 1].type == DOT &&
-		tokens.entries[cursor_idx - 2].type == IDENT)
+	if (is_ident(ct))
 	{
-		String receiver_name = tokens.entries[cursor_idx - 2].text;
-		String type_name = find_variable_type(&tokens, receiver_name);
-		if (type_name.len > 0)
+		String method_type = resolve_method_type(&tokens, cursor_idx, uri, docs);
+		if (method_type.len > 0)
 		{
-			// Resolve alias FIRST (cheap: current file + open docs)
-			String resolved = resolve_type_alias_across(&tokens, type_name, docs);
-
-			// If not found in open docs, scan project files for alias
-			if (resolved.len == 0)
-			{
-				String file_path = uri_to_path(uri);
-				if (file_path.len > 0)
-				{
-					resolved = resolve_alias_in_project(file_path, type_name);
-				}
-			}
-
-			// Search with resolved alias type first (most likely to succeed)
-			if (resolved.len > 0 && resolved != type_name)
-			{
-				if (try_find_definition(&tokens, cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, resolved))
-				{
-					return;
-				}
-			}
-
-			// Fallback: try direct type name
-			if (try_find_definition(&tokens, cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, type_name))
+			if (try_find_definition(&tokens, cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type))
 			{
 				return;
 			}
 		}
-		// Fall through to regular search if method resolution failed
 	}
 
 	// Regular search (non-method)
@@ -484,18 +482,19 @@ fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String 
 				}
 			}
 		case IDENT:
+		case AT_IDENT:
 			if (method_type.len > 0)
 			{
 				// Search for fn ... Type.method( pattern only
 				for (usz i = 0; i < tokens.size; i++)
 				{
-					if (tokens.entries[i].type != FUNC) continue;
+					if (tokens.entries[i].type != FUNC && tokens.entries[i].type != MACRO) continue;
 					for (usz j = i + 1; j < tokens.size && j < i + 64; j++)
 					{
 						if (tokens.entries[j].type == LPAREN)
 						{
 							if (j >= 3 &&
-								tokens.entries[j - 1].type == IDENT && tokens.entries[j - 1].text == name &&
+								is_ident(tokens.entries[j - 1].type) && tokens.entries[j - 1].text == name &&
 								tokens.entries[j - 2].type == DOT &&
 								tokens.entries[j - 3].type == TYPE_IDENT && tokens.entries[j - 3].text == method_type)
 							{
@@ -508,15 +507,15 @@ fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String 
 				}
 				return tokens.size;
 			}
-			// fn ... name(
+			// fn ... name( or macro ... name(
 			for (usz i = 0; i < tokens.size; i++)
 			{
-				if (tokens.entries[i].type != FUNC) continue;
+				if (tokens.entries[i].type != FUNC && tokens.entries[i].type != MACRO) continue;
 				for (usz j = i + 1; j < tokens.size && j < i + 64; j++)
 				{
 					if (tokens.entries[j].type == LPAREN)
 					{
-						if (j > 0 && tokens.entries[j - 1].type == IDENT && tokens.entries[j - 1].text == name)
+						if (j > 0 && is_ident(tokens.entries[j - 1].type) && tokens.entries[j - 1].text == name)
 						{
 							return j - 1;
 						}
@@ -525,10 +524,10 @@ fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String 
 					if (tokens.entries[j].type == LBRACE || tokens.entries[j].type == EOS) break;
 				}
 			}
-			// macro name
+			// macro name (no parens)
 			for (usz i = 0; i + 1 < tokens.size; i++)
 			{
-				if (tokens.entries[i].type == MACRO && tokens.entries[i + 1].type == IDENT && tokens.entries[i + 1].text == name)
+				if (tokens.entries[i].type == MACRO && is_ident(tokens.entries[i + 1].type) && tokens.entries[i + 1].text == name)
 				{
 					return i + 1;
 				}
@@ -536,7 +535,7 @@ fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String 
 			// type IDENT = ...
 			for (usz i = 0; i + 1 < tokens.size; i++)
 			{
-				if (is_type_token(tokens.entries[i].type) && tokens.entries[i + 1].type == IDENT && tokens.entries[i + 1].text == name)
+				if (is_type_token(tokens.entries[i].type) && is_ident(tokens.entries[i + 1].type) && tokens.entries[i + 1].text == name)
 				{
 					if (i + 2 < tokens.size)
 					{

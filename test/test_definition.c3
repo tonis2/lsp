@@ -190,3 +190,15 @@ fn void test_definition_method_call_alias_resolved() @test {
 	ds.close("file:///types.c3");
 	ds.close("file:///base.c3");
 }
+
+fn void test_definition_at_ident_macro() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "macro @upload(mgr, comp, val) {}\n@upload(m, c, v);";
+	// Cursor on "@upload" in the call at offset 33
+	encode_definition("file:///test.c3", content, 33, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":6`), "got: %s", result);
+}

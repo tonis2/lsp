@@ -7,6 +7,15 @@ import std::time;
 
 const TOKEN_TYPES_LEGEND = `["namespace","type","enum","struct","variable","function","macro","keyword","decorator","comment","string","number","operator","enumMember"]`;
 
+fn usz position_to_offset(String content, int line, int character)
+{
+	LineOffsets* lo = mem::new(LineOffsets);
+	defer mem::free(lo);
+	build_line_offsets(content, lo);
+	if ((usz)line < lo.count) return lo.offsets[(usz)line] + (usz)character;
+	return 0;
+}
+
 fn void handle_initialize(LspServer* server, Object* msg, String id_json)
 {
 	server.initialized = true;
@@ -204,15 +213,7 @@ fn void handle_hover(LspServer* server, Object* msg, String id_json)
 	int line = pos.get_int("line") ?? 0;
 	int character = pos.get_int("character") ?? 0;
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(doc.content, lo);
-
-	usz offset = 0;
-	if ((usz)line < lo.count)
-	{
-		offset = lo.offsets[(usz)line] + (usz)character;
-	}
+	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
 	encode_hover(uri, doc.content, offset, &server.documents, server.stdlib_path, &data);
@@ -243,15 +244,7 @@ fn void handle_completion(LspServer* server, Object* msg, String id_json)
 	int line = pos.get_int("line") ?? 0;
 	int character = pos.get_int("character") ?? 0;
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(doc.content, lo);
-
-	usz offset = 0;
-	if ((usz)line < lo.count)
-	{
-		offset = lo.offsets[(usz)line] + (usz)character;
-	}
+	usz offset = position_to_offset(doc.content, line, character);
 	if (offset > doc.content.len)
 	{
 		offset = doc.content.len;
@@ -278,15 +271,7 @@ fn void handle_definition(LspServer* server, Object* msg, String id_json)
 	int line = pos.get_int("line") ?? 0;
 	int character = pos.get_int("character") ?? 0;
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(doc.content, lo);
-
-	usz offset = 0;
-	if ((usz)line < lo.count)
-	{
-		offset = lo.offsets[(usz)line] + (usz)character;
-	}
+	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
 	encode_definition(uri, doc.content, offset, &server.documents, server.stdlib_path, &data);
@@ -317,15 +302,7 @@ fn void handle_signature_help(LspServer* server, Object* msg, String id_json)
 	int line = pos.get_int("line") ?? 0;
 	int character = pos.get_int("character") ?? 0;
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(doc.content, lo);
-
-	usz offset = 0;
-	if ((usz)line < lo.count)
-	{
-		offset = lo.offsets[(usz)line] + (usz)character;
-	}
+	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
 	encode_signature_help(doc.content, offset, &data);
@@ -356,15 +333,7 @@ fn void handle_document_highlight(LspServer* server, Object* msg, String id_json
 	int line = pos.get_int("line") ?? 0;
 	int character = pos.get_int("character") ?? 0;
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(doc.content, lo);
-
-	usz offset = 0;
-	if ((usz)line < lo.count)
-	{
-		offset = lo.offsets[(usz)line] + (usz)character;
-	}
+	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
 	encode_document_highlights(doc.content, offset, &data);
@@ -395,15 +364,7 @@ fn void handle_references(LspServer* server, Object* msg, String id_json)
 	int line = pos.get_int("line") ?? 0;
 	int character = pos.get_int("character") ?? 0;
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(doc.content, lo);
-
-	usz offset = 0;
-	if ((usz)line < lo.count)
-	{
-		offset = lo.offsets[(usz)line] + (usz)character;
-	}
+	usz offset = position_to_offset(doc.content, line, character);
 
 	bool include_decl = true;
 	if (try ctx = msg.get("params")!!.get("context"))
@@ -447,15 +408,7 @@ fn void handle_rename(LspServer* server, Object* msg, String id_json)
 		return;
 	}
 
-	LineOffsets* lo = mem::new(LineOffsets);
-	defer mem::free(lo);
-	build_line_offsets(doc.content, lo);
-
-	usz offset = 0;
-	if ((usz)line < lo.count)
-	{
-		offset = lo.offsets[(usz)line] + (usz)character;
-	}
+	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
 	encode_rename(uri, doc.content, offset, &server.documents, server.stdlib_path, new_name, &data);

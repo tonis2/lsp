@@ -124,6 +124,12 @@ fn bool is_type_declaration_keyword(TokenType t)
 	}
 }
 
+// Checks if a token is an identifier (IDENT or AT_IDENT for macro names like @foo).
+fn bool is_ident(TokenType t)
+{
+	return t == IDENT || t == AT_IDENT;
+}
+
 // Returns a human-readable description for a token (used in hover).
 fn String get_token_description(TokenType t, String text)
 {

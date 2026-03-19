@@ -17,7 +17,9 @@ fn void publish_compiler_diagnostics(LspServer* server, String uri)
 	if (path.len == 0) return;
 
 	// Find project root by walking up from file looking for project.json
-	String project_root = find_project_root(path);
+	ProjectDirs pdirs;
+	get_project_search_dirs(path, &pdirs);
+	String project_root = pdirs.project_root;
 
 	// Build command line
 	String[10] cmd;
@@ -232,25 +234,6 @@ fn void publish_compiler_diagnostics(LspServer* server, String uri)
 
 	// Update last diagnostics time
 	server.last_diag_time = time::now();
-}
-
-// Find project root by walking up from a file path looking for project.json.
-fn String find_project_root(String file_path) @private
-{
-	String check_dir = parent_dir(file_path);
-	for (int depth = 0; depth < 10; depth++)
-	{
-		if (check_dir.len == 0 || check_dir == "/") break;
-		DString pj = dstring::temp();
-		pj.appendf("%s/project.json", check_dir);
-		if (try data = file::load(mem, pj.str_view()))
-		{
-			mem::free(data);
-			return check_dir;
-		}
-		check_dir = parent_dir(check_dir);
-	}
-	return "";
 }
 
 // Check if a filesystem path matches a file:// URI.

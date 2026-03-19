@@ -24,12 +24,12 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 			{
 				// For identifiers, try to find the declaration and extract doc comments
 				TokenType ct = tok.type;
-				if (ct == IDENT || ct == TYPE_IDENT || ct == CONST_IDENT)
+				if (is_ident(ct) || ct == TYPE_IDENT || ct == CONST_IDENT)
 				{
 					DString doc = dstring::temp();
 
 					// Detect method call context for hover
-					if (ct == IDENT)
+					if (is_ident(ct))
 					{
 						TokenList hover_tokens;
 						hover_tokens.init(mem);
@@ -38,34 +38,10 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 						usz hover_idx;
 						if (find_token_at(&hover_tokens, offset, &hover_tok, &hover_idx))
 						{
-							if (hover_idx >= 2 &&
-								hover_tokens.entries[hover_idx - 1].type == DOT &&
-								hover_tokens.entries[hover_idx - 2].type == IDENT)
+							String method_type = resolve_method_type(&hover_tokens, hover_idx, uri, docs);
+							if (method_type.len > 0)
 							{
-								String receiver_name = hover_tokens.entries[hover_idx - 2].text;
-								String type_name = find_variable_type(&hover_tokens, receiver_name);
-								if (type_name.len > 0)
-								{
-									// Try resolved alias first (e.g. List for TokenList)
-									String resolved = resolve_type_alias_across(&hover_tokens, type_name, docs);
-									if (resolved.len == 0)
-									{
-										String hover_file_path = uri_to_path(uri);
-										if (hover_file_path.len > 0)
-										{
-											resolved = resolve_alias_in_project(hover_file_path, type_name);
-										}
-									}
-									if (resolved.len > 0 && resolved != type_name)
-									{
-										find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, resolved);
-									}
-									// Try direct type if alias didn't find it
-									if (doc.str_view().len == 0)
-									{
-										find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, type_name);
-									}
-								}
+								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, method_type);
 							}
 						}
 						hover_tokens.free();
@@ -173,95 +149,11 @@ fn bool try_extract_docs_from(String content, Token target, DString* out, String
 	defer tokens.free();
 	tokenize_content(content, &tokens);
 
-	usz decl_idx = find_decl_for_hover(&tokens, target, method_type);
+	usz decl_idx = find_declaration_in(&tokens, target, method_type);
 	if (decl_idx >= tokens.size) return false;
 
 	extract_docs_at(content, &tokens, decl_idx, out);
 	return out.str_view().len > 0;
-}
-
-// Find the declaration index — similar to find_declaration but also checks same-name at cursor.
-// When method_type is non-empty, searches for fn Type.name( pattern only.
-fn usz find_decl_for_hover(TokenList* tokens, Token target, String method_type = "") @private
-{
-	String name = target.text;
-
-	switch (target.type)
-	{
-		case TYPE_IDENT:
-			for (usz i = 0; i + 1 < tokens.size; i++)
-			{
-				if (is_type_declaration_keyword(tokens.entries[i].type))
-				{
-					if (tokens.entries[i + 1].type == TYPE_IDENT && tokens.entries[i + 1].text == name)
-					{
-						return i + 1;
-					}
-				}
-			}
-		case CONST_IDENT:
-			for (usz i = 0; i + 1 < tokens.size; i++)
-			{
-				if (tokens.entries[i].type == CONSTDEF && tokens.entries[i + 1].type == CONST_IDENT && tokens.entries[i + 1].text == name)
-				{
-					return i + 1;
-				}
-			}
-		case IDENT:
-			if (method_type.len > 0)
-			{
-				// Search for fn ... Type.method( pattern only
-				for (usz i = 0; i < tokens.size; i++)
-				{
-					if (tokens.entries[i].type != FUNC) continue;
-					for (usz j = i + 1; j < tokens.size && j < i + 64; j++)
-					{
-						if (tokens.entries[j].type == LPAREN)
-						{
-							if (j >= 3 &&
-								tokens.entries[j - 1].type == IDENT && tokens.entries[j - 1].text == name &&
-								tokens.entries[j - 2].type == DOT &&
-								tokens.entries[j - 3].type == TYPE_IDENT && tokens.entries[j - 3].text == method_type)
-							{
-								return j - 1;
-							}
-							break;
-						}
-						if (tokens.entries[j].type == LBRACE || tokens.entries[j].type == EOS) break;
-					}
-				}
-				return tokens.size;
-			}
-			// fn ... name(
-			for (usz i = 0; i < tokens.size; i++)
-			{
-				if (tokens.entries[i].type != FUNC) continue;
-				for (usz j = i + 1; j < tokens.size && j < i + 64; j++)
-				{
-					if (tokens.entries[j].type == LPAREN)
-					{
-						if (j > 0 && tokens.entries[j - 1].type == IDENT && tokens.entries[j - 1].text == name)
-						{
-							return j - 1;
-						}
-						break;
-					}
-					if (tokens.entries[j].type == LBRACE || tokens.entries[j].type == EOS) break;
-				}
-			}
-			// macro name
-			for (usz i = 0; i + 1 < tokens.size; i++)
-			{
-				if (tokens.entries[i].type == MACRO && tokens.entries[i + 1].type == IDENT && tokens.entries[i + 1].text == name)
-				{
-					return i + 1;
-				}
-			}
-		default:
-			return tokens.size;
-	}
-
-	return tokens.size;
 }
 
 // Extract doc comment and signature from the declaration site.

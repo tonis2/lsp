@@ -71,7 +71,7 @@ fn void encode_document_symbols(String content, DString* out)
 				if (lparen_idx > 0 && lparen_idx > i + 1)
 				{
 					Token fn_name = tokens.entries[lparen_idx - 1];
-					if (fn_name.type == IDENT)
+					if (is_ident(fn_name.type))
 					{
 						// Check for Type.method pattern
 						if (lparen_idx >= 3 + i && tokens.entries[lparen_idx - 2].type == DOT && tokens.entries[lparen_idx - 3].type == TYPE_IDENT)
@@ -135,7 +135,7 @@ fn void encode_document_symbols(String content, DString* out)
 				if (i + 1 < tokens.size)
 				{
 					Token nt = tokens.entries[i + 1];
-					if (nt.type == IDENT || nt.type == TYPE_IDENT)
+					if (is_ident(nt.type) || nt.type == TYPE_IDENT)
 					{
 						name = nt.text;
 						name_offset = nt.offset;
