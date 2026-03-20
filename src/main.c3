@@ -4,6 +4,10 @@ import std::io;
 
 const String VERSION = "0.1.0";
 
+// On Windows, stdin/stdout default to text mode which translates \n <-> \r\n.
+// This corrupts LSP protocol framing, so we must set binary mode before any I/O.
+extern fn int _setmode(int fd, int mode) @if(env::WIN32);
+
 // Extracts the value from a CLI argument.
 // For --flag=value, returns the part after '='.
 // For --flag value, returns args[i+1] if available.
@@ -21,6 +25,11 @@ fn String get_arg_value(String[] args, usz i) @private {
 }
 
 fn int main(String[] args) {
+	$if env::WIN32:
+		_setmode(0, 0x8000); // stdin -> O_BINARY
+		_setmode(1, 0x8000); // stdout -> O_BINARY
+	$endif
+
 	String stdlib_path = "";
 	String compiler_path = "c3c";
 	long diag_delay_ms = 2000; // Default 2 second delay
