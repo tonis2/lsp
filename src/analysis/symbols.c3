@@ -220,7 +220,7 @@ fn usz find_eos_end(TokenList* tokens, usz start) @private
 	return 0;
 }
 
-fn usz find_brace_end(TokenList* tokens, usz start) @private
+fn usz find_brace_end(TokenList* tokens, usz start)
 {
 	usz depth = 0;
 	bool found_brace = false;

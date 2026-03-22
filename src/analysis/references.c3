@@ -133,6 +133,39 @@ fn void collect_refs_in_tokens(String uri, String content, TokenList* tokens, To
 	}
 }
 
+// Returns the byte offset range (start, end) of the function body containing `offset`,
+// or (0, 0) if offset is not inside any function body.
+fn usz[2] find_function_scope(TokenList* tokens, usz offset) @private
+{
+	for (usz i = 0; i < tokens.size; i++)
+	{
+		TokenType tt = tokens.entries[i].type;
+		if (tt == FUNC || tt == MACRO)
+		{
+			usz brace_end = find_brace_end(tokens, i + 1);
+			if (brace_end == 0) continue;
+
+			// Find the opening brace offset
+			usz brace_start = 0;
+			for (usz j = i + 1; j < tokens.size; j++)
+			{
+				if (tokens.entries[j].type == LBRACE)
+				{
+					brace_start = tokens.entries[j].offset;
+					break;
+				}
+			}
+			if (brace_start == 0) continue;
+
+			if (offset >= brace_start && offset < brace_end)
+			{
+				return { brace_start, brace_end };
+			}
+		}
+	}
+	return { 0, 0 };
+}
+
 // Encode rename (cross-file symbol rename).
 // Output: JSON WorkspaceEdit object, or empty string if none.
 fn void encode_rename(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, String new_name, DString* out)
@@ -152,29 +185,41 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
+	// Check if cursor is inside a function body — if so, restrict rename to that scope
+	usz[2] scope = find_function_scope(&tokens, offset);
+
 	bool first_uri = true;
 	out.append(`{"changes":{`);
 
-	// 1. Current file
-	collect_rename_edits(uri, content, &tokens, cursor_tok, new_name, out, &first_uri);
-
-	// 2. Open documents
-	for (usz d = 0; d < docs.size; d++)
+	if (scope[0] != 0 || scope[1] != 0)
 	{
-		if (docs.entries[d].uri == uri) continue;
-
-		TokenList other_tokens;
-		other_tokens.init(mem);
-		tokenize_content(docs.entries[d].content, &other_tokens);
-		collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, &other_tokens, cursor_tok, new_name, out, &first_uri);
-		other_tokens.free();
+		// Local variable — only rename within this function's scope in current file
+		collect_rename_edits_scoped(uri, content, &tokens, cursor_tok, new_name, out, &first_uri, scope[0], scope[1]);
 	}
-
-	// 3. Scan project files on disk (skip stdlib — should not rename stdlib symbols)
-	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
+	else
 	{
-		scan_project_files_rename(file_path, cursor_tok, new_name, out, &first_uri);
+		// Module-level symbol — rename globally across all files
+		// 1. Current file
+		collect_rename_edits(uri, content, &tokens, cursor_tok, new_name, out, &first_uri);
+
+		// 2. Open documents
+		for (usz d = 0; d < docs.size; d++)
+		{
+			if (docs.entries[d].uri == uri) continue;
+
+			TokenList other_tokens;
+			other_tokens.init(mem);
+			tokenize_content(docs.entries[d].content, &other_tokens);
+			collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, &other_tokens, cursor_tok, new_name, out, &first_uri);
+			other_tokens.free();
+		}
+
+		// 3. Scan project files on disk (skip stdlib — should not rename stdlib symbols)
+		String file_path = uri_to_path(uri);
+		if (file_path.len > 0)
+		{
+			scan_project_files_rename(file_path, cursor_tok, new_name, out, &first_uri);
+		}
 	}
 
 	out.append(`}}`);
@@ -198,6 +243,52 @@ fn void collect_rename_edits(String uri, String content, TokenList* tokens, Toke
 
 	foreach (tok : tokens)
 	{
+		if (tok.type == target.type && tok.text == target.text)
+		{
+			if (!found_any)
+			{
+				if (!*first_uri) out.append(",");
+				out.append(`"`);
+				json_escape_into(out, uri);
+				out.append(`":[`);
+				found_any = true;
+			}
+
+			if (!first_edit) out.append(",");
+			first_edit = false;
+
+			usz line = find_line(&lo, tok.offset);
+			usz col = tok.offset - lo.entries[line];
+			usz end_col = col + tok.len;
+
+			out.appendf(`{"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}},"newText":"`, line, col, line, end_col);
+			json_escape_into(out, new_name);
+			out.append(`"}`);
+		}
+	}
+
+	if (found_any)
+	{
+		out.append("]");
+		*first_uri = false;
+	}
+}
+
+// Collect rename edits for matching tokens within a specific offset range in a single file.
+fn void collect_rename_edits_scoped(String uri, String content, TokenList* tokens, Token target,
+	String new_name, DString* out, bool* first_uri, usz scope_start, usz scope_end) @private
+{
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	build_line_offsets(content, &lo);
+
+	bool found_any = false;
+	bool first_edit = true;
+
+	foreach (tok : tokens)
+	{
+		if (tok.offset < scope_start || tok.offset >= scope_end) continue;
 		if (tok.type == target.type && tok.text == target.text)
 		{
 			if (!found_any)

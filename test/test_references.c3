@@ -240,3 +240,66 @@ fn void test_rename_correct_ranges() @test {
 	// Second foo: char 16-19
 	assert(result.contains(`"start":{"line":0,"character":16},"end":{"line":0,"character":19}`), "got: %s", result);
 }
+
+// --- Scoped Rename tests ---
+
+fn void test_rename_local_var_scoped() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Two functions each with a local variable "x"
+	String content = `fn void foo() { int x = 1; x = 2; }
+fn void bar() { int x = 3; x = 4; }`;
+	// Cursor on "x" inside foo() — offset of first "x" after "int "
+	// "fn void foo() { int " = 20 chars, so x is at offset 20
+	encode_rename("file:///test.c3", content, 20, ds, "", "y", &out);
+	String result = out.str_view();
+	assert(result.contains(`"newText":"y"`), "expected rename edits, got: %s", result);
+	// Should have exactly 2 edits (the two x's in foo), not 4
+	int count = 0;
+	usz pos = 0;
+	while (pos < result.len) {
+		if (try found = result[pos..].index_of(`"newText"`)) {
+			count++;
+			pos = pos + found + 1;
+		} else {
+			break;
+		}
+	}
+	assert(count == 2, "expected 2 edits (only in foo), got %d: %s", count, result);
+}
+
+fn void test_rename_local_var_no_cross_file() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Other file also has "x"
+	ds.open("file:///other.c3", "fn void baz() { int x = 5; }", 1);
+
+	String content = `fn void foo() { int x = 1; }`;
+	// Cursor on "x" inside foo() at offset 20
+	encode_rename("file:///test.c3", content, 20, ds, "", "y", &out);
+	String result = out.str_view();
+	assert(result.contains(`file:///test.c3`), "got: %s", result);
+	// Should NOT contain edits for the other file
+	assert(!result.contains(`file:///other.c3`), "should not rename in other file, got: %s", result);
+
+	ds.close("file:///other.c3");
+}
+
+fn void test_rename_module_level_still_global() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///other.c3", "fn void greet() { hello(); }", 1);
+
+	// "hello" at offset 8 is the function name — module level
+	String content = "fn void hello() {}\nhello();";
+	encode_rename("file:///test.c3", content, 8, ds, "", "goodbye", &out);
+	String result = out.str_view();
+	// Should still rename across files for module-level symbols
+	assert(result.contains(`file:///test.c3`), "got: %s", result);
+	assert(result.contains(`file:///other.c3`), "got: %s", result);
+
+	ds.close("file:///other.c3");
+}
