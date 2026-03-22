@@ -250,7 +250,7 @@ fn void bar() { int x = 3; x = 4; }`;
 		ds.close("file:///other.c3");
 	}
 
-	// Function parameter: rename in signature + body, not in other functions
+	// Function parameter (single line): rename in signature + body
 	{
 		DString out = dstring::temp();
 		String src = `fn void update(String content, int version) { io::printfn(content); }
@@ -259,6 +259,51 @@ fn void other() { String content = "x"; }`;
 		String r = out.str_view();
 		assert(r.contains(`"newText":"text"`), "param: got: %s", r);
 		assert(count_occurrences(r, `"newText"`) == 2, "param: expected 2 edits, got: %s", r);
+	}
+
+	// Function parameter with cursor at end-of-word (offset on comma after param name)
+	// This is what VS Code sends when you press F2 on a word
+	{
+		DString out = dstring::temp();
+		String src = `fn void update(String content, int version) { io::printfn(content); }
+fn void other() { String content = "x"; }`;
+		// "content" is at offset 22, length 7, so offset 29 is the comma after it
+		encode_rename("file:///test.c3", src, 29, ds, "", "text", &out);
+		String r = out.str_view();
+		assert(r.contains(`"newText":"text"`), "param_end: got: %s", r);
+		assert(count_occurrences(r, `"newText"`) == 2, "param_end: expected 2 edits, got: %s", r);
+	}
+
+	// Function parameter (multiline, brace on next line): rename param + all body usages
+	{
+		DString out = dstring::temp();
+		String src = `fn void handle_semantic_tokens(LspServer* server, Object* msg, String id_json)
+{
+    Document* doc = server.documents.find(uri);
+    server.running = true;
+}`;
+		// "server" param at offset 42
+		encode_rename("file:///test.c3", src, 42, ds, "", "srv", &out);
+		String r = out.str_view();
+		assert(r.len > 0, "multiline_param: expected result, got empty");
+		assert(r.contains(`"newText":"srv"`), "multiline_param: got: %s", r);
+		assert(count_occurrences(r, `"newText"`) == 3, "multiline_param: expected 3 edits (param + 2 body), got: %s", r);
+	}
+
+	// Multiline param with cursor at end-of-word (comma after "server")
+	{
+		DString out = dstring::temp();
+		String src = `fn void handle_semantic_tokens(LspServer* server, Object* msg, String id_json)
+{
+    Document* doc = server.documents.find(uri);
+    server.running = true;
+}`;
+		// "server" at offset 42, length 6, so offset 48 is the comma
+		encode_rename("file:///test.c3", src, 48, ds, "", "srv", &out);
+		String r = out.str_view();
+		assert(r.len > 0, "multiline_param_end: expected result, got empty");
+		assert(r.contains(`"newText":"srv"`), "multiline_param_end: got: %s", r);
+		assert(count_occurrences(r, `"newText"`) == 3, "multiline_param_end: expected 3 edits, got: %s", r);
 	}
 
 	// Module-level symbol: still renames globally across files

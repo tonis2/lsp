@@ -191,7 +191,7 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!find_token_at(&tokens, offset, &cursor_tok, &cursor_idx))
+	if (!find_ident_token_at(&tokens, offset, &cursor_tok, &cursor_idx))
 	{
 		return;
 	}

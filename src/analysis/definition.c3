@@ -248,6 +248,7 @@ fn bool find_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
 		}
 	}
 	// Retry with offset-1: cursor may be right after the token end
+	// (editors place the cursor at one-past-the-end of a word)
 	if (offset > 0)
 	{
 		usz adj = offset - 1;
@@ -263,6 +264,62 @@ fn bool find_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
 		}
 	}
 	return false;
+}
+
+// Like find_token_at, but if the token at offset is a single-char punctuation
+// (comma, paren, etc.), prefer the adjacent identifier token instead.
+// This handles the case where editors place the cursor right after a word,
+// landing on the following punctuation.
+fn bool find_ident_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
+{
+	Token tok;
+	usz tok_idx;
+	if (!find_token_at(tokens, offset, &tok, &tok_idx)) return false;
+
+	// If we found an identifier-like token, use it directly
+	if (is_ident(tok.type) || tok.type == TYPE_IDENT || tok.type == CONST_IDENT)
+	{
+		*result = tok;
+		*idx = tok_idx;
+		return true;
+	}
+
+	// Found punctuation — try offset-1 to find the preceding identifier
+	if (offset > 0)
+	{
+		Token prev;
+		usz prev_idx;
+		if (find_token_at(tokens, offset - 1, &prev, &prev_idx))
+		{
+			if (is_ident(prev.type) || prev.type == TYPE_IDENT || prev.type == CONST_IDENT)
+			{
+				*result = prev;
+				*idx = prev_idx;
+				return true;
+			}
+		}
+	}
+
+	// Also try offset+1 for when cursor is on space before a word
+	if (offset + 1 < tokens.entries[tokens.size - 1].offset + tokens.entries[tokens.size - 1].len)
+	{
+		Token next;
+		usz next_idx;
+		if (find_token_at(tokens, offset + 1, &next, &next_idx))
+		{
+			if (is_ident(next.type) || next.type == TYPE_IDENT || next.type == CONST_IDENT)
+			{
+				*result = next;
+				*idx = next_idx;
+				return true;
+			}
+		}
+	}
+
+	// Fall back to original token
+	*result = tok;
+	*idx = tok_idx;
+	return true;
 }
 
 // Build a Location JSON for a token found in a file.
