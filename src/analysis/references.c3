@@ -133,8 +133,10 @@ fn void collect_refs_in_tokens(String uri, String content, TokenList* tokens, To
 	}
 }
 
-// Returns the byte offset range (start, end) of the function body containing `offset`,
-// or (0, 0) if offset is not inside any function body.
+// Returns the byte offset range (start, end) of the function scope containing `offset`,
+// or (0, 0) if offset is not inside any function.
+// The scope includes the parameter list so that renaming a parameter also covers
+// its occurrences in the function body.
 fn usz[2] find_function_scope(TokenList* tokens, usz offset) @private
 {
 	for (usz i = 0; i < tokens.size; i++)
@@ -145,10 +147,15 @@ fn usz[2] find_function_scope(TokenList* tokens, usz offset) @private
 			usz brace_end = find_brace_end(tokens, i + 1);
 			if (brace_end == 0) continue;
 
-			// Find the opening brace offset
+			// Find the opening paren and brace offsets
+			usz paren_start = 0;
 			usz brace_start = 0;
 			for (usz j = i + 1; j < tokens.size; j++)
 			{
+				if (paren_start == 0 && tokens.entries[j].type == LPAREN)
+				{
+					paren_start = tokens.entries[j].offset;
+				}
 				if (tokens.entries[j].type == LBRACE)
 				{
 					brace_start = tokens.entries[j].offset;
@@ -157,9 +164,16 @@ fn usz[2] find_function_scope(TokenList* tokens, usz offset) @private
 			}
 			if (brace_start == 0) continue;
 
+			// Cursor inside function body
 			if (offset >= brace_start && offset < brace_end)
 			{
 				return { brace_start, brace_end };
+			}
+
+			// Cursor inside parameter list — scope covers params + body
+			if (paren_start != 0 && offset >= paren_start && offset < brace_start)
+			{
+				return { paren_start, brace_end };
 			}
 		}
 	}

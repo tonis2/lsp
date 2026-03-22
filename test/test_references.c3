@@ -160,146 +160,115 @@ fn void test_references_type_ident() @test {
 
 // --- Rename tests ---
 
-fn void test_rename_same_file() @test {
-	DString out = dstring::temp();
-	DocumentList* ds = mem::new(DocumentList);
-	defer mem::free(ds);
-	String content = "fn void hello() {}\nhello();\nhello();";
-	// Cursor on "hello" at offset 8
-	encode_rename("file:///test.c3", content, 8, ds, "", "world", &out);
-	String result = out.str_view();
-	assert(result.contains(`"changes"`), "expected changes, got: %s", result);
-	assert(result.contains(`"newText":"world"`), "expected newText, got: %s", result);
-	// Should have 3 edits (decl + 2 calls)
+fn int count_occurrences(String haystack, String needle) @private {
 	int count = 0;
 	usz pos = 0;
-	while (pos < result.len) {
-		if (try found = result[pos..].index_of(`"newText"`)) {
+	while (pos < haystack.len) {
+		if (try found = haystack[pos..].index_of(needle)) {
 			count++;
 			pos = pos + found + 1;
 		} else {
 			break;
 		}
 	}
-	assert(count == 3, "expected 3 edits, got %d: %s", count, result);
+	return count;
 }
 
-fn void test_rename_cross_file() @test {
-	DString out = dstring::temp();
+fn void test_rename() @test {
 	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
-	ds.open("file:///other.c3", "fn void greet() { hello(); }", 1);
 
-	String content = "fn void hello() {}\nhello();";
-	// Cursor on "hello" at offset 8
-	encode_rename("file:///test.c3", content, 8, ds, "", "goodbye", &out);
-	String result = out.str_view();
-	assert(result.contains(`file:///test.c3`), "got: %s", result);
-	assert(result.contains(`file:///other.c3`), "got: %s", result);
-	assert(result.contains(`"newText":"goodbye"`), "got: %s", result);
+	// Same file: decl + 2 calls = 3 edits
+	{
+		DString out = dstring::temp();
+		encode_rename("file:///test.c3", "fn void hello() {}\nhello();\nhello();", 8, ds, "", "world", &out);
+		String r = out.str_view();
+		assert(r.contains(`"changes"`), "same_file: expected changes, got: %s", r);
+		assert(r.contains(`"newText":"world"`), "same_file: expected newText, got: %s", r);
+		assert(count_occurrences(r, `"newText"`) == 3, "same_file: expected 3 edits, got: %s", r);
+	}
 
-	ds.close("file:///other.c3");
-}
+	// Cross file: edits in both files
+	{
+		DString out = dstring::temp();
+		ds.open("file:///other.c3", "fn void greet() { hello(); }", 1);
+		encode_rename("file:///test.c3", "fn void hello() {}\nhello();", 8, ds, "", "goodbye", &out);
+		String r = out.str_view();
+		assert(r.contains(`file:///test.c3`), "cross_file: got: %s", r);
+		assert(r.contains(`file:///other.c3`), "cross_file: got: %s", r);
+		assert(r.contains(`"newText":"goodbye"`), "cross_file: got: %s", r);
+		ds.close("file:///other.c3");
+	}
 
-fn void test_rename_keyword_empty() @test {
-	DString out = dstring::temp();
-	DocumentList* ds = mem::new(DocumentList);
-	defer mem::free(ds);
-	// Cursor on "fn" keyword at offset 0
-	encode_rename("file:///test.c3", "fn void hello() {}", 0, ds, "", "xyz", &out);
-	assert(out.str_view() == "", "expected empty for keyword, got: %s", out.str_view());
-}
+	// Keyword: no rename
+	{
+		DString out = dstring::temp();
+		encode_rename("file:///test.c3", "fn void hello() {}", 0, ds, "", "xyz", &out);
+		assert(out.str_view() == "", "keyword: expected empty, got: %s", out.str_view());
+	}
 
-fn void test_rename_type_ident() @test {
-	DString out = dstring::temp();
-	DocumentList* ds = mem::new(DocumentList);
-	defer mem::free(ds);
-	ds.open("file:///other.c3", "Foo y;", 1);
+	// Type ident: cross-file rename
+	{
+		DString out = dstring::temp();
+		ds.open("file:///other.c3", "Foo y;", 1);
+		encode_rename("file:///test.c3", "struct Foo {}\nFoo x;", 7, ds, "", "Bar", &out);
+		String r = out.str_view();
+		assert(r.contains(`file:///test.c3`), "type: got: %s", r);
+		assert(r.contains(`file:///other.c3`), "type: got: %s", r);
+		assert(r.contains(`"newText":"Bar"`), "type: got: %s", r);
+		ds.close("file:///other.c3");
+	}
 
-	String content = "struct Foo {}\nFoo x;";
-	// Cursor on "Foo" at offset 7
-	encode_rename("file:///test.c3", content, 7, ds, "", "Bar", &out);
-	String result = out.str_view();
-	assert(result.contains(`file:///test.c3`), "got: %s", result);
-	assert(result.contains(`file:///other.c3`), "got: %s", result);
-	assert(result.contains(`"newText":"Bar"`), "got: %s", result);
+	// Correct ranges: verify character offsets
+	{
+		DString out = dstring::temp();
+		encode_rename("file:///test.c3", "fn void foo() { foo(); }", 8, ds, "", "baz", &out);
+		String r = out.str_view();
+		assert(r.contains(`"start":{"line":0,"character":8},"end":{"line":0,"character":11}`), "ranges: got: %s", r);
+		assert(r.contains(`"start":{"line":0,"character":16},"end":{"line":0,"character":19}`), "ranges: got: %s", r);
+	}
 
-	ds.close("file:///other.c3");
-}
-
-fn void test_rename_correct_ranges() @test {
-	DString out = dstring::temp();
-	DocumentList* ds = mem::new(DocumentList);
-	defer mem::free(ds);
-	// "foo" starts at char 8, length 3
-	String content = "fn void foo() { foo(); }";
-	encode_rename("file:///test.c3", content, 8, ds, "", "baz", &out);
-	String result = out.str_view();
-	// First foo: char 8-11
-	assert(result.contains(`"start":{"line":0,"character":8},"end":{"line":0,"character":11}`), "got: %s", result);
-	// Second foo: char 16-19
-	assert(result.contains(`"start":{"line":0,"character":16},"end":{"line":0,"character":19}`), "got: %s", result);
-}
-
-// --- Scoped Rename tests ---
-
-fn void test_rename_local_var_scoped() @test {
-	DString out = dstring::temp();
-	DocumentList* ds = mem::new(DocumentList);
-	defer mem::free(ds);
-	// Two functions each with a local variable "x"
-	String content = `fn void foo() { int x = 1; x = 2; }
+	// Local var scoped: only rename x in foo(), not in bar()
+	{
+		DString out = dstring::temp();
+		String content = `fn void foo() { int x = 1; x = 2; }
 fn void bar() { int x = 3; x = 4; }`;
-	// Cursor on "x" inside foo() — offset of first "x" after "int "
-	// "fn void foo() { int " = 20 chars, so x is at offset 20
-	encode_rename("file:///test.c3", content, 20, ds, "", "y", &out);
-	String result = out.str_view();
-	assert(result.contains(`"newText":"y"`), "expected rename edits, got: %s", result);
-	// Should have exactly 2 edits (the two x's in foo), not 4
-	int count = 0;
-	usz pos = 0;
-	while (pos < result.len) {
-		if (try found = result[pos..].index_of(`"newText"`)) {
-			count++;
-			pos = pos + found + 1;
-		} else {
-			break;
-		}
+		encode_rename("file:///test.c3", content, 20, ds, "", "y", &out);
+		String r = out.str_view();
+		assert(r.contains(`"newText":"y"`), "scoped: got: %s", r);
+		assert(count_occurrences(r, `"newText"`) == 2, "scoped: expected 2 edits, got: %s", r);
 	}
-	assert(count == 2, "expected 2 edits (only in foo), got %d: %s", count, result);
-}
 
-fn void test_rename_local_var_no_cross_file() @test {
-	DString out = dstring::temp();
-	DocumentList* ds = mem::new(DocumentList);
-	defer mem::free(ds);
-	// Other file also has "x"
-	ds.open("file:///other.c3", "fn void baz() { int x = 5; }", 1);
+	// Local var: no cross-file leaking
+	{
+		DString out = dstring::temp();
+		ds.open("file:///other.c3", "fn void baz() { int x = 5; }", 1);
+		encode_rename("file:///test.c3", `fn void foo() { int x = 1; }`, 20, ds, "", "y", &out);
+		String r = out.str_view();
+		assert(r.contains(`file:///test.c3`), "no_cross: got: %s", r);
+		assert(!r.contains(`file:///other.c3`), "no_cross: should not rename in other file, got: %s", r);
+		ds.close("file:///other.c3");
+	}
 
-	String content = `fn void foo() { int x = 1; }`;
-	// Cursor on "x" inside foo() at offset 20
-	encode_rename("file:///test.c3", content, 20, ds, "", "y", &out);
-	String result = out.str_view();
-	assert(result.contains(`file:///test.c3`), "got: %s", result);
-	// Should NOT contain edits for the other file
-	assert(!result.contains(`file:///other.c3`), "should not rename in other file, got: %s", result);
+	// Function parameter: rename in signature + body, not in other functions
+	{
+		DString out = dstring::temp();
+		String src = `fn void update(String content, int version) { io::printfn(content); }
+fn void other() { String content = "x"; }`;
+		encode_rename("file:///test.c3", src, 22, ds, "", "text", &out);
+		String r = out.str_view();
+		assert(r.contains(`"newText":"text"`), "param: got: %s", r);
+		assert(count_occurrences(r, `"newText"`) == 2, "param: expected 2 edits, got: %s", r);
+	}
 
-	ds.close("file:///other.c3");
-}
-
-fn void test_rename_module_level_still_global() @test {
-	DString out = dstring::temp();
-	DocumentList* ds = mem::new(DocumentList);
-	defer mem::free(ds);
-	ds.open("file:///other.c3", "fn void greet() { hello(); }", 1);
-
-	// "hello" at offset 8 is the function name — module level
-	String content = "fn void hello() {}\nhello();";
-	encode_rename("file:///test.c3", content, 8, ds, "", "goodbye", &out);
-	String result = out.str_view();
-	// Should still rename across files for module-level symbols
-	assert(result.contains(`file:///test.c3`), "got: %s", result);
-	assert(result.contains(`file:///other.c3`), "got: %s", result);
-
-	ds.close("file:///other.c3");
+	// Module-level symbol: still renames globally across files
+	{
+		DString out = dstring::temp();
+		ds.open("file:///other.c3", "fn void greet() { hello(); }", 1);
+		encode_rename("file:///test.c3", "fn void hello() {}\nhello();", 8, ds, "", "goodbye", &out);
+		String r = out.str_view();
+		assert(r.contains(`file:///test.c3`), "global: got: %s", r);
+		assert(r.contains(`file:///other.c3`), "global: got: %s", r);
+		ds.close("file:///other.c3");
+	}
 }
