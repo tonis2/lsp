@@ -48,7 +48,8 @@ fn void encode_folding_ranges(String content, DString* out)
 						if (start_line != line)
 						{
 							if (!first) out.append_char(',');
-							out.appendf(`{"startLine":%d,"endLine":%d}`, start_line, line);
+							FoldingRange fr = {.start_line = start_line, .end_line = line};
+							fr.encode(out);
 							first = false;
 						}
 					}
@@ -60,7 +61,8 @@ fn void encode_folding_ranges(String content, DString* out)
 					if (line != end_line)
 					{
 						if (!first) out.append_char(',');
-						out.appendf(`{"startLine":%d,"endLine":%d,"kind":"comment"}`, line, end_line);
+						FoldingRange fr = {.start_line = line, .end_line = end_line, .kind = "comment"};
+						fr.encode(out);
 						first = false;
 					}
 				case IMPORT:
@@ -82,7 +84,8 @@ fn void encode_folding_ranges(String content, DString* out)
 						if (import_count >= 2)
 						{
 							if (!first) out.append_char(',');
-							out.appendf(`{"startLine":%d,"endLine":%d,"kind":"imports"}`, import_start_line, last_import_line);
+							FoldingRange fr = {.start_line = import_start_line, .end_line = last_import_line, .kind = "imports"};
+						fr.encode(out);
 							first = false;
 						}
 						import_start_line = line;
@@ -104,7 +107,8 @@ fn void encode_folding_ranges(String content, DString* out)
 							if (import_count >= 2)
 							{
 								if (!first) out.append_char(',');
-								out.appendf(`{"startLine":%d,"endLine":%d,"kind":"imports"}`, import_start_line, last_import_line);
+								FoldingRange fr = {.start_line = import_start_line, .end_line = last_import_line, .kind = "imports"};
+						fr.encode(out);
 								first = false;
 							}
 							import_count = 0;
@@ -124,6 +128,7 @@ fn void encode_folding_ranges(String content, DString* out)
 	if (import_count >= 2)
 	{
 		if (!first) out.append_char(',');
-		out.appendf(`{"startLine":%d,"endLine":%d,"kind":"imports"}`, import_start_line, last_import_line);
+		FoldingRange fr = {.start_line = import_start_line, .end_line = last_import_line, .kind = "imports"};
+		fr.encode(out);
 	}
 }

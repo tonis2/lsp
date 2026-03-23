@@ -32,20 +32,18 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 					// Detect method call context for hover
 					if (is_ident(ct))
 					{
-						TokenList hover_tokens;
-						hover_tokens.init(mem);
-						hover_tokens.tokenize(content);
+						TokenStream hover_stream = token_stream_tokenize(content);
 						Token hover_tok;
 						usz hover_idx;
-						if (hover_tokens.find_token_at(offset, &hover_tok, &hover_idx))
+						if (hover_stream.tokens.find_token_at(offset, &hover_tok, &hover_idx))
 						{
-							String method_type = hover_tokens.resolve_method_type(hover_idx, uri, docs);
+							String method_type = hover_stream.tokens.resolve_method_type(hover_idx, uri, docs);
 							if (method_type.len > 0)
 							{
 								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, method_type);
 							}
 						}
-						hover_tokens.free();
+						hover_stream.free();
 					}
 
 					// Regular (non-method) hover if method resolution didn't find anything
@@ -61,9 +59,11 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 						usz end_line = lo.find_line(tok_end > 0 ? tok_end - 1 : 0);
 						usz end_char = tok_end - lo.entries[end_line];
 
-						out.append(`{"contents":{"kind":"markdown","value":"`);
-						json_escape_into(out, doc.str_view());
-						out.appendf(`"},"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}}`, line, start_char, end_line, end_char);
+						Range range = {
+							.start = {.line = line, .character = start_char},
+							.end = {.line = end_line, .character = end_char},
+						};
+						encode_hover_response(out, doc.str_view(), range);
 						return;
 					}
 				}
@@ -77,9 +77,11 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 				usz end_line = lo.find_line(tok_end > 0 ? tok_end - 1 : 0);
 				usz end_char = tok_end - lo.entries[end_line];
 
-				out.append(`{"contents":{"kind":"markdown","value":"`);
-				json_escape_into(out, desc);
-				out.appendf(`"},"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}}`, line, start_char, end_line, end_char);
+				Range range = {
+					.start = {.line = line, .character = start_char},
+					.end = {.line = end_line, .character = end_char},
+				};
+				encode_hover_response(out, desc, range);
 				return;
 			}
 			if (tok.offset > offset) return;
@@ -145,15 +147,13 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 // Tokenize content, find the declaration of target, and extract doc comment + signature.
 fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "") @private
 {
-	TokenList tokens;
-	tokens.init(mem);
-	defer tokens.free();
-	tokens.tokenize(content);
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
 
-	usz decl_idx = tokens.find_declaration_in(target, method_type);
-	if (decl_idx >= tokens.size) return false;
+	usz decl_idx = stream.tokens.find_declaration_in(target, method_type);
+	if (decl_idx >= stream.tokens.size) return false;
 
-	tokens.extract_docs_at(content, decl_idx, out);
+	stream.tokens.extract_docs_at(content, decl_idx, out);
 	return out.str_view().len > 0;
 }
 

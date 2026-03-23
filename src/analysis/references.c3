@@ -10,29 +10,32 @@ import c3::lexer;
 // Output: JSON array of DocumentHighlight objects, or empty string if none.
 fn void encode_document_highlights(String content, usz offset, DString* out)
 {
-	TokenList tokens;
-	tokens.init(mem);
-	defer tokens.free();
-	tokens.tokenize(content);
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
 
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
+	if (!stream.tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
-	LineOffsets lo;
-	lo.init(mem);
-	defer lo.free();
-	lo.build(content);
+	LineOffsets* lo = stream.get_line_offsets();
+
+	// Detect if cursor is on a member access (preceded by DOT)
+	bool is_member = cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT;
 
 	bool first = true;
 	out.append("[");
-	foreach (tok : tokens)
+	for (usz i = 0; i < stream.tokens.size; i++)
 	{
+		Token tok = stream.tokens.entries[i];
 		if (tok.type == ct && tok.text == cursor_tok.text)
 		{
+			// Filter: member access tokens only match other member access tokens
+			bool tok_is_member = i > 0 && stream.tokens.entries[i - 1].type == DOT;
+			if (is_member != tok_is_member) continue;
+
 			if (!first) out.append(",");
 			first = false;
 
@@ -40,7 +43,14 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
-			out.appendf(`{"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}},"kind":1}`, line, col, line, end_col);
+			DocumentHighlight highlight = {
+				.range = {
+					.start = {.line = line, .character = col},
+					.end = {.line = line, .character = end_col},
+				},
+				.kind = 1,
+			};
+			highlight.encode(out);
 		}
 	}
 	out.append("]");
@@ -56,47 +66,46 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 // Output: JSON array of Location objects, or empty string if none.
 fn void encode_references(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, bool include_decl, DString* out)
 {
-	TokenList tokens;
-	tokens.init(mem);
-	defer tokens.free();
-	tokens.tokenize(content);
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
 
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
+	if (!stream.tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+
+	// Detect if cursor is on a member access (preceded by DOT)
+	bool is_member = cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT;
 
 	bool first = true;
 	out.append("[");
 
 	// 1. Current file — collect all matching tokens
-	tokens.collect_refs(uri, content, cursor_tok, out, &first);
+	stream.tokens.collect_refs(uri, content, cursor_tok, out, &first, is_member);
 
 	// 2. Open documents
 	for (usz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
 
-		TokenList other_tokens;
-		other_tokens.init(mem);
-		other_tokens.tokenize(docs.entries[d].content);
-		other_tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first);
-		other_tokens.free();
+		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		other_stream.tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first, is_member);
+		other_stream.free();
 	}
 
 	// 3. Scan project files on disk
 	String file_path = uri_to_path(uri);
 	if (file_path.len > 0)
 	{
-		scan_project_files_refs(file_path, cursor_tok, out, &first);
+		scan_project_files_refs(file_path, cursor_tok, out, &first, is_member);
 	}
 
 	// 4. Scan stdlib
 	if (stdlib_path.len > 0)
 	{
-		scan_dir_recursive_refs(stdlib_path, cursor_tok, out, &first, 0);
+		scan_dir_recursive_refs(stdlib_path, cursor_tok, out, &first, 0, is_member);
 	}
 
 	out.append("]");
@@ -108,17 +117,22 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 }
 
 // Collect all tokens matching target name+type from a pre-tokenized stream, emitting Location JSON.
-fn void TokenList.collect_refs(&self, String uri, String content, Token target, DString* out, bool* first)
+// When member_access is true, only matches tokens preceded by DOT; when false, only non-DOT tokens.
+fn void TokenList.collect_refs(&self, String uri, String content, Token target, DString* out, bool* first, bool member_access = false)
 {
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
 	lo.build(content);
 
-	foreach (tok : self)
+	for (usz i = 0; i < self.size; i++)
 	{
+		Token tok = self.entries[i];
 		if (tok.type == target.type && tok.text == target.text)
 		{
+			bool tok_is_member = i > 0 && self.entries[i - 1].type == DOT;
+			if (member_access != tok_is_member) continue;
+
 			if (!*first) out.append(",");
 			*first = false;
 
@@ -126,9 +140,14 @@ fn void TokenList.collect_refs(&self, String uri, String content, Token target, 
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
-			out.append(`{"uri":"`);
-			json_escape_into(out, uri);
-			out.appendf(`","range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}}`, line, col, line, end_col);
+			Location loc = {
+				.uri = uri,
+				.range = {
+					.start = {.line = line, .character = col},
+					.end = {.line = line, .character = end_col},
+				},
+			};
+			loc.encode(out);
 		}
 	}
 }
@@ -184,14 +203,12 @@ fn usz[2] TokenList.find_function_scope(&self, usz offset)
 // Output: JSON WorkspaceEdit object, or empty string if none.
 fn void encode_rename(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, String new_name, DString* out)
 {
-	TokenList tokens;
-	tokens.init(mem);
-	defer tokens.free();
-	tokens.tokenize(content);
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
 
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!tokens.find_ident_token_at(offset, &cursor_tok, &cursor_idx))
+	if (!stream.tokens.find_ident_token_at(offset, &cursor_tok, &cursor_idx))
 	{
 		return;
 	}
@@ -200,7 +217,7 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
 	// Check if cursor is inside a function body — if so, restrict rename to that scope
-	usz[2] scope = tokens.find_function_scope(offset);
+	usz[2] scope = stream.tokens.find_function_scope(offset);
 
 	bool first_uri = true;
 	out.append(`{"changes":{`);
@@ -208,24 +225,22 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 	if (scope[0] != 0 || scope[1] != 0)
 	{
 		// Local variable — only rename within this function's scope in current file
-		tokens.collect_rename_edits_scoped(uri, content, cursor_tok, new_name, out, &first_uri, scope[0], scope[1]);
+		stream.tokens.collect_rename_edits_scoped(uri, content, cursor_tok, new_name, out, &first_uri, scope[0], scope[1]);
 	}
 	else
 	{
 		// Module-level symbol — rename globally across all files
 		// 1. Current file
-		tokens.collect_rename_edits(uri, content, cursor_tok, new_name, out, &first_uri);
+		stream.tokens.collect_rename_edits(uri, content, cursor_tok, new_name, out, &first_uri);
 
 		// 2. Open documents
 		for (usz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
 
-			TokenList other_tokens;
-			other_tokens.init(mem);
-			other_tokens.tokenize(docs.entries[d].content);
-			other_tokens.collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, cursor_tok, new_name, out, &first_uri);
-			other_tokens.free();
+			TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+			other_stream.tokens.collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, cursor_tok, new_name, out, &first_uri);
+			other_stream.free();
 		}
 
 		// 3. Scan project files on disk (skip stdlib — should not rename stdlib symbols)
@@ -275,9 +290,14 @@ fn void TokenList.collect_rename_edits(&self, String uri, String content, Token 
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
-			out.appendf(`{"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}},"newText":"`, line, col, line, end_col);
-			json_escape_into(out, new_name);
-			out.append(`"}`);
+			TextEdit edit = {
+				.range = {
+					.start = {.line = line, .character = col},
+					.end = {.line = line, .character = end_col},
+				},
+				.new_text = new_name,
+			};
+			edit.encode(out);
 		}
 	}
 
@@ -321,9 +341,14 @@ fn void TokenList.collect_rename_edits_scoped(&self, String uri, String content,
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
-			out.appendf(`{"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}},"newText":"`, line, col, line, end_col);
-			json_escape_into(out, new_name);
-			out.append(`"}`);
+			TextEdit edit = {
+				.range = {
+					.start = {.line = line, .character = col},
+					.end = {.line = line, .character = end_col},
+				},
+				.new_text = new_name,
+			};
+			edit.encode(out);
 		}
 	}
 
@@ -393,15 +418,13 @@ fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name
 			if (try file_content = file::load(mem, full_path))
 			{
 				String content = (String)file_content;
-				TokenList tokens;
-				tokens.init(mem);
-				tokens.tokenize(content);
+				TokenStream stream = token_stream_tokenize(content);
 
 				DString uri = dstring::temp();
 				append_file_uri(&uri, full_path);
-				tokens.collect_rename_edits(uri.str_view(), content, target, new_name, out, first_uri);
+				stream.tokens.collect_rename_edits(uri.str_view(), content, target, new_name, out, first_uri);
 
-				tokens.free();
+				stream.free();
 				mem::free(file_content);
 			}
 		}
@@ -413,7 +436,7 @@ fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name
 }
 
 // Scan project directories for all references on disk.
-fn void scan_project_files_refs(String file_path, Token target, DString* out, bool* first) @private
+fn void scan_project_files_refs(String file_path, Token target, DString* out, bool* first, bool member_access = false) @private
 {
 	ProjectDirs pdirs;
 	pdirs.get_search_dirs(file_path);
@@ -423,12 +446,12 @@ fn void scan_project_files_refs(String file_path, Token target, DString* out, bo
 	{
 		DString search_path = dstring::temp();
 		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		scan_dir_recursive_refs(search_path.str_view(), target, out, first, 0);
+		scan_dir_recursive_refs(search_path.str_view(), target, out, first, 0, member_access);
 	}
 }
 
 // Recursively scan directories for all references.
-fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, bool* first, int depth) @private
+fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, bool* first, int depth, bool member_access = false) @private
 {
 	if (depth > MAX_SCAN_DEPTH) return;
 
@@ -471,21 +494,19 @@ fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, boo
 			if (try file_content = file::load(mem, full_path))
 			{
 				String content = (String)file_content;
-				TokenList tokens;
-				tokens.init(mem);
-				tokens.tokenize(content);
+				TokenStream stream = token_stream_tokenize(content);
 
 				DString uri = dstring::temp();
 				append_file_uri(&uri, full_path);
-				tokens.collect_refs(uri.str_view(), content, target, out, first);
+				stream.tokens.collect_refs(uri.str_view(), content, target, out, first, member_access);
 
-				tokens.free();
+				stream.free();
 				mem::free(file_content);
 			}
 		}
 		else
 		{
-			scan_dir_recursive_refs(full_path, target, out, first, depth + 1);
+			scan_dir_recursive_refs(full_path, target, out, first, depth + 1, member_access);
 		}
 	}
 }

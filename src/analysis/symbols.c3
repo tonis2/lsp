@@ -8,21 +8,15 @@ const usz MAX_LOOKAHEAD = 64;
 
 fn void encode_document_symbols(String content, DString* out)
 {
-	LineOffsets lo;
-	lo.init(mem);
-	defer lo.free();
-	lo.build(content);
-
-	TokenList tokens;
-	tokens.init(mem);
-	defer tokens.free();
-	tokens.tokenize(content);
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
+	LineOffsets* lo = stream.get_line_offsets();
 
 	bool first = true;
 
-	for (usz i = 0; i < tokens.size; i++)
+	for (usz i = 0; i < stream.tokens.size; i++)
 	{
-		Token tok = tokens.entries[i];
+		Token tok = stream.tokens.entries[i];
 		String name = "";
 		int kind = 0;
 		usz name_offset = 0;
@@ -35,55 +29,55 @@ fn void encode_document_symbols(String content, DString* out)
 		{
 			case MODULE:
 				// module IDENT
-				if (i + 1 < tokens.size && tokens.entries[i + 1].type == IDENT)
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == IDENT)
 				{
-					Token nt = tokens.entries[i + 1];
+					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
 					name_offset = nt.offset;
 					name_len = nt.len;
 					kind = 2; // Module
-					end_offset = tokens.find_eos_end(i + 2);
+					end_offset = stream.tokens.find_eos_end(i + 2);
 				}
 			case IMPORT:
 				// import IDENT
-				if (i + 1 < tokens.size && tokens.entries[i + 1].type == IDENT)
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == IDENT)
 				{
-					Token nt = tokens.entries[i + 1];
+					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
 					name_offset = nt.offset;
 					name_len = nt.len;
 					kind = 2; // Module
-					end_offset = tokens.find_eos_end(i + 2);
+					end_offset = stream.tokens.find_eos_end(i + 2);
 				}
 			case FUNC:
 				// fn ... IDENT LPAREN — the IDENT before LPAREN is the name
 				// If preceded by TYPE_IDENT DOT, combine as Type.method
 				usz lparen_idx = 0;
-				for (usz j = i + 1; j < tokens.size && j < i + MAX_LOOKAHEAD; j++)
+				for (usz j = i + 1; j < stream.tokens.size && j < i + MAX_LOOKAHEAD; j++)
 				{
-					if (tokens.entries[j].type == LPAREN)
+					if (stream.tokens.entries[j].type == LPAREN)
 					{
 						lparen_idx = j;
 						break;
 					}
 					// Stop on LBRACE/EOS (malformed)
-					if (tokens.entries[j].type == LBRACE || tokens.entries[j].type == EOS) break;
+					if (stream.tokens.entries[j].type == LBRACE || stream.tokens.entries[j].type == EOS) break;
 				}
 				if (lparen_idx > 0 && lparen_idx > i + 1)
 				{
-					Token fn_name = tokens.entries[lparen_idx - 1];
+					Token fn_name = stream.tokens.entries[lparen_idx - 1];
 					if (is_ident(fn_name.type))
 					{
 						// Check for Type.method pattern
-						if (lparen_idx >= 3 + i && tokens.entries[lparen_idx - 2].type == DOT && tokens.entries[lparen_idx - 3].type == TYPE_IDENT)
+						if (lparen_idx >= 3 + i && stream.tokens.entries[lparen_idx - 2].type == DOT && stream.tokens.entries[lparen_idx - 3].type == TYPE_IDENT)
 						{
 							DString combined = dstring::temp();
-							combined.append(tokens.entries[lparen_idx - 3].text);
+							combined.append(stream.tokens.entries[lparen_idx - 3].text);
 							combined.append_char('.');
 							combined.append(fn_name.text);
 							name = combined.str_view();
-							name_offset = tokens.entries[lparen_idx - 3].offset;
-							name_len = (fn_name.offset + fn_name.len) - tokens.entries[lparen_idx - 3].offset;
+							name_offset = stream.tokens.entries[lparen_idx - 3].offset;
+							name_len = (fn_name.offset + fn_name.len) - stream.tokens.entries[lparen_idx - 3].offset;
 						}
 						else
 						{
@@ -99,9 +93,9 @@ fn void encode_document_symbols(String content, DString* out)
 			case UNION:
 			case BITSTRUCT:
 				// struct/union/bitstruct TYPE_IDENT
-				if (i + 1 < tokens.size && tokens.entries[i + 1].type == TYPE_IDENT)
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
 				{
-					Token nt = tokens.entries[i + 1];
+					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
 					name_offset = nt.offset;
 					name_len = nt.len;
@@ -111,9 +105,9 @@ fn void encode_document_symbols(String content, DString* out)
 			case ENUM:
 			case FAULTDEF:
 				// enum/faultdef TYPE_IDENT
-				if (i + 1 < tokens.size && tokens.entries[i + 1].type == TYPE_IDENT)
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
 				{
-					Token nt = tokens.entries[i + 1];
+					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
 					name_offset = nt.offset;
 					name_len = nt.len;
@@ -122,9 +116,9 @@ fn void encode_document_symbols(String content, DString* out)
 				}
 			case INTERFACE:
 				// interface TYPE_IDENT
-				if (i + 1 < tokens.size && tokens.entries[i + 1].type == TYPE_IDENT)
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
 				{
-					Token nt = tokens.entries[i + 1];
+					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
 					name_offset = nt.offset;
 					name_len = nt.len;
@@ -133,9 +127,9 @@ fn void encode_document_symbols(String content, DString* out)
 				}
 			case MACRO:
 				// macro IDENT or macro TYPE_IDENT
-				if (i + 1 < tokens.size)
+				if (i + 1 < stream.tokens.size)
 				{
-					Token nt = tokens.entries[i + 1];
+					Token nt = stream.tokens.entries[i + 1];
 					if (is_ident(nt.type) || nt.type == TYPE_IDENT)
 					{
 						name = nt.text;
@@ -148,9 +142,9 @@ fn void encode_document_symbols(String content, DString* out)
 			case CONSTDEF:
 			case TYPEDEF:
 			case ALIAS:
-				if (i + 1 < tokens.size)
+				if (i + 1 < stream.tokens.size)
 				{
-					Token nt = tokens.entries[i + 1];
+					Token nt = stream.tokens.entries[i + 1];
 					if (nt.type == TYPE_IDENT)
 					{
 						name = nt.text;
@@ -167,7 +161,7 @@ fn void encode_document_symbols(String content, DString* out)
 					}
 					if (kind != 0)
 					{
-						end_offset = tokens.find_eos_end(i + 2);
+						end_offset = stream.tokens.find_eos_end(i + 2);
 					}
 				}
 			default:
@@ -179,7 +173,7 @@ fn void encode_document_symbols(String content, DString* out)
 		// Find end of declaration for braced declarations
 		if (has_braces && end_offset == 0)
 		{
-			end_offset = tokens.find_brace_end(i + 1);
+			end_offset = stream.tokens.find_brace_end(i + 1);
 		}
 		if (end_offset == 0)
 		{
@@ -198,12 +192,19 @@ fn void encode_document_symbols(String content, DString* out)
 		usz sel_end_char = sel_char + name_len;
 
 		if (!first) out.append_char(',');
-		out.append(`{"name":"`);
-		json_escape_into(out, name);
-		out.appendf(`","kind":%d`, kind);
-		out.appendf(`,"range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}`, decl_line, decl_char, end_line, end_char);
-		out.appendf(`,"selectionRange":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}`, sel_line, sel_char, sel_end_line, sel_end_char);
-		out.append_char('}');
+		DocumentSymbol sym = {
+			.name = name,
+			.kind = kind,
+			.range = {
+				.start = {.line = decl_line, .character = decl_char},
+				.end = {.line = end_line, .character = end_char},
+			},
+			.selection_range = {
+				.start = {.line = sel_line, .character = sel_char},
+				.end = {.line = sel_end_line, .character = sel_end_char},
+			},
+		};
+		sym.encode(out);
 		first = false;
 	}
 }

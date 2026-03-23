@@ -334,9 +334,14 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 	usz col = tok.offset - lo.entries[line];
 	usz end_col = col + tok.len;
 
-	out.append(`{"uri":"`);
-	json_escape_into(out, uri);
-	out.appendf(`","range":{"start":{"line":%d,"character":%d},"end":{"line":%d,"character":%d}}}`, line, col, line, end_col);
+	Location loc = {
+		.uri = uri,
+		.range = {
+			.start = {.line = line, .character = col},
+			.end = {.line = line, .character = end_col},
+		},
+	};
+	loc.encode(out);
 }
 
 // Find the type name of a variable by scanning for TYPE_IDENT var_name patterns.
@@ -385,11 +390,9 @@ fn String TokenList.resolve_type_alias_across(&self, String type_name, DocumentL
 
 	for (usz d = 0; d < docs.size; d++)
 	{
-		TokenList doc_tokens;
-		doc_tokens.init(mem);
-		doc_tokens.tokenize(docs.entries[d].content);
-		resolved = doc_tokens.resolve_type_alias(type_name);
-		doc_tokens.free();
+		TokenStream doc_stream = token_stream_tokenize(docs.entries[d].content);
+		resolved = doc_stream.tokens.resolve_type_alias(type_name);
+		doc_stream.free();
 		if (resolved.len > 0) return resolved;
 	}
 	return "";
@@ -424,20 +427,18 @@ fn String resolve_alias_in_dir(String dir_path, String type_name, int depth) @pr
 		{
 			if (try file_content = file::load(mem, full_path))
 			{
-				TokenList tokens;
-				tokens.init(mem);
-				tokens.tokenize((String)file_content);
-				String resolved = tokens.resolve_type_alias(type_name);
+				TokenStream stream = token_stream_tokenize((String)file_content);
+				String resolved = stream.tokens.resolve_type_alias(type_name);
 				if (resolved.len > 0)
 				{
 					// Copy before freeing — resolved points into file_content
 					DString copy = dstring::temp();
 					copy.append(resolved);
-					tokens.free();
+					stream.free();
 					mem::free(file_content);
 					return copy.str_view();
 				}
-				tokens.free();
+				stream.free();
 				mem::free(file_content);
 			}
 		}
@@ -512,18 +513,16 @@ fn bool TokenList.try_find_definition(
 	{
 		if (docs.entries[d].uri == uri) continue;
 
-		TokenList other_tokens;
-		other_tokens.init(mem);
-		other_tokens.tokenize(docs.entries[d].content);
+		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
 
-		usz found = other_tokens.find_declaration_in(cursor_tok, method_type);
-		if (found < other_tokens.size)
+		usz found = other_stream.tokens.find_declaration_in(cursor_tok, method_type);
+		if (found < other_stream.tokens.size)
 		{
-			emit_location(docs.entries[d].uri, docs.entries[d].content, other_tokens.entries[found], out);
-			other_tokens.free();
+			emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
+			other_stream.free();
 			return true;
 		}
-		other_tokens.free();
+		other_stream.free();
 	}
 
 	// 3. Scan project files on disk (src/ and lib/ relative to file)
@@ -552,15 +551,13 @@ fn bool TokenList.try_find_definition(
 // Searches: current file -> open documents -> project files on disk -> stdlib.
 fn void encode_definition(String uri, String content, usz offset, DocumentList* docs, String stdlib_path, DString* out)
 {
-	TokenList tokens;
-	tokens.init(mem);
-	defer tokens.free();
-	tokens.tokenize(content);
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
 
 	// Find the token at cursor
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
+	if (!stream.tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	// Only navigate for identifier-like tokens
 	TokenType ct = cursor_tok.type;
@@ -569,10 +566,10 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 	// Method call resolution: variable.method(
 	if (is_ident(ct))
 	{
-		String method_type = tokens.resolve_method_type(cursor_idx, uri, docs);
+		String method_type = stream.tokens.resolve_method_type(cursor_idx, uri, docs);
 		if (method_type.len > 0)
 		{
-			if (tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type))
+			if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type))
 			{
 				return;
 			}
@@ -580,7 +577,7 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 	}
 
 	// Regular search (non-method)
-	tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out);
+	stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out);
 }
 
 // Search for a declaration in a token stream (not tied to a cursor position).
@@ -803,22 +800,20 @@ fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int dept
 			if (try file_content = file::load(mem, full_path))
 			{
 				String content = (String)file_content;
-				TokenList tokens;
-				tokens.init(mem);
-				tokens.tokenize(content);
+				TokenStream stream = token_stream_tokenize(content);
 
-				usz found = tokens.find_declaration_in(target, method_type);
-				if (found < tokens.size)
+				usz found = stream.tokens.find_declaration_in(target, method_type);
+				if (found < stream.tokens.size)
 				{
 					// Build file:// URI from path
 					DString uri = dstring::temp();
 					append_file_uri(&uri, full_path);
-					emit_location(uri.str_view(), content, tokens.entries[found], out);
-					tokens.free();
+					emit_location(uri.str_view(), content, stream.tokens.entries[found], out);
+					stream.free();
 					mem::free(file_content);
 					return true;
 				}
-				tokens.free();
+				stream.free();
 				mem::free(file_content);
 			}
 		}
