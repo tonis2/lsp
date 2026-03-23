@@ -20,27 +20,41 @@ bool has_sentry_proc @private;
 fn SentryConfig parse_sentry_dsn(String dsn)
 {
 	// Format: https://<key>@<host>/<project_id>
-	if (!dsn.starts_with("https://")) return {};
+	if (!dsn.starts_with("https://")) return { };
 
 	String rest = dsn[8..]; // after "https://"
 
 	// Find @ separator
 	usz at_idx;
-	if (try idx = rest.index_of_char('@')) { at_idx = idx; } else { return {}; }
+	if (try idx = rest.index_of_char('@'))
+	{
+		at_idx = idx;
+	}
+	else
+	{
+		return { };
+	}
 
 	String key = rest[:at_idx];
-	if (key.len == 0) return {};
+	if (key.len == 0) return { };
 
 	rest = rest[at_idx + 1..]; // after @
 
 	// Find / separator between host and project_id
 	usz slash_idx;
-	if (try idx = rest.index_of_char('/')) { slash_idx = idx; } else { return {}; }
+	if (try idx = rest.index_of_char('/'))
+	{
+		slash_idx = idx;
+	}
+	else
+	{
+		return { };
+	}
 
 	String host = rest[:slash_idx];
 	String project_id = rest[slash_idx + 1..];
 
-	if (host.len == 0 || project_id.len == 0) return {};
+	if (host.len == 0 || project_id.len == 0) return { };
 
 	return { .key = key, .host = host, .project_id = project_id, .enabled = true };
 }

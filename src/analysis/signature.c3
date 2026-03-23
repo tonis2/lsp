@@ -10,23 +10,21 @@ import c3::lexer;
 // to extract the full signature.
 fn void encode_signature_help(String content, usz offset, DString* out)
 {
-	TokenList tokens;
-	tokens.init(mem);
-	defer tokens.free();
-	tokens.tokenize(content);
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
 
 	// Find which token the cursor is at or after
 	// Walk backwards to find the function call context:
 	// We need to find IDENT LPAREN ... cursor
 	// Handle nested parens by tracking depth
-	usz call_name_idx = tokens.size; // sentinel = not found
+	usz call_name_idx = stream.tokens.size; // sentinel = not found
 	usz active_param = 0;
 
 	// Find the token index at or just before cursor
 	usz cursor_tok_idx = 0;
-	for (usz i = 0; i < tokens.size; i++)
+	for (usz i = 0; i < stream.tokens.size; i++)
 	{
-		if (tokens[i].offset <= offset)
+		if (stream.tokens[i].offset <= offset)
 		{
 			cursor_tok_idx = i;
 		}
@@ -42,7 +40,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 	for (usz ii = 0; ii <= cursor_tok_idx; ii++)
 	{
 		usz i = cursor_tok_idx - ii;
-		TokenType tt = tokens[i].type;
+		TokenType tt = stream.tokens[i].type;
 		if (tt == RPAREN)
 		{
 			depth++;
@@ -56,7 +54,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 			else
 			{
 				// This is the opening paren of our call
-				if (i > 0 && is_ident(tokens[i - 1].type))
+				if (i > 0 && is_ident(stream.tokens[i - 1].type))
 				{
 					call_name_idx = i - 1;
 					active_param = comma_count;
@@ -71,57 +69,57 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 		if (i == 0) break;
 	}
 
-	if (call_name_idx == tokens.size) return;
+	if (call_name_idx == stream.tokens.size) return;
 
-	String fn_name = tokens[call_name_idx].text;
+	String fn_name = stream.tokens[call_name_idx].text;
 
 	// Search for the function declaration in the file
 	// Pattern: FUNC ... fn_name LPAREN params RPAREN
-	for (usz i = 0; i < tokens.size; i++)
+	for (usz i = 0; i < stream.tokens.size; i++)
 	{
-		if (tokens[i].type != FUNC) continue;
+		if (stream.tokens[i].type != FUNC) continue;
 
 		// Find LPAREN after FUNC
 		usz lparen_idx = 0;
-		for (usz j = i + 1; j < tokens.size && j < i + 64; j++)
+		for (usz j = i + 1; j < stream.tokens.size && j < i + 64; j++)
 		{
-			if (tokens[j].type == LPAREN)
+			if (stream.tokens[j].type == LPAREN)
 			{
 				lparen_idx = j;
 				break;
 			}
-			if (tokens[j].type == LBRACE || tokens[j].type == EOS) break;
+			if (stream.tokens[j].type == LBRACE || stream.tokens[j].type == EOS) break;
 		}
 		if (lparen_idx == 0) continue;
 
 		// Check if the IDENT before LPAREN matches
-		if (!is_ident(tokens[lparen_idx - 1].type) || tokens[lparen_idx - 1].text != fn_name) continue;
+		if (!is_ident(stream.tokens[lparen_idx - 1].type) || stream.tokens[lparen_idx - 1].text != fn_name) continue;
 
 		// Found the declaration. Extract signature from FUNC to closing RPAREN or LBRACE
-		usz sig_start = tokens[i].offset;
+		usz sig_start = stream.tokens[i].offset;
 		usz sig_end = sig_start;
 		usz paren_depth = 0;
 		bool found_sig_end = false;
 
-		for (usz j = lparen_idx; j < tokens.size; j++)
+		for (usz j = lparen_idx; j < stream.tokens.size; j++)
 		{
-			if (tokens[j].type == LPAREN)
+			if (stream.tokens[j].type == LPAREN)
 			{
 				paren_depth++;
 			}
-			else if (tokens[j].type == RPAREN)
+			else if (stream.tokens[j].type == RPAREN)
 			{
 				paren_depth--;
 				if (paren_depth == 0)
 				{
-					sig_end = tokens[j].offset + tokens[j].len;
+					sig_end = stream.tokens[j].offset + stream.tokens[j].len;
 					found_sig_end = true;
 					break;
 				}
 			}
-			else if (tokens[j].type == LBRACE || tokens[j].type == EOS)
+			else if (stream.tokens[j].type == LBRACE || stream.tokens[j].type == EOS)
 			{
-				sig_end = tokens[j].offset;
+				sig_end = stream.tokens[j].offset;
 				found_sig_end = true;
 				break;
 			}
@@ -135,22 +133,22 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 		DString params_json = dstring::temp();
 		params_json.append_char('[');
 		bool first_param = true;
-		usz param_start_offset = tokens[lparen_idx].offset + 1; // after '('
+		usz param_start_offset = stream.tokens[lparen_idx].offset + 1; // after '('
 		paren_depth = 1;
 
-		for (usz j = lparen_idx + 1; j < tokens.size; j++)
+		for (usz j = lparen_idx + 1; j < stream.tokens.size; j++)
 		{
-			if (tokens[j].type == LPAREN)
+			if (stream.tokens[j].type == LPAREN)
 			{
 				paren_depth++;
 			}
-			else if (tokens[j].type == RPAREN)
+			else if (stream.tokens[j].type == RPAREN)
 			{
 				paren_depth--;
 				if (paren_depth == 0)
 				{
 					// Emit last parameter
-					usz param_end_offset = tokens[j].offset;
+					usz param_end_offset = stream.tokens[j].offset;
 					if (param_end_offset > param_start_offset)
 					{
 						String param_text = content[param_start_offset..param_end_offset - 1].trim();
@@ -166,10 +164,10 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 					break;
 				}
 			}
-			else if (tokens[j].type == COMMA && paren_depth == 1)
+			else if (stream.tokens[j].type == COMMA && paren_depth == 1)
 			{
 				// Emit parameter
-				usz param_end_offset = tokens[j].offset;
+				usz param_end_offset = stream.tokens[j].offset;
 				if (param_end_offset > param_start_offset)
 				{
 					String param_text = content[param_start_offset..param_end_offset - 1].trim();
@@ -182,7 +180,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 						first_param = false;
 					}
 				}
-				param_start_offset = tokens[j].offset + 1; // after ','
+				param_start_offset = stream.tokens[j].offset + 1; // after ','
 			}
 		}
 		params_json.append_char(']');
@@ -197,34 +195,34 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 	}
 
 	// Also search for macro declarations: macro fn_name(
-	for (usz i = 0; i + 1 < tokens.size; i++)
+	for (usz i = 0; i + 1 < stream.tokens.size; i++)
 	{
-		if (tokens[i].type != MACRO) continue;
-		if (!is_ident(tokens[i + 1].type) || tokens[i + 1].text != fn_name) continue;
-		if (i + 2 >= tokens.size || tokens[i + 2].type != LPAREN) continue;
+		if (stream.tokens[i].type != MACRO) continue;
+		if (!is_ident(stream.tokens[i + 1].type) || stream.tokens[i + 1].text != fn_name) continue;
+		if (i + 2 >= stream.tokens.size || stream.tokens[i + 2].type != LPAREN) continue;
 
-		usz sig_start = tokens[i].offset;
+		usz sig_start = stream.tokens[i].offset;
 		usz sig_end = sig_start;
 		usz paren_depth = 0;
 
-		for (usz j = i + 2; j < tokens.size; j++)
+		for (usz j = i + 2; j < stream.tokens.size; j++)
 		{
-			if (tokens[j].type == LPAREN)
+			if (stream.tokens[j].type == LPAREN)
 			{
 				paren_depth++;
 			}
-			else if (tokens[j].type == RPAREN)
+			else if (stream.tokens[j].type == RPAREN)
 			{
 				paren_depth--;
 				if (paren_depth == 0)
 				{
-					sig_end = tokens[j].offset + tokens[j].len;
+					sig_end = stream.tokens[j].offset + stream.tokens[j].len;
 					break;
 				}
 			}
-			else if (tokens[j].type == LBRACE || tokens[j].type == EOS)
+			else if (stream.tokens[j].type == LBRACE || stream.tokens[j].type == EOS)
 			{
-				sig_end = tokens[j].offset;
+				sig_end = stream.tokens[j].offset;
 				break;
 			}
 		}
@@ -235,21 +233,21 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 		DString params_json = dstring::temp();
 		params_json.append_char('[');
 		bool first_param = true;
-		usz param_start_offset = tokens[i + 2].offset + 1;
+		usz param_start_offset = stream.tokens[i + 2].offset + 1;
 		paren_depth = 1;
 
-		for (usz j = i + 3; j < tokens.size; j++)
+		for (usz j = i + 3; j < stream.tokens.size; j++)
 		{
-			if (tokens[j].type == LPAREN)
+			if (stream.tokens[j].type == LPAREN)
 			{
 				paren_depth++;
 			}
-			else if (tokens[j].type == RPAREN)
+			else if (stream.tokens[j].type == RPAREN)
 			{
 				paren_depth--;
 				if (paren_depth == 0)
 				{
-					usz param_end_offset = tokens[j].offset;
+					usz param_end_offset = stream.tokens[j].offset;
 					if (param_end_offset > param_start_offset)
 					{
 						String param_text = content[param_start_offset..param_end_offset - 1].trim();
@@ -265,9 +263,9 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 					break;
 				}
 			}
-			else if (tokens[j].type == COMMA && paren_depth == 1)
+			else if (stream.tokens[j].type == COMMA && paren_depth == 1)
 			{
-				usz param_end_offset = tokens[j].offset;
+				usz param_end_offset = stream.tokens[j].offset;
 				if (param_end_offset > param_start_offset)
 				{
 					String param_text = content[param_start_offset..param_end_offset - 1].trim();
@@ -280,7 +278,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 						first_param = false;
 					}
 				}
-				param_start_offset = tokens[j].offset + 1;
+				param_start_offset = stream.tokens[j].offset + 1;
 			}
 		}
 		params_json.append_char(']');

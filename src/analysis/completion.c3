@@ -187,9 +187,8 @@ fn void encode_completions(String content, usz offset, DString* out)
 fn void emit_completion_item(DString* out, String label, int kind, bool* first) @private
 {
 	if (!*first) out.append_char(',');
-	out.append(`{"label":"`);
-	json_escape_into(out, label);
-	out.appendf(`","kind":%d}`, kind);
+	CompletionItem item = { .label = label, .kind = kind, };
+	item.encode(out);
 	*first = false;
 }
 
