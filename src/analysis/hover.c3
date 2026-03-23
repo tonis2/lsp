@@ -44,13 +44,35 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 						String recv_type = hover_stream.tokens.resolve_receiver_type(hover_idx, uri, docs);
 						if (recv_type.len > 0)
 						{
-							// Try method docs first
+							// Try method docs with original type first (methods declared on alias name)
 							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, recv_type);
 
-							// Try struct field docs
+							// Resolve alias for fallback
+							String resolved_type = hover_stream.tokens.resolve_type_alias_across(recv_type, docs);
+							if (resolved_type.len == 0)
+							{
+								String file_path = uri_to_path(uri);
+								if (file_path.len > 0)
+								{
+									resolved_type = resolve_alias_in_project(file_path, recv_type);
+								}
+							}
+
+							// Try method docs with resolved alias
+							if (doc.str_view().len == 0 && resolved_type.len > 0 && resolved_type != recv_type)
+							{
+								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, resolved_type);
+							}
+
+							// Try struct field docs (use resolved alias for struct lookup)
 							if (doc.str_view().len == 0)
 							{
-								find_hover_field_docs(uri, content, recv_type, tok.text, docs, stdlib_path, &doc);
+								String field_type = resolved_type.len > 0 ? resolved_type : recv_type;
+								find_hover_field_docs(uri, content, field_type, tok.text, docs, stdlib_path, &doc);
+								if (doc.str_view().len == 0 && field_type != recv_type)
+								{
+									find_hover_field_docs(uri, content, recv_type, tok.text, docs, stdlib_path, &doc);
+								}
 							}
 						}
 					}

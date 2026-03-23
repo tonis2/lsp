@@ -348,19 +348,35 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 	loc.encode(out);
 }
 
-// Find the type name of a variable by scanning for TYPE_IDENT var_name patterns.
+// Find the type name of a variable by scanning for TYPE_IDENT var_name or TYPE_IDENT* var_name patterns.
 fn String TokenList.find_variable_type(&self, String var_name)
 {
 	for (usz i = 0; i + 1 < self.size; i++)
 	{
-		if (self.get(i).type == TYPE_IDENT && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == var_name)
+		if (self.get(i).type == TYPE_IDENT)
 		{
-			if (i + 2 < self.size)
+			// Direct: TYPE_IDENT var_name
+			if (is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == var_name)
 			{
-				TokenType next = self.entries[i + 2].type;
-				if (next == EOS || next == EQ || next == COMMA || next == DOT)
+				if (i + 2 < self.size)
 				{
-					return self.get(i).text;
+					TokenType next = self.entries[i + 2].type;
+					if (next == EOS || next == EQ || next == COMMA || next == DOT)
+					{
+						return self.get(i).text;
+					}
+				}
+			}
+			// Pointer: TYPE_IDENT* var_name
+			if (i + 2 < self.size && self.entries[i + 1].type == STAR && is_ident(self.entries[i + 2].type) && self.entries[i + 2].text == var_name)
+			{
+				if (i + 3 < self.size)
+				{
+					TokenType next = self.entries[i + 3].type;
+					if (next == EOS || next == EQ || next == COMMA || next == DOT)
+					{
+						return self.get(i).text;
+					}
 				}
 			}
 		}
@@ -466,7 +482,7 @@ fn String resolve_alias_in_dir(String dir_path, String type_name, int depth) @pr
 }
 
 // Resolve alias by scanning project files on disk.
-fn String resolve_alias_in_project(String file_path, String type_name) @private
+fn String resolve_alias_in_project(String file_path, String type_name)
 {
 	ProjectDirs pdirs;
 	pdirs.get_search_dirs(file_path);
@@ -507,8 +523,18 @@ fn String TokenList.resolve_receiver_type(&self, usz cursor_idx, String uri, Doc
 		String parent_type = self.resolve_receiver_type(cursor_idx - 2, uri, docs);
 		if (parent_type.len > 0)
 		{
-			// Look up the field type: parent_type.recv → field type
-			type_name = self.resolve_field_type_across(parent_type, recv.text, uri, docs);
+			// For struct field lookup, resolve aliases (e.g. LineOffsets → List)
+			String resolved_parent = self.resolve_type_alias_across(parent_type, docs);
+			if (resolved_parent.len == 0)
+			{
+				String file_path = uri_to_path(uri);
+				if (file_path.len > 0)
+				{
+					resolved_parent = resolve_alias_in_project(file_path, parent_type);
+				}
+			}
+			String lookup_type = resolved_parent.len > 0 ? resolved_parent : parent_type;
+			type_name = self.resolve_field_type_across(lookup_type, recv.text, uri, docs);
 		}
 	}
 
@@ -526,16 +552,6 @@ fn String TokenList.resolve_receiver_type(&self, usz cursor_idx, String uri, Doc
 
 	if (type_name.len == 0) return "";
 
-	String resolved = self.resolve_type_alias_across(type_name, docs);
-	if (resolved.len == 0)
-	{
-		String file_path = uri_to_path(uri);
-		if (file_path.len > 0)
-		{
-			resolved = resolve_alias_in_project(file_path, type_name);
-		}
-	}
-	if (resolved.len > 0 && resolved != type_name) return resolved;
 	return type_name;
 }
 
@@ -973,17 +989,44 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 		String recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs);
 		if (recv_type.len > 0)
 		{
-			// Try method resolution first: fn Type.name(
+			// Resolve alias for struct field lookup (e.g. LineOffsets → List)
+			String resolved_type = stream.tokens.resolve_type_alias_across(recv_type, docs);
+			if (resolved_type.len == 0)
+			{
+				String file_path = uri_to_path(uri);
+				if (file_path.len > 0)
+				{
+					resolved_type = resolve_alias_in_project(file_path, recv_type);
+				}
+			}
+
+			// Try method resolution: fn Type.name(
+			// Try with original type first (methods are usually on the alias name),
+			// then with resolved alias
 			if (is_ident(ct))
 			{
 				if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, recv_type))
 				{
 					return;
 				}
+				if (resolved_type.len > 0 && resolved_type != recv_type)
+				{
+					if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, resolved_type))
+					{
+						return;
+					}
+				}
 			}
 
 			// Try struct field resolution: struct Type { ... name ... }
-			if (try_find_struct_field(recv_type, cursor_tok.text, uri, content, docs, stdlib_path, out))
+			// Use resolved alias for struct field lookup
+			String field_type = resolved_type.len > 0 ? resolved_type : recv_type;
+			if (try_find_struct_field(field_type, cursor_tok.text, uri, content, docs, stdlib_path, out))
+			{
+				return;
+			}
+			// Also try unresolved name for struct fields
+			if (field_type != recv_type && try_find_struct_field(recv_type, cursor_tok.text, uri, content, docs, stdlib_path, out))
 			{
 				return;
 			}

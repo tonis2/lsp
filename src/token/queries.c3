@@ -191,15 +191,17 @@ fn bool TokenStream.has_ref_in_range(&self, Token target, usz start_offset, usz 
 	return false;
 }
 
-// Find the type name of a variable by scanning for TYPE_IDENT var_name patterns
+// Find the type name of a variable by scanning for TYPE_IDENT var_name or TYPE_IDENT* var_name patterns.
 fn String TokenStream.find_variable_type(&self, String var_name)
 {
 	for (usz i = 0; i + 1 < self.tokens.size; i++)
 	{
 		Token type_tok = self.tokens.get(i);
-		Token var_tok = self.tokens.get(i + 1);
+		if (type_tok.type != TYPE_IDENT) continue;
 
-		if (type_tok.type == TYPE_IDENT && is_ident(var_tok.type) && var_tok.text == var_name)
+		// Direct: TYPE_IDENT var_name
+		Token var_tok = self.tokens.get(i + 1);
+		if (is_ident(var_tok.type) && var_tok.text == var_name)
 		{
 			if (i + 2 < self.tokens.size)
 			{
@@ -207,6 +209,22 @@ fn String TokenStream.find_variable_type(&self, String var_name)
 				if (next == EOS || next == EQ || next == COMMA || next == DOT)
 				{
 					return type_tok.text;
+				}
+			}
+		}
+		// Pointer: TYPE_IDENT* var_name
+		if (i + 2 < self.tokens.size && var_tok.type == STAR)
+		{
+			Token ptr_var = self.tokens.get(i + 2);
+			if (is_ident(ptr_var.type) && ptr_var.text == var_name)
+			{
+				if (i + 3 < self.tokens.size)
+				{
+					TokenType next = self.tokens.get(i + 3).type;
+					if (next == EOS || next == EQ || next == COMMA || next == DOT)
+					{
+						return type_tok.text;
+					}
 				}
 			}
 		}
