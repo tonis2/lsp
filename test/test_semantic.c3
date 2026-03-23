@@ -89,12 +89,12 @@ fn void test_line_offsets_single_line() @test {
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets("hello", &lo);
+	lo.build("hello");
 
 	assert(lo.size == 1);
 	assert(lo.entries[0] == 0);
-	assert(find_line(&lo, 0) == 0);
-	assert(find_line(&lo, 4) == 0);
+	assert(lo.find_line( 0) == 0);
+	assert(lo.find_line( 4) == 0);
 }
 
 fn void test_line_offsets_multi_line() @test {
@@ -103,27 +103,27 @@ fn void test_line_offsets_multi_line() @test {
 	defer lo.free();
 	// "ab\ncd\nef"
 	//  01 2 34 5 67
-	build_line_offsets("ab\ncd\nef", &lo);
+	lo.build("ab\ncd\nef");
 
 	assert(lo.size == 3);
 	assert(lo.entries[0] == 0);
 	assert(lo.entries[1] == 3);
 	assert(lo.entries[2] == 6);
 
-	assert(find_line(&lo, 0) == 0); // 'a'
-	assert(find_line(&lo, 1) == 0); // 'b'
-	assert(find_line(&lo, 2) == 0); // '\n'
-	assert(find_line(&lo, 3) == 1); // 'c'
-	assert(find_line(&lo, 5) == 1); // '\n'
-	assert(find_line(&lo, 6) == 2); // 'e'
-	assert(find_line(&lo, 7) == 2); // 'f'
+	assert(lo.find_line( 0) == 0); // 'a'
+	assert(lo.find_line( 1) == 0); // 'b'
+	assert(lo.find_line( 2) == 0); // '\n'
+	assert(lo.find_line( 3) == 1); // 'c'
+	assert(lo.find_line( 5) == 1); // '\n'
+	assert(lo.find_line( 6) == 2); // 'e'
+	assert(lo.find_line( 7) == 2); // 'f'
 }
 
 fn void test_line_offsets_trailing_newline() @test {
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets("a\n", &lo);
+	lo.build("a\n");
 
 	assert(lo.size == 2);
 	assert(lo.entries[0] == 0);

@@ -3,4 +3,4 @@
 	url = git@github.com:konimarti/lexer.c3l.git
 [submodule "lib/argparse.c3l"]
 	path = lib/argparse.c3l
-	url = git@github.com:tonis2/argparse.git
+	url = git@github.com:joshring/argparse.git

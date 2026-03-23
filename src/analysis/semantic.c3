@@ -7,27 +7,27 @@ import c3::lexer;
 
 alias LineOffsets = List{usz};
 
-fn void build_line_offsets(String content, LineOffsets* lo)
+fn void LineOffsets.build(&self, String content)
 {
-	lo.push(0); // Line 0 starts at byte 0
+	self.push(0); // Line 0 starts at byte 0
 
 	for (usz i = 0; i < content.len; i++)
 	{
 		if (content[i] == '\n')
 		{
-			lo.push(i + 1);
+			self.push(i + 1);
 		}
 	}
 }
 
-fn usz find_line(LineOffsets* lo, usz offset)
+fn usz LineOffsets.find_line(&self, usz offset)
 {
 	usz low = 0;
-	usz high = lo.size;
+	usz high = self.size;
 	while (low < high)
 	{
 		usz mid = (low + high) / 2;
-		if (lo.entries[mid] <= offset)
+		if (self.entries[mid] <= offset)
 		{
 			low = mid + 1;
 		}
@@ -44,12 +44,12 @@ fn void encode_semantic_tokens(String content, DString* out)
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 
 	TokenList tokens;
 	tokens.init(mem);
 	defer tokens.free();
-	tokenize_content(content, &tokens);
+	tokens.tokenize(content);
 
 	usz prev_line = 0;
 	usz prev_start_char = 0;
@@ -72,8 +72,8 @@ fn void encode_semantic_tokens(String content, DString* out)
 
 		usz tok_start = tok.offset;
 		usz tok_end = tok.offset + tok.len;
-		usz start_line = find_line(&lo, tok_start);
-		usz end_line = find_line(&lo, tok_end > 0 ? tok_end - 1 : 0);
+		usz start_line = lo.find_line(tok_start);
+		usz end_line = lo.find_line(tok_end > 0 ? tok_end - 1 : 0);
 
 		if (start_line == end_line)
 		{

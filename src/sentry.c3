@@ -59,9 +59,9 @@ fn String generate_event_id() @private
 	return id.str_view();
 }
 
-fn void sentry_capture_error(SentryConfig* config, String message, String lsp_method)
+fn void SentryConfig.capture_error(&self, String message, String lsp_method)
 {
-	if (!config.enabled) return;
+	if (!self.enabled) return;
 
 	// Clean up previous fire-and-forget process
 	if (has_sentry_proc)
@@ -91,14 +91,14 @@ fn void sentry_capture_error(SentryConfig* config, String message, String lsp_me
 	// Build auth header
 	DString auth = dstring::temp();
 	auth.append("X-Sentry-Auth: Sentry sentry_version=7, sentry_key=");
-	auth.append(config.key);
+	auth.append(self.key);
 
 	// Build URL
 	DString url = dstring::temp();
 	url.append("https://");
-	url.append(config.host);
+	url.append(self.host);
 	url.append("/api/");
-	url.append(config.project_id);
+	url.append(self.project_id);
 	url.append("/store/");
 
 	$if env::WIN32:

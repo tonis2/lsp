@@ -11,12 +11,12 @@ fn void encode_document_symbols(String content, DString* out)
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 
 	TokenList tokens;
 	tokens.init(mem);
 	defer tokens.free();
-	tokenize_content(content, &tokens);
+	tokens.tokenize(content);
 
 	bool first = true;
 
@@ -42,7 +42,7 @@ fn void encode_document_symbols(String content, DString* out)
 					name_offset = nt.offset;
 					name_len = nt.len;
 					kind = 2; // Module
-					end_offset = find_eos_end(&tokens, i + 2);
+					end_offset = tokens.find_eos_end(i + 2);
 				}
 			case IMPORT:
 				// import IDENT
@@ -53,7 +53,7 @@ fn void encode_document_symbols(String content, DString* out)
 					name_offset = nt.offset;
 					name_len = nt.len;
 					kind = 2; // Module
-					end_offset = find_eos_end(&tokens, i + 2);
+					end_offset = tokens.find_eos_end(i + 2);
 				}
 			case FUNC:
 				// fn ... IDENT LPAREN — the IDENT before LPAREN is the name
@@ -167,7 +167,7 @@ fn void encode_document_symbols(String content, DString* out)
 					}
 					if (kind != 0)
 					{
-						end_offset = find_eos_end(&tokens, i + 2);
+						end_offset = tokens.find_eos_end(i + 2);
 					}
 				}
 			default:
@@ -179,7 +179,7 @@ fn void encode_document_symbols(String content, DString* out)
 		// Find end of declaration for braced declarations
 		if (has_braces && end_offset == 0)
 		{
-			end_offset = find_brace_end(&tokens, i + 1);
+			end_offset = tokens.find_brace_end(i + 1);
 		}
 		if (end_offset == 0)
 		{
@@ -187,12 +187,12 @@ fn void encode_document_symbols(String content, DString* out)
 		}
 
 		// Build range and selectionRange using line offsets
-		usz decl_line = find_line(&lo, decl_offset);
+		usz decl_line = lo.find_line(decl_offset);
 		usz decl_char = decl_offset - lo.entries[decl_line];
-		usz end_line = find_line(&lo, end_offset > 0 ? end_offset - 1 : 0);
+		usz end_line = lo.find_line(end_offset > 0 ? end_offset - 1 : 0);
 		usz end_char = (end_offset > 0 ? end_offset : 1) - lo.entries[end_line];
 
-		usz sel_line = find_line(&lo, name_offset);
+		usz sel_line = lo.find_line(name_offset);
 		usz sel_char = name_offset - lo.entries[sel_line];
 		usz sel_end_line = sel_line;
 		usz sel_end_char = sel_char + name_len;
@@ -208,35 +208,35 @@ fn void encode_document_symbols(String content, DString* out)
 	}
 }
 
-fn usz find_eos_end(TokenList* tokens, usz start) @private
+fn usz TokenList.find_eos_end(&self, usz start)
 {
-	for (usz j = start; j < tokens.size; j++)
+	for (usz j = start; j < self.size; j++)
 	{
-		if (tokens.entries[j].type == EOS)
+		if (self.entries[j].type == EOS)
 		{
-			return tokens.entries[j].offset + tokens.entries[j].len;
+			return self.entries[j].offset + self.entries[j].len;
 		}
 	}
 	return 0;
 }
 
-fn usz find_brace_end(TokenList* tokens, usz start)
+fn usz TokenList.find_brace_end(&self, usz start)
 {
 	usz depth = 0;
 	bool found_brace = false;
-	for (usz j = start; j < tokens.size; j++)
+	for (usz j = start; j < self.size; j++)
 	{
-		if (tokens.entries[j].type == LBRACE)
+		if (self.entries[j].type == LBRACE)
 		{
 			depth++;
 			found_brace = true;
 		}
-		else if (tokens.entries[j].type == RBRACE)
+		else if (self.entries[j].type == RBRACE)
 		{
 			if (depth > 0) depth--;
 			if (depth == 0 && found_brace)
 			{
-				return tokens.entries[j].offset + tokens.entries[j].len;
+				return self.entries[j].offset + self.entries[j].len;
 			}
 		}
 	}

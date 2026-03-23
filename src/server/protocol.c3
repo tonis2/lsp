@@ -24,12 +24,12 @@ fn void LspServer.init(&self, String stdlib_path, String compiler_path, long dia
 	self.documents.init(mem);
 }
 
-fn void handle_message(LspServer* server, String message)
+fn void LspServer.handle_message(&self, String message)
 {
 	Object* msg = json::tparse_string(message) ?? null;
 	if (msg == null)
 	{
-		sentry_capture_error(&server.sentry, "Failed to parse JSON message", "unknown");
+		self.sentry.capture_error("Failed to parse JSON message", "unknown");
 		return;
 	}
 
@@ -59,7 +59,7 @@ fn void handle_message(LspServer* server, String message)
 
 	if (method == "initialize")
 	{
-		handle_initialize(server, msg, id_json);
+		self.handle_initialize(msg, id_json);
 	}
 	else if (method == "initialized")
 	{
@@ -67,71 +67,71 @@ fn void handle_message(LspServer* server, String message)
 	}
 	else if (method == "shutdown")
 	{
-		handle_shutdown(server, id_json);
+		self.handle_shutdown(id_json);
 	}
 	else if (method == "exit")
 	{
-		handle_exit(server);
+		self.handle_exit();
 	}
 	else if (method == "textDocument/didOpen")
 	{
-		handle_did_open(server, msg);
+		self.handle_did_open(msg);
 	}
 	else if (method == "textDocument/didChange")
 	{
-		handle_did_change(server, msg);
+		self.handle_did_change(msg);
 	}
 	else if (method == "textDocument/didClose")
 	{
-		handle_did_close(server, msg);
+		self.handle_did_close(msg);
 	}
 	else if (method == "textDocument/didSave")
 	{
-		handle_did_save(server, msg);
+		self.handle_did_save(msg);
 	}
 	else if (method == "textDocument/semanticTokens/full")
 	{
-		handle_semantic_tokens(server, msg, id_json);
+		self.handle_semantic_tokens(msg, id_json);
 	}
 	else if (method == "textDocument/foldingRange")
 	{
-		handle_folding_range(server, msg, id_json);
+		self.handle_folding_range(msg, id_json);
 	}
 	else if (method == "textDocument/documentSymbol")
 	{
-		handle_document_symbol(server, msg, id_json);
+		self.handle_document_symbol(msg, id_json);
 	}
 	else if (method == "textDocument/hover")
 	{
-		handle_hover(server, msg, id_json);
+		self.handle_hover(msg, id_json);
 	}
 	else if (method == "textDocument/completion")
 	{
-		handle_completion(server, msg, id_json);
+		self.handle_completion(msg, id_json);
 	}
 	else if (method == "textDocument/definition")
 	{
-		handle_definition(server, msg, id_json);
+		self.handle_definition(msg, id_json);
 	}
 	else if (method == "textDocument/declaration")
 	{
-		handle_definition(server, msg, id_json);
+		self.handle_definition(msg, id_json);
 	}
 	else if (method == "textDocument/documentHighlight")
 	{
-		handle_document_highlight(server, msg, id_json);
+		self.handle_document_highlight(msg, id_json);
 	}
 	else if (method == "textDocument/references")
 	{
-		handle_references(server, msg, id_json);
+		self.handle_references(msg, id_json);
 	}
 	else if (method == "textDocument/signatureHelp")
 	{
-		handle_signature_help(server, msg, id_json);
+		self.handle_signature_help(msg, id_json);
 	}
 	else if (method == "textDocument/rename")
 	{
-		handle_rename(server, msg, id_json);
+		self.handle_rename(msg, id_json);
 	}
 	else if (id_json != "null")
 	{

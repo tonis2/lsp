@@ -11,20 +11,20 @@ const usz MAX_COMPILER_DIAGNOSTICS = 50;
 
 // Run c3c build -C --lsp from the project root and publish diagnostics.
 // Falls back to compile-only for standalone files with no project.json.
-fn void publish_compiler_diagnostics(LspServer* server, String uri)
+fn void LspServer.publish_compiler_diagnostics(&self, String uri)
 {
 	String path = uri_to_path(uri);
 	if (path.len == 0) return;
 
 	// Find project root by walking up from file looking for project.json
 	ProjectDirs pdirs;
-	get_project_search_dirs(path, &pdirs);
+	pdirs.get_search_dirs(path);
 	String project_root = pdirs.project_root;
 
 	// Build command line
 	String[10] cmd;
 	usz cmd_len = 0;
-	cmd[cmd_len++] = server.compiler_path;
+	cmd[cmd_len++] = self.compiler_path;
 
 	if (project_root.len > 0)
 	{
@@ -44,10 +44,10 @@ fn void publish_compiler_diagnostics(LspServer* server, String uri)
 		cmd[cmd_len++] = path;
 	}
 
-	if (server.stdlib_path.len > 0)
+	if (self.stdlib_path.len > 0)
 	{
 		cmd[cmd_len++] = "--stdlib";
-		cmd[cmd_len++] = server.stdlib_path;
+		cmd[cmd_len++] = self.stdlib_path;
 	}
 
 	SubProcess proc;
@@ -59,15 +59,15 @@ fn void publish_compiler_diagnostics(LspServer* server, String uri)
 	{
 		DString errmsg = dstring::temp();
 		errmsg.append(`{"type":1,"message":"c3-lsp: failed to run '`);
-		json_escape_into(&errmsg, server.compiler_path);
+		json_escape_into(&errmsg, self.compiler_path);
 		errmsg.append(`'. Make sure c3c is in your PATH or set compiler-path."}`);
 		send_notification("window/showMessage", errmsg.str_view());
-		sentry_capture_error(&server.sentry, "Failed to spawn compiler process", "textDocument/publishDiagnostics");
+		self.sentry.capture_error("Failed to spawn compiler process", "textDocument/publishDiagnostics");
 		return;
 	}
 	if (catch proc.join())
 	{
-		sentry_capture_error(&server.sentry, "Compiler process join failed", "textDocument/publishDiagnostics");
+		self.sentry.capture_error("Compiler process join failed", "textDocument/publishDiagnostics");
 		proc.destroy();
 		return;
 	}
@@ -235,7 +235,7 @@ fn void publish_compiler_diagnostics(LspServer* server, String uri)
 	send_notification("textDocument/publishDiagnostics", params.str_view());
 
 	// Update last diagnostics time
-	server.last_diag_time = time::now();
+	self.last_diag_time = time::now();
 }
 
 // Check if a filesystem path matches a file:// URI.

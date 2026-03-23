@@ -13,11 +13,11 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 	TokenList tokens;
 	tokens.init(mem);
 	defer tokens.free();
-	tokenize_content(content, &tokens);
+	tokens.tokenize(content);
 
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!find_token_at(&tokens, offset, &cursor_tok, &cursor_idx)) return;
+	if (!tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
@@ -25,7 +25,7 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 
 	bool first = true;
 	out.append("[");
@@ -36,7 +36,7 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 			if (!first) out.append(",");
 			first = false;
 
-			usz line = find_line(&lo, tok.offset);
+			usz line = lo.find_line(tok.offset);
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
@@ -59,11 +59,11 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 	TokenList tokens;
 	tokens.init(mem);
 	defer tokens.free();
-	tokenize_content(content, &tokens);
+	tokens.tokenize(content);
 
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!find_token_at(&tokens, offset, &cursor_tok, &cursor_idx)) return;
+	if (!tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
@@ -72,7 +72,7 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 	out.append("[");
 
 	// 1. Current file — collect all matching tokens
-	collect_refs_in_tokens(uri, content, &tokens, cursor_tok, out, &first);
+	tokens.collect_refs(uri, content, cursor_tok, out, &first);
 
 	// 2. Open documents
 	for (usz d = 0; d < docs.size; d++)
@@ -81,8 +81,8 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 
 		TokenList other_tokens;
 		other_tokens.init(mem);
-		tokenize_content(docs.entries[d].content, &other_tokens);
-		collect_refs_in_tokens(docs.entries[d].uri, docs.entries[d].content, &other_tokens, cursor_tok, out, &first);
+		other_tokens.tokenize(docs.entries[d].content);
+		other_tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first);
 		other_tokens.free();
 	}
 
@@ -108,21 +108,21 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 }
 
 // Collect all tokens matching target name+type from a pre-tokenized stream, emitting Location JSON.
-fn void collect_refs_in_tokens(String uri, String content, TokenList* tokens, Token target, DString* out, bool* first) @private
+fn void TokenList.collect_refs(&self, String uri, String content, Token target, DString* out, bool* first)
 {
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 
-	foreach (tok : tokens)
+	foreach (tok : self)
 	{
 		if (tok.type == target.type && tok.text == target.text)
 		{
 			if (!*first) out.append(",");
 			*first = false;
 
-			usz line = find_line(&lo, tok.offset);
+			usz line = lo.find_line(tok.offset);
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
@@ -137,28 +137,28 @@ fn void collect_refs_in_tokens(String uri, String content, TokenList* tokens, To
 // or (0, 0) if offset is not inside any function.
 // The scope includes the parameter list so that renaming a parameter also covers
 // its occurrences in the function body.
-fn usz[2] find_function_scope(TokenList* tokens, usz offset) @private
+fn usz[2] TokenList.find_function_scope(&self, usz offset)
 {
-	for (usz i = 0; i < tokens.size; i++)
+	for (usz i = 0; i < self.size; i++)
 	{
-		TokenType tt = tokens.entries[i].type;
+		TokenType tt = self.entries[i].type;
 		if (tt == FUNC || tt == MACRO)
 		{
-			usz brace_end = find_brace_end(tokens, i + 1);
+			usz brace_end = self.find_brace_end(i + 1);
 			if (brace_end == 0) continue;
 
 			// Find the opening paren and brace offsets
 			usz paren_start = 0;
 			usz brace_start = 0;
-			for (usz j = i + 1; j < tokens.size; j++)
+			for (usz j = i + 1; j < self.size; j++)
 			{
-				if (paren_start == 0 && tokens.entries[j].type == LPAREN)
+				if (paren_start == 0 && self.entries[j].type == LPAREN)
 				{
-					paren_start = tokens.entries[j].offset;
+					paren_start = self.entries[j].offset;
 				}
-				if (tokens.entries[j].type == LBRACE)
+				if (self.entries[j].type == LBRACE)
 				{
-					brace_start = tokens.entries[j].offset;
+					brace_start = self.entries[j].offset;
 					break;
 				}
 			}
@@ -187,11 +187,11 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 	TokenList tokens;
 	tokens.init(mem);
 	defer tokens.free();
-	tokenize_content(content, &tokens);
+	tokens.tokenize(content);
 
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!find_ident_token_at(&tokens, offset, &cursor_tok, &cursor_idx))
+	if (!tokens.find_ident_token_at(offset, &cursor_tok, &cursor_idx))
 	{
 		return;
 	}
@@ -200,7 +200,7 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
 	// Check if cursor is inside a function body — if so, restrict rename to that scope
-	usz[2] scope = find_function_scope(&tokens, offset);
+	usz[2] scope = tokens.find_function_scope(offset);
 
 	bool first_uri = true;
 	out.append(`{"changes":{`);
@@ -208,13 +208,13 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 	if (scope[0] != 0 || scope[1] != 0)
 	{
 		// Local variable — only rename within this function's scope in current file
-		collect_rename_edits_scoped(uri, content, &tokens, cursor_tok, new_name, out, &first_uri, scope[0], scope[1]);
+		tokens.collect_rename_edits_scoped(uri, content, cursor_tok, new_name, out, &first_uri, scope[0], scope[1]);
 	}
 	else
 	{
 		// Module-level symbol — rename globally across all files
 		// 1. Current file
-		collect_rename_edits(uri, content, &tokens, cursor_tok, new_name, out, &first_uri);
+		tokens.collect_rename_edits(uri, content, cursor_tok, new_name, out, &first_uri);
 
 		// 2. Open documents
 		for (usz d = 0; d < docs.size; d++)
@@ -223,8 +223,8 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 
 			TokenList other_tokens;
 			other_tokens.init(mem);
-			tokenize_content(docs.entries[d].content, &other_tokens);
-			collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, &other_tokens, cursor_tok, new_name, out, &first_uri);
+			other_tokens.tokenize(docs.entries[d].content);
+			other_tokens.collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, cursor_tok, new_name, out, &first_uri);
 			other_tokens.free();
 		}
 
@@ -245,17 +245,17 @@ fn void encode_rename(String uri, String content, usz offset, DocumentList* docs
 }
 
 // Collect rename edits for matching tokens in a single file, emitting a URI-keyed TextEdit array.
-fn void collect_rename_edits(String uri, String content, TokenList* tokens, Token target, String new_name, DString* out, bool* first_uri) @private
+fn void TokenList.collect_rename_edits(&self, String uri, String content, Token target, String new_name, DString* out, bool* first_uri)
 {
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 
 	bool found_any = false;
 	bool first_edit = true;
 
-	foreach (tok : tokens)
+	foreach (tok : self)
 	{
 		if (tok.type == target.type && tok.text == target.text)
 		{
@@ -271,7 +271,7 @@ fn void collect_rename_edits(String uri, String content, TokenList* tokens, Toke
 			if (!first_edit) out.append(",");
 			first_edit = false;
 
-			usz line = find_line(&lo, tok.offset);
+			usz line = lo.find_line(tok.offset);
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
@@ -289,18 +289,18 @@ fn void collect_rename_edits(String uri, String content, TokenList* tokens, Toke
 }
 
 // Collect rename edits for matching tokens within a specific offset range in a single file.
-fn void collect_rename_edits_scoped(String uri, String content, TokenList* tokens, Token target,
-	String new_name, DString* out, bool* first_uri, usz scope_start, usz scope_end) @private
+fn void TokenList.collect_rename_edits_scoped(&self, String uri, String content, Token target,
+	String new_name, DString* out, bool* first_uri, usz scope_start, usz scope_end)
 {
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 
 	bool found_any = false;
 	bool first_edit = true;
 
-	foreach (tok : tokens)
+	foreach (tok : self)
 	{
 		if (tok.offset < scope_start || tok.offset >= scope_end) continue;
 		if (tok.type == target.type && tok.text == target.text)
@@ -317,7 +317,7 @@ fn void collect_rename_edits_scoped(String uri, String content, TokenList* token
 			if (!first_edit) out.append(",");
 			first_edit = false;
 
-			usz line = find_line(&lo, tok.offset);
+			usz line = lo.find_line(tok.offset);
 			usz col = tok.offset - lo.entries[line];
 			usz end_col = col + tok.len;
 
@@ -338,7 +338,7 @@ fn void collect_rename_edits_scoped(String uri, String content, TokenList* token
 fn void scan_project_files_rename(String file_path, Token target, String new_name, DString* out, bool* first_uri) @private
 {
 	ProjectDirs pdirs;
-	get_project_search_dirs(file_path, &pdirs);
+	pdirs.get_search_dirs(file_path);
 	if (pdirs.project_root.len == 0) return;
 
 	for (usz i = 0; i < pdirs.count; i++)
@@ -395,11 +395,11 @@ fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name
 				String content = (String)file_content;
 				TokenList tokens;
 				tokens.init(mem);
-				tokenize_content(content, &tokens);
+				tokens.tokenize(content);
 
 				DString uri = dstring::temp();
 				append_file_uri(&uri, full_path);
-				collect_rename_edits(uri.str_view(), content, &tokens, target, new_name, out, first_uri);
+				tokens.collect_rename_edits(uri.str_view(), content, target, new_name, out, first_uri);
 
 				tokens.free();
 				mem::free(file_content);
@@ -416,7 +416,7 @@ fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name
 fn void scan_project_files_refs(String file_path, Token target, DString* out, bool* first) @private
 {
 	ProjectDirs pdirs;
-	get_project_search_dirs(file_path, &pdirs);
+	pdirs.get_search_dirs(file_path);
 	if (pdirs.project_root.len == 0) return;
 
 	for (usz i = 0; i < pdirs.count; i++)
@@ -473,11 +473,11 @@ fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, boo
 				String content = (String)file_content;
 				TokenList tokens;
 				tokens.init(mem);
-				tokenize_content(content, &tokens);
+				tokens.tokenize(content);
 
 				DString uri = dstring::temp();
 				append_file_uri(&uri, full_path);
-				collect_refs_in_tokens(uri.str_view(), content, &tokens, target, out, first);
+				tokens.collect_refs(uri.str_view(), content, target, out, first);
 
 				tokens.free();
 				mem::free(file_content);

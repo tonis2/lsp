@@ -10,7 +10,7 @@ fn void encode_folding_ranges(String content, DString* out)
 {
 	LineOffsets* lo = mem::new(LineOffsets);
 	defer mem::free(lo);
-	build_line_offsets(content, lo);
+	lo.build(content);
 
 	Lexer lex;
 	lex.init(content);
@@ -30,7 +30,7 @@ fn void encode_folding_ranges(String content, DString* out)
 	{
 		if (try tok = lex.next())
 		{
-			usz line = find_line(lo, tok.offset);
+			usz line = lo.find_line( tok.offset);
 
 			switch (tok.type)
 			{
@@ -56,7 +56,7 @@ fn void encode_folding_ranges(String content, DString* out)
 				case CONTRACT:
 					// Multi-line comment/contract folding
 					usz end_offset = tok.offset + tok.len;
-					usz end_line = find_line(lo, end_offset > 0 ? end_offset - 1 : 0);
+					usz end_line = lo.find_line( end_offset > 0 ? end_offset - 1 : 0);
 					if (line != end_line)
 					{
 						if (!first) out.append_char(',');

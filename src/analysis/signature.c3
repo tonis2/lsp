@@ -13,7 +13,7 @@ fn void encode_signature_help(String content, usz offset, DString* out)
 	TokenList tokens;
 	tokens.init(mem);
 	defer tokens.free();
-	tokenize_content(content, &tokens);
+	tokens.tokenize(content);
 
 	// Find which token the cursor is at or after
 	// Walk backwards to find the function call context:

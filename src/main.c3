@@ -47,7 +47,7 @@ fn int main(String[] args_in) {
 		@pool() {
 			String msg = read_message(stdin_stream);
 			if (msg.len == 0) break;
-			handle_message(&server, msg);
+			server.handle_message(msg);
 		};
 	}
 

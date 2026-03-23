@@ -12,43 +12,43 @@ fn usz position_to_offset(String content, int line, int character)
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 	if ((usz)line < lo.size) return lo.entries[(usz)line] + (usz)character;
 	return 0;
 }
 
-fn void handle_initialize(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 {
-	server.initialized = true;
+	self.initialized = true;
 
 	// Extract initializationOptions if provided by the client
 	if (try opts = msg.get("params")!!.get("initializationOptions"))
 	{
 		String stdlib = opts.get_string("stdlib-path") ?? "";
-		if (stdlib.len > 0 && server.stdlib_path.len == 0)
+		if (stdlib.len > 0 && self.stdlib_path.len == 0)
 		{
 			char[] copy = mem::new_array(char, stdlib.len);
 			copy[..] = stdlib[..];
-			server.stdlib_path = (String)copy;
+			self.stdlib_path = (String)copy;
 		}
 		String compiler = opts.get_string("compiler-path") ?? "";
-		if (compiler.len > 0 && server.compiler_path == "c3c")
+		if (compiler.len > 0 && self.compiler_path == "c3c")
 		{
 			char[] copy = mem::new_array(char, compiler.len);
 			copy[..] = compiler[..];
-			server.compiler_path = (String)copy;
+			self.compiler_path = (String)copy;
 		}
 		int delay = opts.get_int("diagnosticsDelay") ?? 0;
-		if (delay > 0 && server.diag_delay_ms == 0)
+		if (delay > 0 && self.diag_delay_ms == 0)
 		{
-			server.diag_delay_ms = delay;
+			self.diag_delay_ms = delay;
 		}
 		String sentry = opts.get_string("sentryDsn") ?? "";
-		if (sentry.len > 0 && !server.sentry.enabled)
+		if (sentry.len > 0 && !self.sentry.enabled)
 		{
 			char[] copy = mem::new_array(char, sentry.len);
 			copy[..] = sentry[..];
-			server.sentry = parse_sentry_dsn((String)copy);
+			self.sentry = parse_sentry_dsn((String)copy);
 		}
 	}
 
@@ -77,30 +77,30 @@ fn void handle_initialize(LspServer* server, Object* msg, String id_json)
 	send_response(id_json, result.str_view());
 }
 
-fn void handle_shutdown(LspServer* server, String id_json)
+fn void LspServer.handle_shutdown(&self, String id_json)
 {
-	server.shutdown_requested = true;
+	self.shutdown_requested = true;
 	send_response(id_json, "null");
 }
 
-fn void handle_exit(LspServer* server)
+fn void LspServer.handle_exit(&self)
 {
-	server.running = false;
+	self.running = false;
 }
 
-fn void handle_did_open(LspServer* server, Object* msg)
+fn void LspServer.handle_did_open(&self, Object* msg)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 	String text = td.get_string("text") ?? "";
 	int version = td.get_int("version") ?? 0;
 
-	server.documents.open(uri, text, version);
+	self.documents.open(uri, text, version);
 	publish_diagnostics(uri, text);
-	maybe_run_compiler_diagnostics(server, uri);
+	self.maybe_run_compiler_diagnostics(uri);
 }
 
-fn void handle_did_change(LspServer* server, Object* msg)
+fn void LspServer.handle_did_change(&self, Object* msg)
 {
 	Object* params = msg.get("params")!!;
 	Object* td = params.get("textDocument")!!;
@@ -111,46 +111,46 @@ fn void handle_did_change(LspServer* server, Object* msg)
 	Object* first = changes.get_at(0);
 	String text = first.get_string("text") ?? "";
 
-	server.documents.update(uri, text, version);
+	self.documents.update(uri, text, version);
 	publish_diagnostics(uri, text);
 }
 
-fn void handle_did_close(LspServer* server, Object* msg)
+fn void LspServer.handle_did_close(&self, Object* msg)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
-	server.documents.close(uri);
+	self.documents.close(uri);
 }
 
-fn void handle_did_save(LspServer* server, Object* msg)
+fn void LspServer.handle_did_save(&self, Object* msg)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
-	maybe_run_compiler_diagnostics(server, uri);
+	self.maybe_run_compiler_diagnostics(uri);
 }
 
-fn void maybe_run_compiler_diagnostics(LspServer* server, String uri)
+fn void LspServer.maybe_run_compiler_diagnostics(&self, String uri)
 {
 	// Throttle: only run if enough time has passed since last run
-	if (server.diag_delay_ms > 0)
+	if (self.diag_delay_ms > 0)
 	{
 		Time now = time::now();
-		Duration elapsed = now - server.last_diag_time;
-		Duration delay = time::ms(server.diag_delay_ms);
-		if ((long)elapsed < (long)delay && (long)server.last_diag_time > 0)
+		Duration elapsed = now - self.last_diag_time;
+		Duration delay = time::ms(self.diag_delay_ms);
+		if ((long)elapsed < (long)delay && (long)self.last_diag_time > 0)
 		{
 			return;
 		}
 	}
-	publish_compiler_diagnostics(server, uri);
+	self.publish_compiler_diagnostics(uri);
 }
 
-fn void handle_semantic_tokens(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_semantic_tokens(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, `{"data":[]}`);
@@ -165,12 +165,12 @@ fn void handle_semantic_tokens(LspServer* server, Object* msg, String id_json)
 	send_response(id_json, result.str_view());
 }
 
-fn void handle_folding_range(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_folding_range(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "[]");
@@ -185,12 +185,12 @@ fn void handle_folding_range(LspServer* server, Object* msg, String id_json)
 	send_response(id_json, result.str_view());
 }
 
-fn void handle_document_symbol(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_document_symbol(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "[]");
@@ -205,12 +205,12 @@ fn void handle_document_symbol(LspServer* server, Object* msg, String id_json)
 	send_response(id_json, result.str_view());
 }
 
-fn void handle_hover(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_hover(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -224,7 +224,7 @@ fn void handle_hover(LspServer* server, Object* msg, String id_json)
 	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
-	encode_hover(uri, doc.content, offset, &server.documents, server.stdlib_path, &data);
+	encode_hover(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
 
 	if (data.str_view().len == 0)
 	{
@@ -236,12 +236,12 @@ fn void handle_hover(LspServer* server, Object* msg, String id_json)
 	}
 }
 
-fn void handle_completion(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_completion(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, `{"isIncomplete":false,"items":[]}`);
@@ -263,12 +263,12 @@ fn void handle_completion(LspServer* server, Object* msg, String id_json)
 	send_response(id_json, data.str_view());
 }
 
-fn void handle_definition(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_definition(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -282,7 +282,7 @@ fn void handle_definition(LspServer* server, Object* msg, String id_json)
 	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
-	encode_definition(uri, doc.content, offset, &server.documents, server.stdlib_path, &data);
+	encode_definition(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
 
 	if (data.str_view().len == 0)
 	{
@@ -294,12 +294,12 @@ fn void handle_definition(LspServer* server, Object* msg, String id_json)
 	}
 }
 
-fn void handle_signature_help(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_signature_help(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -325,12 +325,12 @@ fn void handle_signature_help(LspServer* server, Object* msg, String id_json)
 	}
 }
 
-fn void handle_document_highlight(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_document_highlight(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -356,12 +356,12 @@ fn void handle_document_highlight(LspServer* server, Object* msg, String id_json
 	}
 }
 
-fn void handle_references(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_references(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -381,7 +381,7 @@ fn void handle_references(LspServer* server, Object* msg, String id_json)
 	}
 
 	DString data = dstring::temp();
-	encode_references(uri, doc.content, offset, &server.documents, server.stdlib_path, include_decl, &data);
+	encode_references(uri, doc.content, offset, &self.documents, self.stdlib_path, include_decl, &data);
 
 	if (data.str_view().len == 0)
 	{
@@ -393,12 +393,12 @@ fn void handle_references(LspServer* server, Object* msg, String id_json)
 	}
 }
 
-fn void handle_rename(LspServer* server, Object* msg, String id_json)
+fn void LspServer.handle_rename(&self, Object* msg, String id_json)
 {
 	Object* td = msg.get("params")!!.get("textDocument")!!;
 	String uri = td.get_string("uri") ?? "";
 
-	Document* doc = server.documents.find(uri);
+	Document* doc = self.documents.find(uri);
 	if (doc == null)
 	{
 		send_response(id_json, "null");
@@ -419,7 +419,7 @@ fn void handle_rename(LspServer* server, Object* msg, String id_json)
 	usz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
-	encode_rename(uri, doc.content, offset, &server.documents, server.stdlib_path, new_name, &data);
+	encode_rename(uri, doc.content, offset, &self.documents, self.stdlib_path, new_name, &data);
 
 	if (data.str_view().len == 0)
 	{

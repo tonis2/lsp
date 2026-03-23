@@ -72,9 +72,9 @@ fn String strip_json_comments(String input) @private
 
 // Extract a directory from a source path and add it to search dirs.
 // Handles globs ("src/**"), individual files ("./helpers/context.c3"), and plain dirs ("src").
-fn void add_source_dir(String src, ProjectDirs* result) @private
+fn void ProjectDirs.add_source_dir(&self, String src)
 {
-	if (result.count >= MAX_SEARCH_DIRS) return;
+	if (self.count >= MAX_SEARCH_DIRS) return;
 
 	usz dir_end = src.len;
 	for (usz j = 0; j < src.len; j++)
@@ -113,19 +113,19 @@ fn void add_source_dir(String src, ProjectDirs* result) @private
 	String src_dir = src[:dir_end];
 
 	// Dedup
-	for (usz k = 0; k < result.count; k++)
+	for (usz k = 0; k < self.count; k++)
 	{
-		if (result.dirs[k] == src_dir) return;
+		if (self.dirs[k] == src_dir) return;
 	}
-	result.dirs[result.count++] = src_dir;
+	self.dirs[self.count++] = src_dir;
 }
 
 // Find project root and collect all search directories from project.json.
 // Includes dependency-search-paths, sources dirs, and build/unpacked_c3l.
-fn void get_project_search_dirs(String file_path, ProjectDirs* result)
+fn void ProjectDirs.get_search_dirs(&self, String file_path)
 {
-	result.project_root = "";
-	result.count = 0;
+	self.project_root = "";
+	self.count = 0;
 
 	String check_dir = parent_dir(file_path);
 	char[]? project_json_data;
@@ -136,14 +136,14 @@ fn void get_project_search_dirs(String file_path, ProjectDirs* result)
 		pj.appendf("%s/project.json", check_dir);
 		if (try data = file::load(mem, pj.str_view()))
 		{
-			result.project_root = check_dir;
+			self.project_root = check_dir;
 			project_json_data = data;
 			break;
 		}
 		check_dir = parent_dir(check_dir);
 	}
 
-	if (result.project_root.len == 0) return;
+	if (self.project_root.len == 0) return;
 
 	if (try data = project_json_data)
 	{
@@ -154,24 +154,24 @@ fn void get_project_search_dirs(String file_path, ProjectDirs* result)
 			if (try deps = pjson.get("dependency-search-paths"))
 			{
 				usz deps_len = deps.get_len();
-				for (usz i = 0; i < deps_len && result.count < MAX_SEARCH_DIRS; i++)
+				for (usz i = 0; i < deps_len && self.count < MAX_SEARCH_DIRS; i++)
 				{
 					Object* item = deps.get_at(i);
 					if (item == null) break;
-					if (item.is_string()) result.dirs[result.count++] = item.s;
+					if (item.is_string()) self.dirs[self.count++] = item.s;
 				}
 			}
 			if (try srcs = pjson.get("sources"))
 			{
 				usz srcs_len = srcs.get_len();
-				for (usz i = 0; i < srcs_len && result.count < MAX_SEARCH_DIRS; i++)
+				for (usz i = 0; i < srcs_len && self.count < MAX_SEARCH_DIRS; i++)
 				{
 					Object* item = srcs.get_at(i);
 					if (item == null) break;
 					if (item.is_string())
 					{
 						String src = item.s;
-						add_source_dir(src, result);
+						self.add_source_dir(src);
 					}
 				}
 			}
@@ -181,15 +181,15 @@ fn void get_project_search_dirs(String file_path, ProjectDirs* result)
 				if (targets.is_map())
 				{
 					targets.map.@each(; String key, Object* tgt) {
-						if (result.count >= MAX_SEARCH_DIRS) return;
+						if (self.count >= MAX_SEARCH_DIRS) return;
 						if (try tgt_srcs = tgt.get("sources"))
 						{
 							usz ts_len = tgt_srcs.get_len();
-							for (usz i = 0; i < ts_len && result.count < MAX_SEARCH_DIRS; i++)
+							for (usz i = 0; i < ts_len && self.count < MAX_SEARCH_DIRS; i++)
 							{
 								Object* item = tgt_srcs.get_at(i);
 								if (item == null) break;
-								if (item.is_string()) add_source_dir(item.s, result);
+								if (item.is_string()) self.add_source_dir(item.s);
 							}
 						}
 					};
@@ -198,22 +198,22 @@ fn void get_project_search_dirs(String file_path, ProjectDirs* result)
 		}
 	}
 
-	if (result.count == 0)
+	if (self.count == 0)
 	{
-		result.dirs[0] = "src";
-		result.dirs[1] = "lib";
-		result.count = 2;
+		self.dirs[0] = "src";
+		self.dirs[1] = "lib";
+		self.count = 2;
 	}
 
 	// Always include unpacked c3l libraries
-	if (result.count < MAX_SEARCH_DIRS)
+	if (self.count < MAX_SEARCH_DIRS)
 	{
-		result.dirs[result.count++] = "build/unpacked_c3l";
+		self.dirs[self.count++] = "build/unpacked_c3l";
 	}
 }
 
 // Tokenize content into a token list.
-fn void tokenize_content(String content, TokenList* tokens)
+fn void TokenList.tokenize(&self, String content)
 {
 	Lexer lex;
 	lex.init(content);
@@ -221,7 +221,7 @@ fn void tokenize_content(String content, TokenList* tokens)
 	{
 		if (try tok = lex.next())
 		{
-			tokens.push(tok);
+			self.push(tok);
 		}
 		else
 		{
@@ -235,14 +235,14 @@ fn void tokenize_content(String content, TokenList* tokens)
 // Find the token at a byte offset in a token stream.
 // If the offset lands between tokens (e.g. cursor at end of word),
 // also checks offset-1 to match the preceding token.
-fn bool find_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
+fn bool TokenList.find_token_at(&self, usz offset, Token* result, usz* idx)
 {
-	for (usz i = 0; i < tokens.size; i++)
+	for (usz i = 0; i < self.size; i++)
 	{
-		usz tok_end = tokens.get(i).offset + tokens.get(i).len;
-		if (tokens.get(i).offset <= offset && offset < tok_end)
+		usz tok_end = self.get(i).offset + self.get(i).len;
+		if (self.get(i).offset <= offset && offset < tok_end)
 		{
-			*result = tokens.get(i);
+			*result = self.get(i);
 			*idx = i;
 			return true;
 		}
@@ -252,12 +252,12 @@ fn bool find_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
 	if (offset > 0)
 	{
 		usz adj = offset - 1;
-		for (usz i = 0; i < tokens.size; i++)
+		for (usz i = 0; i < self.size; i++)
 		{
-			usz tok_end = tokens.get(i).offset + tokens.get(i).len;
-			if (tokens.get(i).offset <= adj && adj < tok_end)
+			usz tok_end = self.get(i).offset + self.get(i).len;
+			if (self.get(i).offset <= adj && adj < tok_end)
 			{
-				*result = tokens.get(i);
+				*result = self.get(i);
 				*idx = i;
 				return true;
 			}
@@ -270,11 +270,11 @@ fn bool find_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
 // (comma, paren, etc.), prefer the adjacent identifier token instead.
 // This handles the case where editors place the cursor right after a word,
 // landing on the following punctuation.
-fn bool find_ident_token_at(TokenList* tokens, usz offset, Token* result, usz* idx)
+fn bool TokenList.find_ident_token_at(&self, usz offset, Token* result, usz* idx)
 {
 	Token tok;
 	usz tok_idx;
-	if (!find_token_at(tokens, offset, &tok, &tok_idx)) return false;
+	if (!self.find_token_at(offset, &tok, &tok_idx)) return false;
 
 	// If we found an identifier-like token, use it directly
 	if (is_ident(tok.type) || tok.type == TYPE_IDENT || tok.type == CONST_IDENT)
@@ -289,7 +289,7 @@ fn bool find_ident_token_at(TokenList* tokens, usz offset, Token* result, usz* i
 	{
 		Token prev;
 		usz prev_idx;
-		if (find_token_at(tokens, offset - 1, &prev, &prev_idx))
+		if (self.find_token_at(offset - 1, &prev, &prev_idx))
 		{
 			if (is_ident(prev.type) || prev.type == TYPE_IDENT || prev.type == CONST_IDENT)
 			{
@@ -301,11 +301,11 @@ fn bool find_ident_token_at(TokenList* tokens, usz offset, Token* result, usz* i
 	}
 
 	// Also try offset+1 for when cursor is on space before a word
-	if (offset + 1 < tokens.entries[tokens.size - 1].offset + tokens.entries[tokens.size - 1].len)
+	if (offset + 1 < self.entries[self.size - 1].offset + self.entries[self.size - 1].len)
 	{
 		Token next;
 		usz next_idx;
-		if (find_token_at(tokens, offset + 1, &next, &next_idx))
+		if (self.find_token_at(offset + 1, &next, &next_idx))
 		{
 			if (is_ident(next.type) || next.type == TYPE_IDENT || next.type == CONST_IDENT)
 			{
@@ -328,9 +328,9 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
-	build_line_offsets(content, &lo);
+	lo.build(content);
 
-	usz line = find_line(&lo, tok.offset);
+	usz line = lo.find_line(tok.offset);
 	usz col = tok.offset - lo.entries[line];
 	usz end_col = col + tok.len;
 
@@ -340,19 +340,19 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 }
 
 // Find the type name of a variable by scanning for TYPE_IDENT var_name patterns.
-fn String find_variable_type(TokenList* tokens, String var_name) @private
+fn String TokenList.find_variable_type(&self, String var_name)
 {
-	for (usz i = 0; i + 1 < tokens.size; i++)
+	for (usz i = 0; i + 1 < self.size; i++)
 	{
-		if (tokens.get(i).type == TYPE_IDENT &&
-			is_ident(tokens.entries[i + 1].type) && tokens.entries[i + 1].text == var_name)
+		if (self.get(i).type == TYPE_IDENT &&
+			is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == var_name)
 		{
-			if (i + 2 < tokens.size)
+			if (i + 2 < self.size)
 			{
-				TokenType next = tokens.entries[i + 2].type;
+				TokenType next = self.entries[i + 2].type;
 				if (next == EOS || next == EQ || next == COMMA || next == DOT)
 				{
-					return tokens.get(i).text;
+					return self.get(i).text;
 				}
 			}
 		}
@@ -362,33 +362,33 @@ fn String find_variable_type(TokenList* tokens, String var_name) @private
 
 // Resolve a type alias to its base type name.
 // e.g. alias TokenList = List{Token} → "List"
-fn String resolve_type_alias(TokenList* tokens, String type_name) @private
+fn String TokenList.resolve_type_alias(&self, String type_name)
 {
-	for (usz i = 0; i + 3 < tokens.size; i++)
+	for (usz i = 0; i + 3 < self.size; i++)
 	{
-		if (tokens.get(i).type == ALIAS &&
-			tokens.entries[i + 1].type == TYPE_IDENT && tokens.entries[i + 1].text == type_name &&
-			tokens.entries[i + 2].type == EQ &&
-			tokens.entries[i + 3].type == TYPE_IDENT)
+		if (self.get(i).type == ALIAS &&
+			self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == type_name &&
+			self.entries[i + 2].type == EQ &&
+			self.entries[i + 3].type == TYPE_IDENT)
 		{
-			return tokens.entries[i + 3].text;
+			return self.entries[i + 3].text;
 		}
 	}
 	return "";
 }
 
 // Resolve a type alias searching current tokens + all open documents.
-fn String resolve_type_alias_across(TokenList* tokens, String type_name, DocumentList* docs) @private
+fn String TokenList.resolve_type_alias_across(&self, String type_name, DocumentList* docs)
 {
-	String resolved = resolve_type_alias(tokens, type_name);
+	String resolved = self.resolve_type_alias(type_name);
 	if (resolved.len > 0) return resolved;
 
 	for (usz d = 0; d < docs.size; d++)
 	{
 		TokenList doc_tokens;
 		doc_tokens.init(mem);
-		tokenize_content(docs.entries[d].content, &doc_tokens);
-		resolved = resolve_type_alias(&doc_tokens, type_name);
+		doc_tokens.tokenize(docs.entries[d].content);
+		resolved = doc_tokens.resolve_type_alias(type_name);
 		doc_tokens.free();
 		if (resolved.len > 0) return resolved;
 	}
@@ -426,8 +426,8 @@ fn String resolve_alias_in_dir(String dir_path, String type_name, int depth) @pr
 			{
 				TokenList tokens;
 				tokens.init(mem);
-				tokenize_content((String)file_content, &tokens);
-				String resolved = resolve_type_alias(&tokens, type_name);
+				tokens.tokenize((String)file_content);
+				String resolved = tokens.resolve_type_alias(type_name);
 				if (resolved.len > 0)
 				{
 					// Copy before freeing — resolved points into file_content
@@ -454,7 +454,7 @@ fn String resolve_alias_in_dir(String dir_path, String type_name, int depth) @pr
 fn String resolve_alias_in_project(String file_path, String type_name) @private
 {
 	ProjectDirs pdirs;
-	get_project_search_dirs(file_path, &pdirs);
+	pdirs.get_search_dirs(file_path);
 	if (pdirs.project_root.len == 0) return "";
 
 	for (usz i = 0; i < pdirs.count; i++)
@@ -469,17 +469,17 @@ fn String resolve_alias_in_project(String file_path, String type_name) @private
 
 // Detect method call context (IDENT DOT IDENT) and resolve the receiver type.
 // Returns the resolved type name (e.g. "List"), or empty string if not a method call.
-fn String resolve_method_type(TokenList* tokens, usz cursor_idx, String uri, DocumentList* docs)
+fn String TokenList.resolve_method_type(&self, usz cursor_idx, String uri, DocumentList* docs)
 {
 	if (cursor_idx < 2) return "";
-	if (tokens.entries[cursor_idx - 1].type != DOT) return "";
-	if (!is_ident(tokens.entries[cursor_idx - 2].type)) return "";
+	if (self.entries[cursor_idx - 1].type != DOT) return "";
+	if (!is_ident(self.entries[cursor_idx - 2].type)) return "";
 
-	String receiver_name = tokens.entries[cursor_idx - 2].text;
-	String type_name = find_variable_type(tokens, receiver_name);
+	String receiver_name = self.entries[cursor_idx - 2].text;
+	String type_name = self.find_variable_type(receiver_name);
 	if (type_name.len == 0) return "";
 
-	String resolved = resolve_type_alias_across(tokens, type_name, docs);
+	String resolved = self.resolve_type_alias_across(type_name, docs);
 	if (resolved.len == 0)
 	{
 		String file_path = uri_to_path(uri);
@@ -494,16 +494,16 @@ fn String resolve_method_type(TokenList* tokens, usz cursor_idx, String uri, Doc
 
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
 // Returns true if a definition was found and emitted.
-fn bool try_find_definition(
-	TokenList* tokens, Token cursor_tok, usz cursor_idx,
+fn bool TokenList.try_find_definition(
+	&self, Token cursor_tok, usz cursor_idx,
 	String uri, String content, DocumentList* docs, String stdlib_path,
-	DString* out, String method_type = "") @private
+	DString* out, String method_type = "")
 {
 	// 1. Search current file
-	usz decl_idx = find_declaration(tokens, cursor_tok, cursor_idx, method_type);
-	if (decl_idx < tokens.size && decl_idx != cursor_idx)
+	usz decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type);
+	if (decl_idx < self.size && decl_idx != cursor_idx)
 	{
-		emit_location(uri, content, tokens.entries[decl_idx], out);
+		emit_location(uri, content, self.entries[decl_idx], out);
 		return true;
 	}
 
@@ -514,9 +514,9 @@ fn bool try_find_definition(
 
 		TokenList other_tokens;
 		other_tokens.init(mem);
-		tokenize_content(docs.entries[d].content, &other_tokens);
+		other_tokens.tokenize(docs.entries[d].content);
 
-		usz found = find_declaration_in(&other_tokens, cursor_tok, method_type);
+		usz found = other_tokens.find_declaration_in(cursor_tok, method_type);
 		if (found < other_tokens.size)
 		{
 			emit_location(docs.entries[d].uri, docs.entries[d].content, other_tokens.entries[found], out);
@@ -555,12 +555,12 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 	TokenList tokens;
 	tokens.init(mem);
 	defer tokens.free();
-	tokenize_content(content, &tokens);
+	tokens.tokenize(content);
 
 	// Find the token at cursor
 	Token cursor_tok;
 	usz cursor_idx;
-	if (!find_token_at(&tokens, offset, &cursor_tok, &cursor_idx)) return;
+	if (!tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	// Only navigate for identifier-like tokens
 	TokenType ct = cursor_tok.type;
@@ -569,10 +569,10 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 	// Method call resolution: variable.method(
 	if (is_ident(ct))
 	{
-		String method_type = resolve_method_type(&tokens, cursor_idx, uri, docs);
+		String method_type = tokens.resolve_method_type(cursor_idx, uri, docs);
 		if (method_type.len > 0)
 		{
-			if (try_find_definition(&tokens, cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type))
+			if (tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type))
 			{
 				return;
 			}
@@ -580,32 +580,32 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 	}
 
 	// Regular search (non-method)
-	try_find_definition(&tokens, cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out);
+	tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out);
 }
 
 // Search for a declaration in a token stream (not tied to a cursor position).
-fn usz find_declaration_in(TokenList* tokens, Token target, String method_type = "") @private
+fn usz TokenList.find_declaration_in(&self, Token target, String method_type = "")
 {
-	return find_declaration(tokens, target, tokens.size, method_type); // pass impossible cursor_idx
+	return self.find_declaration(target, self.size, method_type); // pass impossible cursor_idx
 }
 
 // Searches for the declaration of a token in the token stream.
 // Returns the index of the name token at the declaration site,
-// or tokens.size if not found.
+// or self.size if not found.
 // When method_type is non-empty, searches for fn Type.name( pattern only.
-fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String method_type = "") @private
+fn usz TokenList.find_declaration(&self, Token target, usz target_idx, String method_type = "")
 {
 	String name = target.text;
 
 	switch (target.type)
 	{
 		case TYPE_IDENT:
-			for (usz i = 0; i + 1 < tokens.size; i++)
+			for (usz i = 0; i + 1 < self.size; i++)
 			{
-				TokenType kw = tokens.get(i).type;
+				TokenType kw = self.get(i).type;
 				if (is_type_declaration_keyword(kw))
 				{
-					if (tokens.entries[i + 1].type == TYPE_IDENT && tokens.entries[i + 1].text == name)
+					if (self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == name)
 					{
 						return i + 1;
 					}
@@ -613,51 +613,51 @@ fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String 
 			}
 		case CONST_IDENT:
 			// constdef NAME
-			for (usz i = 0; i + 1 < tokens.size; i++)
+			for (usz i = 0; i + 1 < self.size; i++)
 			{
-				if (tokens.get(i).type == CONSTDEF && tokens.entries[i + 1].type == CONST_IDENT && tokens.entries[i + 1].text == name)
+				if (self.get(i).type == CONSTDEF && self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name)
 				{
 					return i + 1;
 				}
 			}
 			// const [Type] NAME = ...
-			for (usz i = 0; i + 1 < tokens.size; i++)
+			for (usz i = 0; i + 1 < self.size; i++)
 			{
-				if (tokens.get(i).type != CONST) continue;
+				if (self.get(i).type != CONST) continue;
 				// const NAME = ... (no type)
-				if (tokens.entries[i + 1].type == CONST_IDENT && tokens.entries[i + 1].text == name)
+				if (self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name)
 				{
 					return i + 1;
 				}
 				// const Type NAME = ... (with type)
-				if (i + 2 < tokens.size && is_type_token(tokens.entries[i + 1].type) && tokens.entries[i + 2].type == CONST_IDENT && tokens.entries[i + 2].text == name)
+				if (i + 2 < self.size && is_type_token(self.entries[i + 1].type) && self.entries[i + 2].type == CONST_IDENT && self.entries[i + 2].text == name)
 				{
 					return i + 2;
 				}
 			}
 			// enum member: enum Foo { NAME, ... }
-			for (usz i = 0; i + 1 < tokens.size; i++)
+			for (usz i = 0; i + 1 < self.size; i++)
 			{
-				if (tokens.get(i).type != ENUM && tokens.get(i).type != FAULTDEF) continue;
+				if (self.get(i).type != ENUM && self.get(i).type != FAULTDEF) continue;
 				// Find the opening brace
 				usz brace = i + 1;
-				while (brace < tokens.size && tokens.entries[brace].type != LBRACE) brace++;
-				if (brace >= tokens.size) continue;
+				while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
+				if (brace >= self.size) continue;
 				// Scan enum body for matching CONST_IDENT
 				usz depth = 1;
-				for (usz j = brace + 1; j < tokens.size && depth > 0; j++)
+				for (usz j = brace + 1; j < self.size && depth > 0; j++)
 				{
-					if (tokens.entries[j].type == LBRACE)
+					if (self.entries[j].type == LBRACE)
 					{
 						depth++;
 						continue;
 					}
-					if (tokens.entries[j].type == RBRACE)
+					if (self.entries[j].type == RBRACE)
 					{
 						depth--;
 						continue;
 					}
-					if (depth == 1 && tokens.entries[j].type == CONST_IDENT && tokens.entries[j].text == name)
+					if (depth == 1 && self.entries[j].type == CONST_IDENT && self.entries[j].text == name)
 					{
 						return j;
 					}
@@ -668,60 +668,60 @@ fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String 
 			if (method_type.len > 0)
 			{
 				// Search for fn ... Type.method( pattern only
-				for (usz i = 0; i < tokens.size; i++)
+				for (usz i = 0; i < self.size; i++)
 				{
-					if (tokens.get(i).type != FUNC && tokens.get(i).type != MACRO) continue;
-					for (usz j = i + 1; j < tokens.size && j < i + 64; j++)
+					if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
+					for (usz j = i + 1; j < self.size && j < i + 64; j++)
 					{
-						if (tokens.entries[j].type == LPAREN)
+						if (self.entries[j].type == LPAREN)
 						{
 							if (j >= 3 &&
-								is_ident(tokens.entries[j - 1].type) && tokens.entries[j - 1].text == name &&
-								tokens.entries[j - 2].type == DOT &&
-								tokens.entries[j - 3].type == TYPE_IDENT && tokens.entries[j - 3].text == method_type)
+								is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name &&
+								self.entries[j - 2].type == DOT &&
+								self.entries[j - 3].type == TYPE_IDENT && self.entries[j - 3].text == method_type)
 							{
 								return j - 1;
 							}
 							break;
 						}
-						if (tokens.entries[j].type == LBRACE || tokens.entries[j].type == EOS) break;
+						if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
 					}
 				}
-				return tokens.size;
+				return self.size;
 			}
 			// fn ... name( or macro ... name(
-			for (usz i = 0; i < tokens.size; i++)
+			for (usz i = 0; i < self.size; i++)
 			{
-				if (tokens.get(i).type != FUNC && tokens.get(i).type != MACRO) continue;
-				for (usz j = i + 1; j < tokens.size && j < i + 64; j++)
+				if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
+				for (usz j = i + 1; j < self.size && j < i + 64; j++)
 				{
-					if (tokens.entries[j].type == LPAREN)
+					if (self.entries[j].type == LPAREN)
 					{
-						if (j > 0 && is_ident(tokens.entries[j - 1].type) && tokens.entries[j - 1].text == name)
+						if (j > 0 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name)
 						{
 							return j - 1;
 						}
 						break;
 					}
-					if (tokens.entries[j].type == LBRACE || tokens.entries[j].type == EOS) break;
+					if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
 				}
 			}
 			// macro name (no parens)
-			for (usz i = 0; i + 1 < tokens.size; i++)
+			for (usz i = 0; i + 1 < self.size; i++)
 			{
-				if (tokens.get(i).type == MACRO && is_ident(tokens.entries[i + 1].type) && tokens.entries[i + 1].text == name)
+				if (self.get(i).type == MACRO && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name)
 				{
 					return i + 1;
 				}
 			}
 			// type IDENT = ...
-			for (usz i = 0; i + 1 < tokens.size; i++)
+			for (usz i = 0; i + 1 < self.size; i++)
 			{
-				if (is_type_token(tokens.get(i).type) && is_ident(tokens.entries[i + 1].type) && tokens.entries[i + 1].text == name)
+				if (is_type_token(self.get(i).type) && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name)
 				{
-					if (i + 2 < tokens.size)
+					if (i + 2 < self.size)
 					{
-						TokenType next = tokens.entries[i + 2].type;
+						TokenType next = self.entries[i + 2].type;
 						if (next == EQ || next == EOS || next == COMMA)
 						{
 							return i + 1;
@@ -730,17 +730,17 @@ fn usz find_declaration(TokenList* tokens, Token target, usz target_idx, String 
 				}
 			}
 		default:
-			return tokens.size;
+			return self.size;
 	}
 
-	return tokens.size;
+	return self.size;
 }
 
 // Scan project directories for a declaration on disk.
 fn bool? scan_project_files(String file_path, Token target, DString* out, String method_type = "") @private
 {
 	ProjectDirs pdirs;
-	get_project_search_dirs(file_path, &pdirs);
+	pdirs.get_search_dirs(file_path);
 	if (pdirs.project_root.len == 0) return false;
 
 	for (usz i = 0; i < pdirs.count; i++)
@@ -805,9 +805,9 @@ fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int dept
 				String content = (String)file_content;
 				TokenList tokens;
 				tokens.init(mem);
-				tokenize_content(content, &tokens);
+				tokens.tokenize(content);
 
-				usz found = find_declaration_in(&tokens, target, method_type);
+				usz found = tokens.find_declaration_in(target, method_type);
 				if (found < tokens.size)
 				{
 					// Build file:// URI from path
