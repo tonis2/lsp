@@ -30,7 +30,7 @@ fn void encode_folding_ranges(String content, DString* out)
 	{
 		if (try tok = lex.next())
 		{
-			usz line = lo.find_line( tok.offset);
+			usz line = lo.find_line(tok.offset);
 
 			switch (tok.type)
 			{
@@ -48,7 +48,7 @@ fn void encode_folding_ranges(String content, DString* out)
 						if (start_line != line)
 						{
 							if (!first) out.append_char(',');
-							FoldingRange fr = {.start_line = start_line, .end_line = line};
+							FoldingRange fr = { .start_line = start_line, .end_line = line };
 							fr.encode(out);
 							first = false;
 						}
@@ -57,11 +57,11 @@ fn void encode_folding_ranges(String content, DString* out)
 				case CONTRACT:
 					// Multi-line comment/contract folding
 					usz end_offset = tok.offset + tok.len;
-					usz end_line = lo.find_line( end_offset > 0 ? end_offset - 1 : 0);
+					usz end_line = lo.find_line(end_offset > 0 ? end_offset - 1 : 0);
 					if (line != end_line)
 					{
 						if (!first) out.append_char(',');
-						FoldingRange fr = {.start_line = line, .end_line = end_line, .kind = "comment"};
+						FoldingRange fr = { .start_line = line, .end_line = end_line, .kind = "comment" };
 						fr.encode(out);
 						first = false;
 					}
@@ -84,8 +84,8 @@ fn void encode_folding_ranges(String content, DString* out)
 						if (import_count >= 2)
 						{
 							if (!first) out.append_char(',');
-							FoldingRange fr = {.start_line = import_start_line, .end_line = last_import_line, .kind = "imports"};
-						fr.encode(out);
+							FoldingRange fr = { .start_line = import_start_line, .end_line = last_import_line, .kind = "imports" };
+							fr.encode(out);
 							first = false;
 						}
 						import_start_line = line;
@@ -107,8 +107,8 @@ fn void encode_folding_ranges(String content, DString* out)
 							if (import_count >= 2)
 							{
 								if (!first) out.append_char(',');
-								FoldingRange fr = {.start_line = import_start_line, .end_line = last_import_line, .kind = "imports"};
-						fr.encode(out);
+								FoldingRange fr = { .start_line = import_start_line, .end_line = last_import_line, .kind = "imports" };
+								fr.encode(out);
 								first = false;
 							}
 							import_count = 0;
@@ -128,7 +128,7 @@ fn void encode_folding_ranges(String content, DString* out)
 	if (import_count >= 2)
 	{
 		if (!first) out.append_char(',');
-		FoldingRange fr = {.start_line = import_start_line, .end_line = last_import_line, .kind = "imports"};
+		FoldingRange fr = { .start_line = import_start_line, .end_line = last_import_line, .kind = "imports" };
 		fr.encode(out);
 	}
 }

@@ -24,6 +24,15 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 
 	// Detect if cursor is on a member access (preceded by DOT)
 	bool is_member = cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT;
+	String member_receiver = "";
+	if (is_member && cursor_idx >= 2)
+	{
+		Token recv = stream.tokens.entries[cursor_idx - 2];
+		if (is_ident(recv.type) || recv.type == TYPE_IDENT || recv.type == CONST_IDENT)
+		{
+			member_receiver = recv.text;
+		}
+	}
 
 	bool first = true;
 	out.append("[");
@@ -35,6 +44,13 @@ fn void encode_document_highlights(String content, usz offset, DString* out)
 			// Filter: member access tokens only match other member access tokens
 			bool tok_is_member = i > 0 && stream.tokens.entries[i - 1].type == DOT;
 			if (is_member != tok_is_member) continue;
+
+			// For member accesses, require the receiver (ident before DOT) to match
+			if (is_member && member_receiver.len > 0 && i >= 2)
+			{
+				Token recv = stream.tokens.entries[i - 2];
+				if (recv.text != member_receiver) continue;
+			}
 
 			if (!first) out.append(",");
 			first = false;
@@ -76,36 +92,55 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
-	// Detect if cursor is on a member access (preceded by DOT)
+	// Detect if cursor is on a member access (preceded by DOT).
+	// For member accesses, find the receiver name (IDENT before DOT) and restrict
+	// matching to same receiver.member patterns. This avoids false positives where
+	// e.g. `.type` on one struct matches `.type` on a completely different struct.
 	bool is_member = cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT;
+	String member_receiver = "";
+	if (is_member && cursor_idx >= 2)
+	{
+		Token recv = stream.tokens.entries[cursor_idx - 2];
+		if (is_ident(recv.type) || recv.type == TYPE_IDENT || recv.type == CONST_IDENT)
+		{
+			member_receiver = recv.text;
+		}
+	}
 
 	bool first = true;
 	out.append("[");
 
 	// 1. Current file — collect all matching tokens
-	stream.tokens.collect_refs(uri, content, cursor_tok, out, &first, is_member);
+	stream.tokens.collect_refs(uri, content, cursor_tok, out, &first, is_member, member_receiver);
 
-	// 2. Open documents
-	for (usz d = 0; d < docs.size; d++)
+	if (!is_member)
 	{
-		if (docs.entries[d].uri == uri) continue;
+		// Only search cross-file for non-member identifiers.
+		// Member accesses (e.g. .tokens, .type) cannot be resolved without type
+		// information, so cross-file matches would be false positives.
 
-		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
-		other_stream.tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first, is_member);
-		other_stream.free();
-	}
+		// 2. Open documents
+		for (usz d = 0; d < docs.size; d++)
+		{
+			if (docs.entries[d].uri == uri) continue;
 
-	// 3. Scan project files on disk
-	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		scan_project_files_refs(file_path, cursor_tok, out, &first, is_member);
-	}
+			TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+			other_stream.tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first);
+			other_stream.free();
+		}
 
-	// 4. Scan stdlib
-	if (stdlib_path.len > 0)
-	{
-		scan_dir_recursive_refs(stdlib_path, cursor_tok, out, &first, 0, is_member);
+		// 3. Scan project files on disk
+		String file_path = uri_to_path(uri);
+		if (file_path.len > 0)
+		{
+			scan_project_files_refs(file_path, cursor_tok, out, &first);
+		}
+
+		// 4. Scan stdlib
+		if (stdlib_path.len > 0)
+		{
+			scan_dir_recursive_refs(stdlib_path, cursor_tok, out, &first, 0);
+		}
 	}
 
 	out.append("]");
@@ -117,8 +152,8 @@ fn void encode_references(String uri, String content, usz offset, DocumentList* 
 }
 
 // Collect all tokens matching target name+type from a pre-tokenized stream, emitting Location JSON.
-// When member_access is true, only matches tokens preceded by DOT; when false, only non-DOT tokens.
-fn void TokenList.collect_refs(&self, String uri, String content, Token target, DString* out, bool* first, bool member_access = false)
+// When member_access is true, only matches tokens preceded by DOT with the same receiver name.
+fn void TokenList.collect_refs(&self, String uri, String content, Token target, DString* out, bool* first, bool member_access = false, String member_receiver = "")
 {
 	LineOffsets lo;
 	lo.init(mem);
@@ -132,6 +167,13 @@ fn void TokenList.collect_refs(&self, String uri, String content, Token target, 
 		{
 			bool tok_is_member = i > 0 && self.entries[i - 1].type == DOT;
 			if (member_access != tok_is_member) continue;
+
+			// For member accesses, require the receiver (ident before DOT) to match
+			if (member_access && member_receiver.len > 0 && i >= 2)
+			{
+				Token recv = self.entries[i - 2];
+				if (recv.text != member_receiver) continue;
+			}
 
 			if (!*first) out.append(",");
 			*first = false;
@@ -436,7 +478,7 @@ fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name
 }
 
 // Scan project directories for all references on disk.
-fn void scan_project_files_refs(String file_path, Token target, DString* out, bool* first, bool member_access = false) @private
+fn void scan_project_files_refs(String file_path, Token target, DString* out, bool* first) @private
 {
 	ProjectDirs pdirs;
 	pdirs.get_search_dirs(file_path);
@@ -446,12 +488,12 @@ fn void scan_project_files_refs(String file_path, Token target, DString* out, bo
 	{
 		DString search_path = dstring::temp();
 		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		scan_dir_recursive_refs(search_path.str_view(), target, out, first, 0, member_access);
+		scan_dir_recursive_refs(search_path.str_view(), target, out, first, 0);
 	}
 }
 
 // Recursively scan directories for all references.
-fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, bool* first, int depth, bool member_access = false) @private
+fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, bool* first, int depth) @private
 {
 	if (depth > MAX_SCAN_DEPTH) return;
 
@@ -498,7 +540,7 @@ fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, boo
 
 				DString uri = dstring::temp();
 				append_file_uri(&uri, full_path);
-				stream.tokens.collect_refs(uri.str_view(), content, target, out, first, member_access);
+				stream.tokens.collect_refs(uri.str_view(), content, target, out, first);
 
 				stream.free();
 				mem::free(file_content);
@@ -506,7 +548,7 @@ fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, boo
 		}
 		else
 		{
-			scan_dir_recursive_refs(full_path, target, out, first, depth + 1, member_access);
+			scan_dir_recursive_refs(full_path, target, out, first, depth + 1);
 		}
 	}
 }

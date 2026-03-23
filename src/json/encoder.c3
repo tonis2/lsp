@@ -4,27 +4,32 @@ import std::core::dstring;
 import std::core::mem;
 
 // Data structures for encoding
-struct Position {
+struct Position
+{
 	usz line;
 	usz character;
 }
 
-struct Range {
+struct Range
+{
 	Position start;
 	Position end;
 }
 
-struct Location {
+struct Location
+{
 	String uri;
 	Range range;
 }
 
-struct DocumentHighlight {
+struct DocumentHighlight
+{
 	Range range;
 	int kind; // 1 = text, 2 = read, 3 = write
 }
 
-struct DocumentSymbol {
+struct DocumentSymbol
+{
 	String name;
 	int kind;
 	Range range;
@@ -32,17 +37,20 @@ struct DocumentSymbol {
 	DocumentSymbol[] children;
 }
 
-struct TextEdit {
+struct TextEdit
+{
 	Range range;
 	String new_text;
 }
 
-struct DocumentChange {
+struct DocumentChange
+{
 	String uri;
 	TextEdit[] edits;
 }
 
-struct CompletionItem {
+struct CompletionItem
+{
 	String label;
 	int kind;
 	String detail;
@@ -50,18 +58,21 @@ struct CompletionItem {
 	String insert_text;
 }
 
-struct ParameterInformation {
+struct ParameterInformation
+{
 	String label;
 	String documentation;
 }
 
-struct SignatureInformation {
+struct SignatureInformation
+{
 	String label;
 	ParameterInformation[] parameters;
 	String documentation;
 }
 
-struct SemanticToken {
+struct SemanticToken
+{
 	usz line;
 	usz character;
 	usz length;
@@ -69,7 +80,8 @@ struct SemanticToken {
 	int token_modifiers;
 }
 
-struct FoldingRange {
+struct FoldingRange
+{
 	usz start_line;
 	usz end_line;
 	String kind;
@@ -77,11 +89,13 @@ struct FoldingRange {
 
 // Struct encode methods
 
-fn void Position.encode(&self, DString* out) {
+fn void Position.encode(&self, DString* out)
+{
 	out.appendf(`{"line":%d,"character":%d}`, self.line, self.character);
 }
 
-fn void Range.encode(&self, DString* out) {
+fn void Range.encode(&self, DString* out)
+{
 	out.append(`{"start":`);
 	self.start.encode(out);
 	out.append(",\"end\":");
@@ -89,7 +103,8 @@ fn void Range.encode(&self, DString* out) {
 	out.append_char('}');
 }
 
-fn void Location.encode(&self, DString* out) {
+fn void Location.encode(&self, DString* out)
+{
 	out.append(`{"uri":"`);
 	json_escape_into(out, self.uri);
 	out.append(`","range":`);
@@ -97,13 +112,15 @@ fn void Location.encode(&self, DString* out) {
 	out.append_char('}');
 }
 
-fn void DocumentHighlight.encode(&self, DString* out) {
+fn void DocumentHighlight.encode(&self, DString* out)
+{
 	out.append(`{"range":`);
 	self.range.encode(out);
 	out.appendf(`,"kind":%d}`, self.kind);
 }
 
-fn void DocumentSymbol.encode(&self, DString* out) {
+fn void DocumentSymbol.encode(&self, DString* out)
+{
 	out.append(`{"name":"`);
 	json_escape_into(out, self.name);
 	out.appendf(`","kind":%d`, self.kind);
@@ -111,10 +128,12 @@ fn void DocumentSymbol.encode(&self, DString* out) {
 	self.range.encode(out);
 	out.append(",\"selectionRange\":");
 	self.selection_range.encode(out);
-	if (self.children.len > 0) {
+	if (self.children.len > 0)
+	{
 		out.append(",\"children\":[");
 		bool first = true;
-		foreach (&child : self.children) {
+		foreach (&child : self.children)
+		{
 			if (!first) out.append_char(',');
 			first = false;
 			child.encode(out);
@@ -124,7 +143,8 @@ fn void DocumentSymbol.encode(&self, DString* out) {
 	out.append_char('}');
 }
 
-fn void TextEdit.encode(&self, DString* out) {
+fn void TextEdit.encode(&self, DString* out)
+{
 	out.append(`{"range":`);
 	self.range.encode(out);
 	out.append(`,"newText":"`);
@@ -133,24 +153,29 @@ fn void TextEdit.encode(&self, DString* out) {
 	out.append_char('}');
 }
 
-fn void CompletionItem.encode(&self, DString* out) {
+fn void CompletionItem.encode(&self, DString* out)
+{
 	out.append(`{"label":"`);
 	json_escape_into(out, self.label);
 	out.append_char('"');
-	if (self.kind != 0) {
+	if (self.kind != 0)
+	{
 		out.appendf(",\"kind\":%d", self.kind);
 	}
-	if (self.detail.len > 0) {
+	if (self.detail.len > 0)
+	{
 		out.append(",\"detail\":\"");
 		json_escape_into(out, self.detail);
 		out.append_char('"');
 	}
-	if (self.documentation.len > 0) {
+	if (self.documentation.len > 0)
+	{
 		out.append(",\"documentation\":\"");
 		json_escape_into(out, self.documentation);
 		out.append_char('"');
 	}
-	if (self.insert_text.len > 0) {
+	if (self.insert_text.len > 0)
+	{
 		out.append(",\"insertText\":\"");
 		json_escape_into(out, self.insert_text);
 		out.append_char('"');
@@ -158,9 +183,11 @@ fn void CompletionItem.encode(&self, DString* out) {
 	out.append_char('}');
 }
 
-fn void FoldingRange.encode(&self, DString* out) {
+fn void FoldingRange.encode(&self, DString* out)
+{
 	out.appendf(`{"startLine":%d,"endLine":%d`, self.start_line, self.end_line);
-	if (self.kind.len > 0) {
+	if (self.kind.len > 0)
+	{
 		out.append(",\"kind\":\"");
 		json_escape_into(out, self.kind);
 		out.append_char('"');
@@ -170,14 +197,14 @@ fn void FoldingRange.encode(&self, DString* out) {
 
 // Standalone encode functions for complex responses
 
-fn void encode_hover_response(DString* out, String content, Range range) {
+fn void encode_hover_response(DString* out, String content, Range range)
+{
 	out.append(`{"contents":{"kind":"markdown","value":"`);
 	json_escape_into(out, content);
 	out.append(`"},"range":`);
 	range.encode(out);
 	out.append_char('}');
 }
-
 
 fn void json_escape_into(DString* out, String s)
 {

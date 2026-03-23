@@ -9,7 +9,8 @@ const String VERSION = "0.1.1";
 // This corrupts LSP protocol framing, so we must set binary mode before any I/O.
 extern fn int _setmode(int fd, int mode) @if(env::WIN32);
 
-fn int main(String[] args_in) {
+fn int main(String[] args_in)
+{
 	$if env::WIN32:
 		_setmode(0, 0x8000); // stdin -> O_BINARY
 		_setmode(1, 0x8000); // stdout -> O_BINARY
@@ -43,8 +44,10 @@ fn int main(String[] args_in) {
 
 	InStream stdin_stream = io::stdin();
 
-	while (server.running) {
-		@pool() {
+	while (server.running)
+	{
+		@pool()
+		{
 			String msg = read_message(stdin_stream);
 			if (msg.len == 0) break;
 			server.handle_message(msg);

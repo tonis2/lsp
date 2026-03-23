@@ -79,7 +79,11 @@ fn void ProjectDirs.add_source_dir(&self, String src)
 	usz dir_end = src.len;
 	for (usz j = 0; j < src.len; j++)
 	{
-		if (src[j] == '*') { dir_end = j; break; }
+		if (src[j] == '*')
+		{
+			dir_end = j;
+			break;
+		}
 	}
 	if (dir_end > 0 && is_path_separator(src[dir_end - 1])) dir_end--;
 
@@ -94,7 +98,12 @@ fn void ProjectDirs.add_source_dir(&self, String src)
 			bool found_slash = false;
 			for (usz j = s.len; j > 0; j--)
 			{
-				if (is_path_separator(s[j - 1])) { last_slash = j - 1; found_slash = true; break; }
+				if (is_path_separator(s[j - 1]))
+				{
+					last_slash = j - 1;
+					found_slash = true;
+					break;
+				}
 			}
 			if (found_slash && last_slash > 0)
 			{
@@ -180,7 +189,8 @@ fn void ProjectDirs.get_search_dirs(&self, String file_path)
 			{
 				if (targets.is_map())
 				{
-					targets.map.@each(; String key, Object* tgt) {
+					targets.map.@each(; String key, Object* tgt)
+					{
 						if (self.count >= MAX_SEARCH_DIRS) return;
 						if (try tgt_srcs = tgt.get("sources"))
 						{
@@ -334,13 +344,7 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 	usz col = tok.offset - lo.entries[line];
 	usz end_col = col + tok.len;
 
-	Location loc = {
-		.uri = uri,
-		.range = {
-			.start = {.line = line, .character = col},
-			.end = {.line = line, .character = end_col},
-		},
-	};
+	Location loc = { .uri = uri, .range = { .start = { .line = line, .character = col }, .end = { .line = line, .character = end_col }, }, };
 	loc.encode(out);
 }
 
@@ -349,8 +353,7 @@ fn String TokenList.find_variable_type(&self, String var_name)
 {
 	for (usz i = 0; i + 1 < self.size; i++)
 	{
-		if (self.get(i).type == TYPE_IDENT &&
-			is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == var_name)
+		if (self.get(i).type == TYPE_IDENT && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == var_name)
 		{
 			if (i + 2 < self.size)
 			{
@@ -371,10 +374,7 @@ fn String TokenList.resolve_type_alias(&self, String type_name)
 {
 	for (usz i = 0; i + 3 < self.size; i++)
 	{
-		if (self.get(i).type == ALIAS &&
-			self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == type_name &&
-			self.entries[i + 2].type == EQ &&
-			self.entries[i + 3].type == TYPE_IDENT)
+		if (self.get(i).type == ALIAS && self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == type_name && self.entries[i + 2].type == EQ && self.entries[i + 3].type == TYPE_IDENT)
 		{
 			return self.entries[i + 3].text;
 		}
@@ -404,9 +404,23 @@ fn String resolve_alias_in_dir(String dir_path, String type_name, int depth) @pr
 	if (depth > MAX_SCAN_DEPTH) return "";
 
 	Path p;
-	if (try pp = path::temp(dir_path)) { p = pp; } else { return ""; }
+	if (try pp = path::temp(dir_path))
+	{
+		p = pp;
+	}
+	else
+	{
+		return "";
+	}
 	PathList entries;
-	if (try el = path::ls(mem, p)) { entries = el; } else { return ""; }
+	if (try el = path::ls(mem, p))
+	{
+		entries = el;
+	}
+	else
+	{
+		return "";
+	}
 	defer
 	{
 		foreach (&e : entries) e.free();
@@ -468,16 +482,48 @@ fn String resolve_alias_in_project(String file_path, String type_name) @private
 	return "";
 }
 
-// Detect method call context (IDENT DOT IDENT) and resolve the receiver type.
-// Returns the resolved type name (e.g. "List"), or empty string if not a method call.
-fn String TokenList.resolve_method_type(&self, usz cursor_idx, String uri, DocumentList* docs)
+// Resolve the type of a receiver in a DOT expression at cursor_idx.
+// cursor_idx is the token AFTER the DOT. The token at cursor_idx-2 must be an IDENT.
+// Handles chained access: for stream.tokens.method(), resolves stream→TokenStream,
+// then TokenStream.tokens→TokenList, returning "TokenList".
+// Returns the type name (e.g. "TokenStream"), or empty string if not resolvable.
+fn String TokenList.resolve_receiver_type(&self, usz cursor_idx, String uri, DocumentList* docs)
 {
 	if (cursor_idx < 2) return "";
 	if (self.entries[cursor_idx - 1].type != DOT) return "";
-	if (!is_ident(self.entries[cursor_idx - 2].type)) return "";
 
-	String receiver_name = self.entries[cursor_idx - 2].text;
-	String type_name = self.find_variable_type(receiver_name);
+	Token recv = self.entries[cursor_idx - 2];
+	if (!is_ident(recv.type) && recv.type != TYPE_IDENT && recv.type != CONST_IDENT) return "";
+
+	// If receiver is a TYPE_IDENT, it IS the type (e.g. Type.CONSTANT)
+	if (recv.type == TYPE_IDENT) return recv.text;
+
+	String type_name;
+
+	// Check if receiver is itself a chained access (e.g. stream.tokens in stream.tokens.method)
+	if (cursor_idx >= 4 && self.entries[cursor_idx - 3].type == DOT)
+	{
+		// Recursively resolve the chain
+		String parent_type = self.resolve_receiver_type(cursor_idx - 2, uri, docs);
+		if (parent_type.len > 0)
+		{
+			// Look up the field type: parent_type.recv → field type
+			type_name = self.resolve_field_type_across(parent_type, recv.text, uri, docs);
+		}
+	}
+
+	// If chain resolution didn't work, try as a local variable
+	if (type_name.len == 0)
+	{
+		type_name = self.find_variable_type(recv.text);
+	}
+
+	// Handle "self" — find enclosing fn Type.method(&self) and extract Type
+	if (type_name.len == 0 && recv.text == "self")
+	{
+		type_name = self.find_enclosing_method_type(recv.offset);
+	}
+
 	if (type_name.len == 0) return "";
 
 	String resolved = self.resolve_type_alias_across(type_name, docs);
@@ -493,12 +539,369 @@ fn String TokenList.resolve_method_type(&self, usz cursor_idx, String uri, Docum
 	return type_name;
 }
 
+// Find the type of the enclosing method for "self" resolution.
+// Scans backwards from offset to find fn Type.method(&self, ...) and returns "Type".
+fn String TokenList.find_enclosing_method_type(&self, usz offset)
+{
+	// Find the fn/macro keyword before this offset
+	for (usz i = self.size; i > 0; i--)
+	{
+		if (self.entries[i - 1].offset > offset) continue;
+		TokenType tt = self.entries[i - 1].type;
+		if (tt != FUNC && tt != MACRO) continue;
+
+		// Found fn/macro before offset. Look for Type.name( pattern after it.
+		for (usz j = i; j < self.size && j < i + 64; j++)
+		{
+			if (self.entries[j].type == LPAREN)
+			{
+				// Check for Type.name( pattern: entries[j-3]=TYPE_IDENT, [j-2]=DOT, [j-1]=IDENT
+				if (j >= 3 && self.entries[j - 2].type == DOT && self.entries[j - 3].type == TYPE_IDENT)
+				{
+					return self.entries[j - 3].text;
+				}
+				break;
+			}
+			if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
+		}
+		break;
+	}
+	return "";
+}
+
+// Resolve the type of a struct field across current file, open docs, and project files.
+fn String TokenList.resolve_field_type_across(&self, String struct_type, String field_name, String uri, DocumentList* docs)
+{
+	// 1. Current file
+	String result = self.find_struct_field_type(struct_type, field_name);
+	if (result.len > 0) return result;
+
+	// 2. Open documents
+	for (usz d = 0; d < docs.size; d++)
+	{
+		TokenStream doc_stream = token_stream_tokenize(docs.entries[d].content);
+		result = doc_stream.tokens.find_struct_field_type(struct_type, field_name);
+		doc_stream.free();
+		if (result.len > 0) return result;
+	}
+
+	// 3. Project files on disk
+	String file_path = uri_to_path(uri);
+	if (file_path.len > 0)
+	{
+		result = resolve_field_type_in_project(file_path, struct_type, field_name);
+		if (result.len > 0) return result;
+	}
+
+	return "";
+}
+
+fn String resolve_field_type_in_project(String file_path, String struct_type, String field_name) @private
+{
+	ProjectDirs pdirs;
+	pdirs.get_search_dirs(file_path);
+	if (pdirs.project_root.len == 0) return "";
+
+	for (usz i = 0; i < pdirs.count; i++)
+	{
+		DString search_path = dstring::temp();
+		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
+		String result = resolve_field_type_in_dir(search_path.str_view(), struct_type, field_name, 0);
+		if (result.len > 0) return result;
+	}
+	return "";
+}
+
+fn String resolve_field_type_in_dir(String dir_path, String struct_type, String field_name, int depth) @private
+{
+	if (depth > MAX_SCAN_DEPTH) return "";
+
+	Path p;
+	if (try pp = path::temp(dir_path))
+	{
+		p = pp;
+	}
+	else
+	{
+		return "";
+	}
+	PathList entries;
+	if (try el = path::ls(mem, p))
+	{
+		entries = el;
+	}
+	else
+	{
+		return "";
+	}
+	defer
+	{
+		foreach (&e : entries) e.free();
+		entries.free();
+	}
+
+	foreach (entry : entries)
+	{
+		String entry_name = entry.str_view();
+		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
+		defer mem::free(path_buf);
+		path_buf[:dir_path.len] = dir_path[:dir_path.len];
+		path_buf[dir_path.len] = '/';
+		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
+		String full_path = (String)path_buf;
+
+		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
+		{
+			if (try file_content = file::load(mem, full_path))
+			{
+				TokenStream stream = token_stream_tokenize((String)file_content);
+				String result = stream.tokens.find_struct_field_type(struct_type, field_name);
+				if (result.len > 0)
+				{
+					DString copy = dstring::temp();
+					copy.append(result);
+					stream.free();
+					mem::free(file_content);
+					return copy.str_view();
+				}
+				stream.free();
+				mem::free(file_content);
+			}
+		}
+		else
+		{
+			String result = resolve_field_type_in_dir(full_path, struct_type, field_name, depth + 1);
+			if (result.len > 0) return result;
+		}
+	}
+	return "";
+}
+
+// Detect method call context (IDENT DOT IDENT) and resolve the receiver type.
+// Returns the resolved type name (e.g. "List"), or empty string if not a method call.
+fn String TokenList.resolve_method_type(&self, usz cursor_idx, String uri, DocumentList* docs)
+{
+	return self.resolve_receiver_type(cursor_idx, uri, docs);
+}
+
+// Find the type of a struct field: struct TypeName { FieldType field_name; }
+// Returns the type name (e.g. "TokenList"), or empty string if not found.
+fn String TokenList.find_struct_field_type(&self, String type_name, String field_name)
+{
+	for (usz i = 0; i + 1 < self.size; i++)
+	{
+		TokenType kw = self.entries[i].type;
+		if (kw != STRUCT && kw != BITSTRUCT && kw != UNION) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+
+		usz brace = i + 2;
+		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
+		if (brace >= self.size) continue;
+
+		usz depth = 1;
+		for (usz j = brace + 1; j < self.size && depth > 0; j++)
+		{
+			if (self.entries[j].type == LBRACE)
+			{
+				depth++;
+				continue;
+			}
+			if (self.entries[j].type == RBRACE)
+			{
+				depth--;
+				continue;
+			}
+			if (depth == 1 && is_ident(self.entries[j].type) && self.entries[j].text == field_name)
+			{
+				// The type is the TYPE_IDENT before the field name
+				if (j > 0 && self.entries[j - 1].type == TYPE_IDENT)
+				{
+					return self.entries[j - 1].text;
+				}
+				// Could also be TYPE_IDENT* field (pointer)
+				if (j > 1 && self.entries[j - 1].type == STAR && self.entries[j - 2].type == TYPE_IDENT)
+				{
+					return self.entries[j - 2].text;
+				}
+			}
+		}
+	}
+	return "";
+}
+
+// Find a struct field declaration: struct/bitstruct/union TypeName { ... field_name ... }
+// Returns the token index of the field name, or self.size if not found.
+fn usz TokenList.find_struct_field(&self, String type_name, String field_name)
+{
+	for (usz i = 0; i + 1 < self.size; i++)
+	{
+		TokenType kw = self.entries[i].type;
+		if (kw != STRUCT && kw != BITSTRUCT && kw != UNION) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+
+		// Find opening brace
+		usz brace = i + 2;
+		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
+		if (brace >= self.size) continue;
+
+		// Scan struct body for the field name (depth 1 only)
+		usz depth = 1;
+		for (usz j = brace + 1; j < self.size && depth > 0; j++)
+		{
+			if (self.entries[j].type == LBRACE)
+			{
+				depth++;
+				continue;
+			}
+			if (self.entries[j].type == RBRACE)
+			{
+				depth--;
+				continue;
+			}
+			if (depth == 1 && is_ident(self.entries[j].type) && self.entries[j].text == field_name)
+			{
+				return j;
+			}
+		}
+	}
+	return self.size;
+}
+
+// Search for a struct field declaration across all sources.
+// Uses the same 4-step search as try_find_definition.
+fn bool try_find_struct_field(String type_name, String field_name, String uri, String content, DocumentList* docs, String stdlib_path, DString* out) @private
+{
+	// 1. Current file
+	{
+		TokenStream stream = token_stream_tokenize(content);
+		defer stream.free();
+		usz found = stream.tokens.find_struct_field(type_name, field_name);
+		if (found < stream.tokens.size)
+		{
+			emit_location(uri, content, stream.tokens.entries[found], out);
+			return true;
+		}
+	}
+
+	// 2. Open documents
+	for (usz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].uri == uri) continue;
+		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		usz found = other_stream.tokens.find_struct_field(type_name, field_name);
+		if (found < other_stream.tokens.size)
+		{
+			emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
+			other_stream.free();
+			return true;
+		}
+		other_stream.free();
+	}
+
+	// 3. Project files on disk
+	String file_path = uri_to_path(uri);
+	if (file_path.len > 0)
+	{
+		ProjectDirs pdirs;
+		pdirs.get_search_dirs(file_path);
+		if (pdirs.project_root.len > 0)
+		{
+			for (usz i = 0; i < pdirs.count; i++)
+			{
+				DString search_path = dstring::temp();
+				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
+				if (scan_dir_struct_field(search_path.str_view(), type_name, field_name, out, 0))
+				{
+					return true;
+				}
+			}
+		}
+	}
+
+	// 4. Stdlib
+	if (stdlib_path.len > 0)
+	{
+		if (scan_dir_struct_field(stdlib_path, type_name, field_name, out, 0))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+fn bool scan_dir_struct_field(String dir_path, String type_name, String field_name, DString* out, int depth) @private
+{
+	if (depth > MAX_SCAN_DEPTH) return false;
+
+	Path p;
+	if (try pp = path::temp(dir_path))
+	{
+		p = pp;
+	}
+	else
+	{
+		return false;
+	}
+	PathList entries;
+	if (try el = path::ls(mem, p))
+	{
+		entries = el;
+	}
+	else
+	{
+		return false;
+	}
+	defer
+	{
+		foreach (&e : entries) e.free();
+		entries.free();
+	}
+
+	foreach (entry : entries)
+	{
+		String entry_name = entry.str_view();
+		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
+		defer mem::free(path_buf);
+		path_buf[:dir_path.len] = dir_path[:dir_path.len];
+		path_buf[dir_path.len] = '/';
+		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
+		String full_path = (String)path_buf;
+
+		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
+		{
+			if (try file_content = file::load(mem, full_path))
+			{
+				String content = (String)file_content;
+				TokenStream stream = token_stream_tokenize(content);
+				usz found = stream.tokens.find_struct_field(type_name, field_name);
+				if (found < stream.tokens.size)
+				{
+					DString uri = dstring::temp();
+					append_file_uri(&uri, full_path);
+					emit_location(uri.str_view(), content, stream.tokens.entries[found], out);
+					stream.free();
+					mem::free(file_content);
+					return true;
+				}
+				stream.free();
+				mem::free(file_content);
+			}
+		}
+		else
+		{
+			if (scan_dir_struct_field(full_path, type_name, field_name, out, depth + 1))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
 // Returns true if a definition was found and emitted.
-fn bool TokenList.try_find_definition(
-	&self, Token cursor_tok, usz cursor_idx,
-	String uri, String content, DocumentList* docs, String stdlib_path,
-	DString* out, String method_type = "")
+fn bool TokenList.try_find_definition(&self, Token cursor_tok, usz cursor_idx, String uri, String content, DocumentList* docs, String stdlib_path, DString* out, String method_type = "")
 {
 	// 1. Search current file
 	usz decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type);
@@ -562,6 +965,31 @@ fn void encode_definition(String uri, String content, usz offset, DocumentList* 
 	// Only navigate for identifier-like tokens
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+
+	// For DOT-preceded tokens (field/method access), resolve the receiver type
+	// to avoid jumping to unrelated declarations with the same name.
+	if (cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT)
+	{
+		String recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs);
+		if (recv_type.len > 0)
+		{
+			// Try method resolution first: fn Type.name(
+			if (is_ident(ct))
+			{
+				if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, recv_type))
+				{
+					return;
+				}
+			}
+
+			// Try struct field resolution: struct Type { ... name ... }
+			if (try_find_struct_field(recv_type, cursor_tok.text, uri, content, docs, stdlib_path, out))
+			{
+				return;
+			}
+		}
+		return;
+	}
 
 	// Method call resolution: variable.method(
 	if (is_ident(ct))
@@ -672,10 +1100,8 @@ fn usz TokenList.find_declaration(&self, Token target, usz target_idx, String me
 					{
 						if (self.entries[j].type == LPAREN)
 						{
-							if (j >= 3 &&
-								is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name &&
-								self.entries[j - 2].type == DOT &&
-								self.entries[j - 3].type == TYPE_IDENT && self.entries[j - 3].text == method_type)
+							if (j >= 3 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name && self.entries[j - 2].type == DOT && self.entries[j - 3].type == TYPE_IDENT
+								&& self.entries[j - 3].text == method_type)
 							{
 								return j - 1;
 							}

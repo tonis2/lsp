@@ -29,13 +29,35 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 				{
 					DString doc = dstring::temp();
 
-					// Detect method call context for hover
-					if (is_ident(ct))
+					// Tokenize to get cursor index for DOT detection
+					TokenStream hover_stream = token_stream_tokenize(content);
+					Token hover_tok;
+					usz hover_idx;
+					bool have_idx = hover_stream.tokens.find_token_at(offset, &hover_tok, &hover_idx);
+
+					// Check if this is a DOT-preceded token (field/method access)
+					bool is_member = have_idx && hover_idx > 0 && hover_stream.tokens.entries[hover_idx - 1].type == DOT;
+
+					if (is_member && is_ident(ct))
 					{
-						TokenStream hover_stream = token_stream_tokenize(content);
-						Token hover_tok;
-						usz hover_idx;
-						if (hover_stream.tokens.find_token_at(offset, &hover_tok, &hover_idx))
+						// Resolve receiver type and search for method or struct field
+						String recv_type = hover_stream.tokens.resolve_receiver_type(hover_idx, uri, docs);
+						if (recv_type.len > 0)
+						{
+							// Try method docs first
+							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, recv_type);
+
+							// Try struct field docs
+							if (doc.str_view().len == 0)
+							{
+								find_hover_field_docs(uri, content, recv_type, tok.text, docs, stdlib_path, &doc);
+							}
+						}
+					}
+					else
+					{
+						// Detect method call context for hover
+						if (is_ident(ct) && have_idx)
 						{
 							String method_type = hover_stream.tokens.resolve_method_type(hover_idx, uri, docs);
 							if (method_type.len > 0)
@@ -43,14 +65,14 @@ fn void encode_hover(String uri, String content, usz offset, DocumentList* docs,
 								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, method_type);
 							}
 						}
-						hover_stream.free();
-					}
 
-					// Regular (non-method) hover if method resolution didn't find anything
-					if (doc.str_view().len == 0)
-					{
-						find_hover_docs(uri, content, tok, docs, stdlib_path, &doc);
+						// Regular (non-method) hover if method resolution didn't find anything
+						if (doc.str_view().len == 0)
+						{
+							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc);
+						}
 					}
+					hover_stream.free();
 
 					if (doc.str_view().len > 0)
 					{
@@ -142,6 +164,47 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 	{
 		if (scan_dir_docs(stdlib_path, cursor_tok, out, 0)) return;
 	}
+}
+
+// Search for a struct field declaration and extract its doc comment + signature.
+// Searches: current file -> open documents -> project files -> stdlib.
+fn void find_hover_field_docs(String uri, String content, String type_name, String field_name, DocumentList* docs, String stdlib_path, DString* out) @private
+{
+	// 1. Current file
+	if (try_extract_field_docs_from(content, type_name, field_name, out)) return;
+
+	// 2. Open documents
+	for (usz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].uri == uri) continue;
+		if (try_extract_field_docs_from(docs.entries[d].content, type_name, field_name, out)) return;
+	}
+
+	// 3. Project files on disk
+	String file_path = uri_to_path(uri);
+	if (file_path.len > 0)
+	{
+		if (scan_project_field_docs(file_path, type_name, field_name, out)) return;
+	}
+
+	// 4. Stdlib
+	if (stdlib_path.len > 0)
+	{
+		if (scan_dir_field_docs(stdlib_path, type_name, field_name, out, 0)) return;
+	}
+}
+
+// Tokenize content, find a struct field declaration, and extract doc comment + signature.
+fn bool try_extract_field_docs_from(String content, String type_name, String field_name, DString* out) @private
+{
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
+
+	usz found = stream.tokens.find_struct_field(type_name, field_name);
+	if (found >= stream.tokens.size) return false;
+
+	stream.tokens.extract_docs_at(content, found, out);
+	return out.str_view().len > 0;
 }
 
 // Tokenize content, find the declaration of target, and extract doc comment + signature.
@@ -366,6 +429,62 @@ fn bool scan_dir_docs(String dir_path, Token target, DString* out, int depth, St
 		else
 		{
 			if (scan_dir_docs(full_path, target, out, depth + 1, method_type)) return true;
+		}
+	}
+	return false;
+}
+
+// Scan project dirs for struct field hover docs.
+fn bool scan_project_field_docs(String file_path, String type_name, String field_name, DString* out) @private
+{
+	ProjectDirs pdirs;
+	pdirs.get_search_dirs(file_path);
+	if (pdirs.project_root.len == 0) return false;
+
+	for (usz i = 0; i < pdirs.count; i++)
+	{
+		DString search_path = dstring::temp();
+		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
+		if (scan_dir_field_docs(search_path.str_view(), type_name, field_name, out, 0)) return true;
+	}
+	return false;
+}
+
+fn bool scan_dir_field_docs(String dir_path, String type_name, String field_name, DString* out, int depth) @private
+{
+	if (depth > MAX_SCAN_DEPTH) return false;
+
+	Path p;
+	if (try pp = path::temp(dir_path)) { p = pp; } else { return false; }
+	PathList entries;
+	if (try el = path::ls(mem, p)) { entries = el; } else { return false; }
+	defer
+	{
+		foreach (&e : entries) e.free();
+		entries.free();
+	}
+
+	foreach (entry : entries)
+	{
+		String entry_name = entry.str_view();
+		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
+		defer mem::free(path_buf);
+		path_buf[:dir_path.len] = dir_path[:dir_path.len];
+		path_buf[dir_path.len] = '/';
+		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
+		String full_path = (String)path_buf;
+
+		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
+		{
+			if (try file_content = file::load(mem, full_path))
+			{
+				defer mem::free(file_content);
+				if (try_extract_field_docs_from((String)file_content, type_name, field_name, out)) return true;
+			}
+		}
+		else
+		{
+			if (scan_dir_field_docs(full_path, type_name, field_name, out, depth + 1)) return true;
 		}
 	}
 	return false;
