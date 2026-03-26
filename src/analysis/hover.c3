@@ -481,6 +481,8 @@ fn bool scan_dir_field_docs(String dir_path, String type_name, String field_name
 	Path p;
 	if (try pp = path::temp(dir_path)) { p = pp; } else { return false; }
 	PathList entries;
+
+
 	if (try el = path::ls(mem, p)) { entries = el; } else { return false; }
 	defer
 	{

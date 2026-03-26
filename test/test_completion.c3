@@ -2,6 +2,8 @@ module lsp;
 
 import std::core::dstring;
 import std::core::mem;
+import std::io::file;
+import std::io::path;
 
 fn void test_completion_empty_prefix() @test {
 	DString out = dstring::temp();
@@ -327,4 +329,134 @@ fn void test_completion_module_scope_declaration_kinds() @test {
 	assert(result.contains(`"kind":22`), "expected Struct kind, got: %s", result);
 	assert(result.contains(`"kind":13`), "expected Enum kind, got: %s", result);
 	assert(result.contains(`"kind":21`), "expected Constant kind, got: %s", result);
+}
+
+fn void test_completion_dot_real_handler_code() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	// Document struct in another file
+	String docs_content = "struct Document { String uri; String content; int version; }";
+	docs.open("file:///documents.c3", docs_content, 1);
+
+	// Realistic handler code — exact pattern from handlers.c3
+	String content = `fn void LspServer.handle_definition(&self, Object* msg, String id_json)
+{
+	Object* td = msg.get("params")!!.get("textDocument")!!;
+	String uri = td.get_string("uri") ?? "";
+
+	Document* doc = self.documents.find(uri);
+
+	if (doc == null)
+	{
+		send_response(id_json, "null");
+		return;
+	}
+
+	doc.`;
+	encode_completions("file:///handler.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///documents.c3");
+
+	assert(result.contains(`"label":"uri"`), "expected uri field from Document in handler, got: %s", result);
+	assert(result.contains(`"label":"content"`), "expected content field from Document in handler, got: %s", result);
+}
+
+fn void test_completion_dot_real_handlers_file() @test {
+	// Load the actual handlers.c3 and simulate typing doc. after find(uri)
+	if (try file_data = file::load(mem, "src/server/handlers.c3"))
+	{
+		defer mem::free(file_data);
+		String file_content = (String)file_data;
+
+		// Find "Document* doc = self.documents.find(uri);" and insert "doc." after the block
+		usz insert_pos = 0;
+		if (try idx = file_content.index_of("Document* doc = self.documents.find(uri);"))
+		{
+			// Find the next newline after the declaration
+			for (usz i = idx; i < file_content.len; i++)
+			{
+				if (file_content[i] == '\n')
+				{
+					insert_pos = i + 1;
+					break;
+				}
+			}
+		}
+		assert(insert_pos > 0, "couldn't find doc declaration in handlers.c3");
+
+		// Build content with "doc." inserted
+		DString modified = dstring::temp();
+		modified.append(file_content[:insert_pos]);
+		modified.append("\tdoc.");
+		usz cursor_offset = modified.len();
+		modified.append(file_content[insert_pos..]);
+
+		// Open documents.c3 so Document struct is found
+		DocumentList* docs = mem::new(DocumentList);
+		defer mem::free(docs);
+		if (try docs_data = file::load(mem, "src/server/documents.c3"))
+		{
+			defer mem::free(docs_data);
+			docs.open("file:///src/server/documents.c3", (String)docs_data, 1);
+		}
+
+		DString out = dstring::temp();
+		encode_completions("file:///src/server/handlers.c3", modified.str_view(), cursor_offset, docs, "", &out);
+		String result = out.str_view();
+		docs.close("file:///src/server/documents.c3");
+
+		assert(result.contains(`"label":"uri"`), "expected uri field, got: %s", result);
+		assert(result.contains(`"label":"content"`), "expected content field, got: %s", result);
+		assert(result.contains(`"label":"version"`), "expected version field, got: %s", result);
+	}
+	else
+	{
+		assert(false, "couldn't load src/server/handlers.c3");
+	}
+}
+
+fn void test_completion_dot_pointer_from_other_file() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	// Document struct defined in another file
+	String docs_content = "struct Document { String uri; String content; int version; }\nfn Document* DocumentList.find(&self, String uri) { return null; }";
+	docs.open("file:///documents.c3", docs_content, 1);
+
+	// Handler code with Document* doc = ...; doc.
+	String content = "fn void test() { Document* doc = something(); doc.";
+	encode_completions("file:///handler.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///documents.c3");
+
+	assert(result.contains(`"label":"uri"`), "expected uri field from Document, got: %s", result);
+	assert(result.contains(`"label":"content"`), "expected content field from Document, got: %s", result);
+	assert(result.contains(`"label":"version"`), "expected version field from Document, got: %s", result);
+}
+
+fn void test_completion_dot_self_field_method() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	// DocumentList with methods in another file
+	String docs_content = "alias DocumentList = List{Document};\nfn void DocumentList.open(&self, String uri, String content, int version) {}\nfn void DocumentList.close(&self, String uri) {}";
+	docs.open("file:///documents.c3", docs_content, 1);
+
+	// Server struct with documents field
+	String server_content = "struct LspServer { DocumentList documents; String stdlib_path; }";
+	docs.open("file:///server.c3", server_content, 1);
+
+	// self.documents. should show DocumentList methods
+	String content = "fn void LspServer.test(&self) { self.documents.";
+	encode_completions("file:///handler.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///documents.c3");
+	docs.close("file:///server.c3");
+
+	assert(result.contains(`"label":"open"`), "expected open method from DocumentList, got: %s", result);
+	assert(result.contains(`"label":"close"`), "expected close method from DocumentList, got: %s", result);
 }

@@ -25,13 +25,11 @@ fn void encode_folding_ranges(String content, DString* out)
 	usz last_import_line = 0;
 
 	bool first = true;
-
 	while (true)
 	{
 		if (try tok = lex.next())
 		{
 			usz line = lo.find_line(tok.offset);
-
 			switch (tok.type)
 			{
 				case LBRACE:

@@ -269,6 +269,7 @@ fn void LspServer.handle_definition(&self, Object* msg, String id_json)
 	String uri = td.get_string("uri") ?? "";
 
 	Document* doc = self.documents.find(uri);
+
 	if (doc == null)
 	{
 		send_response(id_json, "null");
