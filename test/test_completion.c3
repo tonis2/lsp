@@ -278,3 +278,53 @@ fn void test_completion_module_scope_no_prefix() @test {
 	assert(result.contains(`"label":"help"`), "expected help, got: %s", result);
 	assert(result.contains(`"label":"Config"`), "expected Config, got: %s", result);
 }
+
+fn void test_completion_module_scope_short_name() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	// File declares "module std::os::process;" but user types "process::c"
+	String process_content = "module std::os::process;\nfn SubProcess create(String[] cmd) {}\nfn void cleanup() {}";
+	docs.open("file:///process.c3", process_content, 1);
+
+	// import std::os::process; then type process::c
+	String content = "module lsp;\nimport std::os::process;\nfn void main() { process::c";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///process.c3");
+
+	assert(result.contains(`"label":"create"`), "expected create from process module via short name, got: %s", result);
+	assert(result.contains(`"label":"cleanup"`), "expected cleanup from process module via short name, got: %s", result);
+	// Functions should have kind=3 (Function), not kind=6 (Variable)
+	assert(result.contains(`"kind":3`), "expected Function kind=3, got: %s", result);
+}
+
+fn void test_completion_module_scope_declaration_kinds() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	String mod_content = "module mymod;\nfn void do_thing() {}\nstruct Config { int x; }\nenum Color { RED, GREEN }\nconst int MAX_SIZE = 100;\nmacro @helper() {}";
+	docs.open("file:///mymod.c3", mod_content, 1);
+
+	String content = "module lsp;\nimport mymod;\nfn void main() { mymod::";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///mymod.c3");
+
+	// Should see declarations with correct kinds
+	assert(result.contains(`"label":"do_thing"`), "expected do_thing function, got: %s", result);
+	assert(result.contains(`"label":"Config"`), "expected Config struct, got: %s", result);
+	assert(result.contains(`"label":"Color"`), "expected Color enum, got: %s", result);
+	assert(result.contains(`"label":"MAX_SIZE"`), "expected MAX_SIZE constant, got: %s", result);
+
+	// Should NOT contain local identifiers like "x" (struct field) or "RED" (enum member)
+	assert(!result.contains(`"label":"x"`), "should not have struct field x, got: %s", result);
+
+	// Check kinds: 3=Function, 22=Struct, 13=Enum, 21=Constant
+	assert(result.contains(`"kind":3`), "expected Function kind, got: %s", result);
+	assert(result.contains(`"kind":22`), "expected Struct kind, got: %s", result);
+	assert(result.contains(`"kind":13`), "expected Enum kind, got: %s", result);
+	assert(result.contains(`"kind":21`), "expected Constant kind, got: %s", result);
+}

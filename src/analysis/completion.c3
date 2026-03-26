@@ -263,18 +263,23 @@ fn bool starts_with_ci(String s, String prefix) @private
 	return true;
 }
 
-// Module-scoped completion: "args::h" → only identifiers from the args module starting with h
+// Module-scoped completion: "args::h" → only declarations from the args module starting with h
+// The module_name may be a short name like "process" — resolve to full path via imports.
 fn void collect_module_completions(String uri, String content, String module_name, String prefix, DocumentList* docs, String stdlib_path, DString* out, bool* first) @private
 {
 	String[MAX_DOC_IDENTS] seen;
 	usz seen_count = 0;
 
+	// Resolve short module name to full path via imports.
+	// e.g. "process" → "std::os::process" if file has "import std::os::process;"
+	String full_module = resolve_module_name(content, module_name);
+
 	// 1. Search open documents for files declaring this module
 	for (usz d = 0; d < docs.size; d++)
 	{
-		if (has_module_declaration(docs.entries[d].content, module_name))
+		if (has_module_declaration(docs.entries[d].content, module_name, full_module))
 		{
-			collect_idents_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count);
+			collect_declarations_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count);
 		}
 	}
 
@@ -290,24 +295,169 @@ fn void collect_module_completions(String uri, String content, String module_nam
 			{
 				DString search_path = dstring::temp();
 				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-				scan_dir_module_idents(search_path.str_view(), module_name, prefix, out, first, &seen, &seen_count, 0);
+				scan_dir_module_decls(search_path.str_view(), module_name, full_module, prefix, out, first, &seen, &seen_count, 0);
 			}
 		}
 	}
 
-	// 3. Search stdlib (convert module path to dir: std::io → std/io)
+	// 3. Search stdlib
 	if (stdlib_path.len > 0)
 	{
-		DString dir_buf = dstring::temp();
-		String mod_dir = module_to_dir_path(module_name, &dir_buf);
-		DString full_dir = dstring::temp();
-		full_dir.appendf("%s/%s", stdlib_path, mod_dir);
-		scan_dir_idents(full_dir.str_view(), prefix, out, first, &seen, &seen_count, 0);
+		scan_dir_module_decls(stdlib_path, module_name, full_module, prefix, out, first, &seen, &seen_count, 0);
 	}
 }
 
-// Check if file content starts with "module <name>;"
-fn bool has_module_declaration(String content, String module_name) @private
+// Collect only top-level declarations (functions, types, constants, macros) with proper kinds.
+fn void collect_declarations_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, usz* seen_count) @private
+{
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
+
+	for (usz i = 0; i < stream.tokens.size; i++)
+	{
+		TokenType tt = stream.tokens.entries[i].type;
+		String name = "";
+		int kind = 0;
+
+		switch (tt)
+		{
+			case FUNC:
+			case MACRO:
+				// fn [RetType] name( or fn [RetType] Type.name(
+				// Find the LPAREN and take the IDENT before it
+				for (usz j = i + 1; j < stream.tokens.size && j < i + 64; j++)
+				{
+					if (stream.tokens.entries[j].type == LPAREN)
+					{
+						if (j > 0 && is_ident(stream.tokens.entries[j - 1].type))
+						{
+							// Skip methods (Type.name) — those are accessed via DOT, not module scope
+							if (j >= 2 && stream.tokens.entries[j - 2].type == DOT) break;
+							name = stream.tokens.entries[j - 1].text;
+							kind = 3; // Function
+						}
+						break;
+					}
+					if (stream.tokens.entries[j].type == LBRACE || stream.tokens.entries[j].type == EOS) break;
+				}
+				// macro name (no parens)
+				if (name.len == 0 && tt == MACRO && i + 1 < stream.tokens.size && is_ident(stream.tokens.entries[i + 1].type))
+				{
+					name = stream.tokens.entries[i + 1].text;
+					kind = 3; // Function
+				}
+			case STRUCT:
+			case BITSTRUCT:
+			case UNION:
+			case INTERFACE:
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
+				{
+					name = stream.tokens.entries[i + 1].text;
+					kind = 22; // Struct
+				}
+			case ENUM:
+			case FAULTDEF:
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
+				{
+					name = stream.tokens.entries[i + 1].text;
+					kind = 13; // Enum
+				}
+			case ALIAS:
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
+				{
+					name = stream.tokens.entries[i + 1].text;
+					kind = 22; // Struct (type alias)
+				}
+			case CONSTDEF:
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == CONST_IDENT)
+				{
+					name = stream.tokens.entries[i + 1].text;
+					kind = 21; // Constant
+				}
+			case CONST:
+				// const [Type] NAME = ...
+				if (i + 1 < stream.tokens.size)
+				{
+					if (stream.tokens.entries[i + 1].type == CONST_IDENT)
+					{
+						name = stream.tokens.entries[i + 1].text;
+						kind = 21; // Constant
+					}
+					else if (i + 2 < stream.tokens.size && stream.tokens.entries[i + 2].type == CONST_IDENT)
+					{
+						name = stream.tokens.entries[i + 2].text;
+						kind = 21; // Constant
+					}
+				}
+			default:
+				continue;
+		}
+
+		if (name.len == 0 || kind == 0) continue;
+		if (prefix.len > 0 && !starts_with_ci(name, prefix)) continue;
+		if (name == prefix) continue;
+
+		// Dedup
+		bool dup = false;
+		for (usz k = 0; k < *seen_count; k++)
+		{
+			if ((*seen)[k] == name) { dup = true; break; }
+		}
+		if (dup) continue;
+		if (*seen_count < MAX_DOC_IDENTS)
+		{
+			(*seen)[*seen_count] = name;
+			(*seen_count)++;
+		}
+
+		emit_completion_item(out, name, kind, first);
+	}
+}
+
+// Resolve a short module name to its full path using imports.
+// e.g. if content has "import std::os::process;" and module_name is "process",
+// returns "std::os::process". Returns "" if no matching import found.
+fn String resolve_module_name(String content, String module_name) @private
+{
+	String[MAX_IMPORTS] imports;
+	usz import_count = parse_imports(content, &imports);
+
+	for (usz i = 0; i < import_count; i++)
+	{
+		// Check if full path matches directly
+		if (imports[i] == module_name) return imports[i];
+
+		// Check if last segment matches (e.g. "process" matches "std::os::process")
+		String last_seg = last_module_segment(imports[i]);
+		if (last_seg == module_name) return imports[i];
+	}
+	return "";
+}
+
+// Extract the last segment of a module path: "std::os::process" → "process"
+fn String last_module_segment(String mod_path) @private
+{
+	// Find last "::" and return everything after it
+	usz last_colon = 0;
+	bool found = false;
+	for (usz i = 0; i + 1 < mod_path.len; i++)
+	{
+		if (mod_path[i] == ':' && mod_path[i + 1] == ':')
+		{
+			last_colon = i + 2;
+			found = true;
+		}
+	}
+	if (found && last_colon < mod_path.len)
+	{
+		return mod_path[last_colon..];
+	}
+	return mod_path;
+}
+
+// Check if file content declares a module matching the short or full name.
+// short_name: "process", full_name: "std::os::process" (may be empty)
+fn bool has_module_declaration(String content, String short_name, String full_name) @private
 {
 	Lexer lex;
 	lex.init(content);
@@ -345,7 +495,13 @@ fn bool has_module_declaration(String content, String module_name) @private
 						break;
 					}
 				}
-				return mod_path.str_view() == module_name;
+				String declared = mod_path.str_view();
+				// Match full path, short name, or last segment
+				if (declared == short_name) return true;
+				if (full_name.len > 0 && declared == full_name) return true;
+				String last_seg = last_module_segment(declared);
+				if (last_seg == short_name) return true;
+				return false;
 			}
 			// Module must be the first declaration
 			if (tok.type == IMPORT || tok.type == FUNC || tok.type == STRUCT) return false;
@@ -360,8 +516,9 @@ fn bool has_module_declaration(String content, String module_name) @private
 	return false;
 }
 
-// Scan directory recursively, only collecting idents from files that declare the given module
-fn void scan_dir_module_idents(String dir_path, String module_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, usz* seen_count, int depth) @private
+// Scan directory recursively, collecting declarations from files that declare the given module.
+// When short_name and full_name are both empty, collects from all files (for stdlib dir scanning).
+fn void scan_dir_module_decls(String dir_path, String short_name, String full_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, usz* seen_count, int depth) @private
 {
 	if (depth > COMPLETION_MAX_SCAN_DEPTH) return;
 	if (*seen_count >= MAX_DOC_IDENTS) return;
@@ -371,6 +528,8 @@ fn void scan_dir_module_idents(String dir_path, String module_name, String prefi
 	PathList entries;
 	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
 	defer { foreach (&e : entries) e.free(); entries.free(); }
+
+	bool check_module = short_name.len > 0 || full_name.len > 0;
 
 	foreach (entry : entries)
 	{
@@ -387,16 +546,16 @@ fn void scan_dir_module_idents(String dir_path, String module_name, String prefi
 			if (try file_content = file::load(mem, full_path))
 			{
 				String fc = (String)file_content;
-				if (has_module_declaration(fc, module_name))
+				if (!check_module || has_module_declaration(fc, short_name, full_name))
 				{
-					collect_idents_from_content(fc, prefix, out, first, seen, seen_count);
+					collect_declarations_from_content(fc, prefix, out, first, seen, seen_count);
 				}
 				mem::free(file_content);
 			}
 		}
 		else
 		{
-			scan_dir_module_idents(full_path, module_name, prefix, out, first, seen, seen_count, depth + 1);
+			scan_dir_module_decls(full_path, short_name, full_name, prefix, out, first, seen, seen_count, depth + 1);
 		}
 	}
 }
@@ -544,8 +703,15 @@ fn void collect_all_identifiers(String uri, String content, String prefix, Docum
 
 		for (usz i = 0; i < import_count; i++)
 		{
+			// Strip "std::" prefix since stdlib_path already points to the std/ directory
+			String mod = imports[i];
+			if (mod.len > 5 && mod[:5] == "std::")
+			{
+				mod = mod[5..];
+			}
+
 			DString dir_buf = dstring::temp();
-			String mod_dir = module_to_dir_path(imports[i], &dir_buf);
+			String mod_dir = module_to_dir_path(mod, &dir_buf);
 
 			DString full_dir = dstring::temp();
 			full_dir.appendf("%s/%s", stdlib_path, mod_dir);
