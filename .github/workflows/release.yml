@@ -79,7 +79,7 @@ jobs:
 
       - name: Build Windows x86_64
         run: |
-          c3c build lsp --target windows-x64 -O2 --build-dir build-windows --output-dir build-windows
+          c3c build lsp --target windows-x64 -O2 --wincrt=static --build-dir build-windows --output-dir build-windows
           cd build-windows && zip ../c3-lsp-windows-x86_64.zip lsp.exe
 
       - name: Upload Linux Artifact

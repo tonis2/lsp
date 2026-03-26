@@ -11,7 +11,8 @@
   "output": "build",
   "targets": {
     "lsp": {
-      "type": "executable"
+      "type": "executable",
+      "wincrt": "static"
     }
   },
   "cpu": "generic",

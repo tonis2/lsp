@@ -52,6 +52,30 @@ fn void test_append_file_uri_unix() @test {
 	assert(d.str_view() == "file:///home/user/foo.c3");
 }
 
+fn void test_uri_to_path_percent_decode_space() @test {
+	assert(uri_to_path("file:///C:/My%20Documents/foo.c3") == "C:/My Documents/foo.c3");
+}
+
+fn void test_uri_to_path_percent_decode_hash() @test {
+	assert(uri_to_path("file:///home/user/project%23v2/foo.c3") == "/home/user/project#v2/foo.c3");
+}
+
+fn void test_uri_to_path_percent_encoded_colon() @test {
+	// VS Code on Windows encodes the drive colon as %3A
+	assert(uri_to_path("file:///c%3A/Users/tonis/foo.c3") == "c:/Users/tonis/foo.c3");
+}
+
+fn void test_uri_to_path_no_percent_passthrough() @test {
+	// No percent sequences — should return as-is
+	assert(uri_to_path("file:///C:/Users/test/foo.c3") == "C:/Users/test/foo.c3");
+}
+
+fn void test_append_file_uri_percent_encode_space() @test {
+	DString d = dstring::temp();
+	append_file_uri(&d, "C:/My Documents/foo.c3");
+	assert(d.str_view() == "file:///C:/My%20Documents/foo.c3");
+}
+
 fn void test_parent_dir_windows_drive_root() @test {
 	assert(parent_dir("C:/Users") == "C:/");
 }

@@ -280,9 +280,65 @@ fn bool path_matches_uri(String file_path, String uri) @private
 	return false;
 }
 
+// Decode a single hex character to its numeric value (0-15), or -1 if invalid.
+fn int hex_val(char c) @private
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+// Decode percent-encoded sequences in a URI path (e.g. %20 -> space).
+// Returns a temp-allocated string.
+fn String percent_decode(String s) @private
+{
+	// Quick check: if no %, return as-is
+	bool has_pct = false;
+	foreach (c : s) { if (c == '%') { has_pct = true; break; } }
+	if (!has_pct) return s;
+
+	DString out = dstring::temp();
+	usz i = 0;
+	while (i < s.len)
+	{
+		if (s[i] == '%' && i + 2 < s.len)
+		{
+			int hi = hex_val(s[i + 1]);
+			int lo = hex_val(s[i + 2]);
+			if (hi >= 0 && lo >= 0)
+			{
+				out.append_char((char)(hi * 16 + lo));
+				i += 3;
+				continue;
+			}
+		}
+		out.append_char(s[i]);
+		i++;
+	}
+	return out.str_view();
+}
+
+// Percent-encode characters that are not allowed unencoded in a file URI path.
+fn void percent_encode_path(DString* out, String path) @private
+{
+	foreach (c : path)
+	{
+		switch (c)
+		{
+			case ' ':  out.append("%20");
+			case '#':  out.append("%23");
+			case '?':  out.append("%3F");
+			case '%':  out.append("%25");
+			default:   out.append_char(c);
+		}
+	}
+}
+
 // Append a file:// URI for a filesystem path to a DString.
 // For Windows drive-letter paths (C:/foo), uses file:///C:/foo.
 // For Unix paths (/home/foo), uses file:///home/foo (file:// + /home/foo).
+// Special characters in the path are percent-encoded.
 fn void append_file_uri(DString* out, String path)
 {
 	if (is_windows_drive_path(path))
@@ -293,27 +349,30 @@ fn void append_file_uri(DString* out, String path)
 	{
 		out.append("file://");
 	}
-	out.append(path);
+	percent_encode_path(out, path);
 }
 
 // Convert file:// URI to filesystem path.
 // On Windows, file:///C:/foo -> C:/foo (strips the leading / before drive letter).
+// Also handles percent-encoded colon: file:///c%3A/foo -> c:/foo.
 // On Unix, file:///home/foo -> /home/foo (unchanged).
+// Percent-encoded sequences (e.g. %20) are decoded.
 fn String uri_to_path(String uri)
 {
 	if (uri.starts_with("file:///"))
 	{
-		String result = uri[7..]; // "file:///path" -> "/path"
+		// Percent-decode first so that %3A becomes : before the drive check
+		String decoded = percent_decode(uri[7..]); // "file:///path" -> "/path"
 		// Strip leading / before Windows drive letter: /C:/foo -> C:/foo
-		if (result.len >= 3 && is_windows_drive_path(result[1..]))
+		if (decoded.len >= 3 && is_windows_drive_path(decoded[1..]))
 		{
-			return result[1..];
+			return decoded[1..];
 		}
-		return result;
+		return decoded;
 	}
 	if (uri.starts_with("file://"))
 	{
-		return uri[7..];
+		return percent_decode(uri[7..]);
 	}
 	return "";
 }
