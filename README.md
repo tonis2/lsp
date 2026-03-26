@@ -16,6 +16,8 @@ A Language Server Protocol implementation for the [C3 programming language](http
 - **Folding Ranges** — code folding for braces, imports, and block comments
 - **Diagnostics** — reports errors and warnings from the C3 compiler on save
 
+NB! Uses C3 `project.json` sources: [], for reference/auto-complete targets, so make sure your project has project.json, for good experience. 
+
 ## Building
 
 Requires the [C3 compiler](https://github.com/c3lang/c3c) (v0.7.x or later).
