@@ -3,7 +3,7 @@ module lsp;
 import std::io;
 import args;
 
-const String VERSION = "0.1.2";
+const String VERSION = "0.1.3";
 
 // On Windows, stdin/stdout default to text mode which translates \n <-> \r\n.
 // This corrupts LSP protocol framing, so we must set binary mode before any I/O.
