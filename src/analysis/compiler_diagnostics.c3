@@ -50,8 +50,8 @@ fn void LspServer.publish_compiler_diagnostics(&self, String uri)
 		cmd[cmd_len++] = self.stdlib_path;
 	}
 
-	SubProcess proc;
-	if (try p = process::create(cmd[:cmd_len], { .search_user_path = true, .combined_stdout_stderr = true }))
+	Process proc;
+	if (try p = process::spawn(cmd[:cmd_len], STDERR_TO_STDOUT))
 	{
 		proc = p;
 	}

@@ -14,7 +14,7 @@ struct SentryConfig
 }
 
 long event_counter @private;
-SubProcess last_sentry_proc @private;
+Process last_sentry_proc @private;
 bool has_sentry_proc @private;
 
 fn SentryConfig parse_sentry_dsn(String dsn)
@@ -136,7 +136,7 @@ fn void SentryConfig.capture_error(&self, String message, String lsp_method)
 	cmd[11] = payload.str_view();
 	cmd[12] = url.str_view();
 
-	if (try p = process::create(cmd[:13], { .search_user_path = true }))
+	if (try p = process::spawn(cmd[:13]))
 	{
 		last_sentry_proc = p;
 		has_sentry_proc = true;
