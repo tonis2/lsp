@@ -68,7 +68,7 @@ fn void test_completion_no_duplicate_doc_idents() @test {
 	String result = out.str_view();
 	// Count occurrences of "foo" — should be exactly one
 	usz count = 0;
-	usz pos = 0;
+	sz pos = 0;
 	while (pos < result.len) {
 		if (try idx = result[pos..].index_of(`"label":"foo"`)) {
 			count++;
@@ -186,13 +186,13 @@ fn void test_completion_dot_field_detail() @test {
 fn void test_completion_parse_imports() @test {
 	String[MAX_IMPORTS] imports;
 	String content = "module lsp;\n\nimport std::io;\nimport c3::lexer;\nimport args;\n\nfn void main() {}";
-	usz count = parse_imports(content, &imports);
+	sz count = parse_imports(content, &imports);
 	assert(count == 3, "expected 3 imports, got %d", count);
 
 	bool found_io = false;
 	bool found_lexer = false;
 	bool found_args = false;
-	for (usz i = 0; i < count; i++)
+	for (sz i = 0; i < count; i++)
 	{
 		if (imports[i] == "std::io") found_io = true;
 		if (imports[i] == "c3::lexer") found_lexer = true;
@@ -371,11 +371,11 @@ fn void test_completion_dot_real_handlers_file() @test {
 		String file_content = (String)file_data;
 
 		// Find "Document* doc = self.documents.find(uri);" and insert "doc." after the block
-		usz insert_pos = 0;
+		sz insert_pos = 0;
 		if (try idx = file_content.index_of("Document* doc = self.documents.find(uri);"))
 		{
 			// Find the next newline after the declaration
-			for (usz i = idx; i < file_content.len; i++)
+			for (sz i = idx; i < file_content.len; i++)
 			{
 				if (file_content[i] == '\n')
 				{
@@ -390,7 +390,7 @@ fn void test_completion_dot_real_handlers_file() @test {
 		DString modified = dstring::temp();
 		modified.append(file_content[:insert_pos]);
 		modified.append("\tdoc.");
-		usz cursor_offset = modified.len();
+		sz cursor_offset = modified.len();
 		modified.append(file_content[insert_pos..]);
 
 		// Open documents.c3 so Document struct is found

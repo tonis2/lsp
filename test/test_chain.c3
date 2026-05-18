@@ -13,8 +13,8 @@ fn void test() {
     TokenStream stream = token_stream_tokenize(content);
     defer stream.free();
 
-    usz baz_idx = 0;
-    for (usz i = 0; i < stream.tokens.size; i++) {
+    sz baz_idx = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
         if (stream.tokens.entries[i].text == "baz" && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
             baz_idx = i;
             break;
@@ -33,8 +33,8 @@ struct Bar { int baz; }`;
     TokenStream stream = token_stream_tokenize(current);
     defer stream.free();
 
-    usz baz_idx = 0;
-    for (usz i = 0; i < stream.tokens.size; i++) {
+    sz baz_idx = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
         if (stream.tokens.entries[i].text == "baz" && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
             baz_idx = i;
             break;
@@ -54,8 +54,8 @@ fn void test_definition_struct_field() @test {
     defer mem::free(docs);
     String content = "struct MyStruct { int value; }\nfn void test() {\n\tMyStruct s;\n\ts.value = 42;\n}";
     TokenStream stream = token_stream_tokenize(content);
-    usz value_offset = 0;
-    for (usz i = stream.tokens.size; i > 0; i--) {
+    sz value_offset = 0;
+    for (sz i = stream.tokens.size; i > 0; i--) {
         if (stream.tokens.entries[i - 1].text == "value" && i >= 2 && stream.tokens.entries[i - 2].type == DOT) {
             value_offset = stream.tokens.entries[i - 1].offset;
             break;
@@ -74,8 +74,8 @@ fn void test_definition_self_method() @test {
     defer mem::free(docs);
     String content = "struct Foo { int x; }\nfn int Foo.get_x(&self) { return self.x; }\nfn void Foo.do_thing(&self) { self.get_x(); }";
     TokenStream stream = token_stream_tokenize(content);
-    usz offset = 0;
-    for (usz i = stream.tokens.size; i > 0; i--) {
+    sz offset = 0;
+    for (sz i = stream.tokens.size; i > 0; i--) {
         if (stream.tokens.entries[i - 1].text == "get_x" && i >= 2 && stream.tokens.entries[i - 2].type == DOT) {
             offset = stream.tokens.entries[i - 1].offset;
             break;
@@ -94,8 +94,8 @@ fn void test_hover_struct_field() @test {
     defer mem::free(docs);
     String content = "struct MyStruct { int value; }\nfn void test() {\n\tMyStruct s;\n\ts.value = 42;\n}";
     TokenStream stream = token_stream_tokenize(content);
-    usz offset = 0;
-    for (usz i = stream.tokens.size; i > 0; i--) {
+    sz offset = 0;
+    for (sz i = stream.tokens.size; i > 0; i--) {
         if (stream.tokens.entries[i - 1].text == "value" && i >= 2 && stream.tokens.entries[i - 2].type == DOT) {
             offset = stream.tokens.entries[i - 1].offset;
             break;
@@ -114,8 +114,8 @@ fn void test_hover_self_field() @test {
     defer mem::free(docs);
     String content = "struct Foo { int x; }\nfn void Foo.bar(&self) { self.x = 1; }";
     TokenStream stream = token_stream_tokenize(content);
-    usz offset = 0;
-    for (usz i = 0; i < stream.tokens.size; i++) {
+    sz offset = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
         if (stream.tokens.entries[i].text == "x" && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
             offset = stream.tokens.entries[i].offset;
             break;
@@ -138,8 +138,8 @@ fn void test() {
     defer stream.free();
 
     // Find "x" after DOT in "ptr.x"
-    usz x_idx = 0;
-    for (usz i = 0; i < stream.tokens.size; i++) {
+    sz x_idx = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
         if (stream.tokens.entries[i].text == "x" && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
             x_idx = i;
             break;
@@ -159,8 +159,8 @@ fn void test_definition_pointer_field() @test {
     defer mem::free(docs);
     String content = "struct Foo { int value; }\nfn void test() {\n\tFoo* ptr;\n\tptr.value = 42;\n}";
     TokenStream stream = token_stream_tokenize(content);
-    usz offset = 0;
-    for (usz i = stream.tokens.size; i > 0; i--) {
+    sz offset = 0;
+    for (sz i = stream.tokens.size; i > 0; i--) {
         if (stream.tokens.entries[i - 1].text == "value" && i >= 2 && stream.tokens.entries[i - 2].type == DOT) {
             offset = stream.tokens.entries[i - 1].offset;
             break;
@@ -185,8 +185,8 @@ fn void test_definition_pointer_method_call() @test {
 
     String content = "fn void test() {\n\tMyType* lo;\n\tlo.find_line(42);\n}";
     TokenStream stream = token_stream_tokenize(content);
-    usz offset = 0;
-    for (usz i = 0; i < stream.tokens.size; i++) {
+    sz offset = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
         if (stream.tokens.entries[i].text == "find_line" && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
             offset = stream.tokens.entries[i].offset;
             break;
@@ -209,9 +209,9 @@ fn void test_definition_pointer_method_same_file() @test {
 
     String content = "fn usz MyType.find_it(&self) { return 0; }\nfn void test() {\n\tMyType* lo;\n\tlo.find_it();\n}";
     TokenStream stream = token_stream_tokenize(content);
-    usz offset = 0;
+    sz offset = 0;
     // Search backwards to find the call site, not the declaration
-    for (usz i = stream.tokens.size; i > 0; i--) {
+    for (sz i = stream.tokens.size; i > 0; i--) {
         if (stream.tokens.entries[i - 1].text == "find_it" && i >= 2 && stream.tokens.entries[i - 2].type == DOT) {
             offset = stream.tokens.entries[i - 1].offset;
             break;
@@ -237,8 +237,8 @@ fn void test_definition_real_semantic_find_line() @test {
 
         TokenStream stream = token_stream_tokenize(content);
         // Find last "find_line" after DOT (call site, not declaration)
-        usz offset = 0;
-        for (usz i = stream.tokens.size; i > 0; i--) {
+        sz offset = 0;
+        for (sz i = stream.tokens.size; i > 0; i--) {
             if (stream.tokens.entries[i - 1].text == "find_line" && i >= 2 && stream.tokens.entries[i - 2].type == DOT) {
                 offset = stream.tokens.entries[i - 1].offset;
                 break;
@@ -273,8 +273,8 @@ fn void test_hover_cross_file_field() @test {
 
     // Find offset of "tokens" in "stream.tokens"
     TokenStream s = token_stream_tokenize(content);
-    usz offset = 0;
-    for (usz i = 0; i < s.tokens.size; i++) {
+    sz offset = 0;
+    for (sz i = 0; i < s.tokens.size; i++) {
         if (s.tokens.entries[i].text == "tokens" && i > 0 && s.tokens.entries[i - 1].type == DOT) {
             offset = s.tokens.entries[i].offset;
             break;

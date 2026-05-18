@@ -15,7 +15,7 @@ fn void test_highlight_function_calls() @test {
 	assert(result.contains(`"kind":1`), "got: %s", result);
 	// Count occurrences of "range" — should be 3
 	int count = 0;
-	usz pos = 0;
+	sz pos = 0;
 	while (pos < result.len) {
 		if (try found = result[pos..].index_of(`"range"`)) {
 			count++;
@@ -43,7 +43,7 @@ fn void test_highlight_single_occurrence() @test {
 	assert(result.contains(`"range"`), "got: %s", result);
 	// Should be exactly 1 highlight
 	int count = 0;
-	usz pos = 0;
+	sz pos = 0;
 	while (pos < result.len) {
 		if (try found = result[pos..].index_of(`"range"`)) {
 			count++;
@@ -62,7 +62,7 @@ fn void test_highlight_type_ident() @test {
 	encode_document_highlights(content, 7, &out);
 	String result = out.str_view();
 	int count = 0;
-	usz pos = 0;
+	sz pos = 0;
 	while (pos < result.len) {
 		if (try found = result[pos..].index_of(`"range"`)) {
 			count++;
@@ -81,7 +81,7 @@ fn void test_highlight_const_ident() @test {
 	encode_document_highlights(content, 9, &out);
 	String result = out.str_view();
 	int count = 0;
-	usz pos = 0;
+	sz pos = 0;
 	while (pos < result.len) {
 		if (try found = result[pos..].index_of(`"range"`)) {
 			count++;
@@ -105,7 +105,7 @@ fn void test_references_same_file() @test {
 	String result = out.str_view();
 	// Should find 3 references: decl + 2 calls
 	int count = 0;
-	usz pos = 0;
+	sz pos = 0;
 	while (pos < result.len) {
 		if (try found = result[pos..].index_of(`"uri"`)) {
 			count++;
@@ -162,7 +162,7 @@ fn void test_references_type_ident() @test {
 
 fn int count_occurrences(String haystack, String needle) @private {
 	int count = 0;
-	usz pos = 0;
+	sz pos = 0;
 	while (pos < haystack.len) {
 		if (try found = haystack[pos..].index_of(needle)) {
 			count++;
