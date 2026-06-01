@@ -39,7 +39,6 @@ fn TokenStream* FileCache.stream_for(&self, String abs_path, String* out_content
 {
 	long mt = (long)(file::last_modified(abs_path) ?? (Time)0);
 
-	
 	for (sz i = 0; i < self.size; i++)
 	{
 		if (self.entries[i].path == abs_path)

@@ -349,6 +349,53 @@ fn void test_completion_module_scope_declaration_kinds() @test {
 	assert(result.contains(`"kind":21`), "expected Constant kind, got: %s", result);
 }
 
+// Regression: a single file declaring multiple modules, where the requested module is
+// NOT the file's first module (mirrors std/io/file.c3: `module std::io;` then
+// `module std::io::file;`). Completion must scan past the first module and only emit
+// declarations from the matching section.
+fn void test_completion_module_scope_multi_module_file() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	String file_content = "module std::io;\nstruct File { int handle; }\nfn void io_only() {}\nmodule std::io::file;\nfn void load() {}\nfn void load_buffer() {}";
+	docs.open("file:///file.c3", file_content, 1);
+
+	// import std::io::file; then type file::l
+	String content = "module lsp;\nimport std::io::file;\nfn void main() { file::l";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///file.c3");
+
+	assert(result.contains(`"label":"load"`), "expected load from std::io::file, got: %s", result);
+	assert(result.contains(`"label":"load_buffer"`), "expected load_buffer from std::io::file, got: %s", result);
+	// Must NOT leak declarations from the file's first module (std::io)
+	assert(!result.contains(`"label":"File"`), "should not surface std::io::File under file::, got: %s", result);
+	assert(!result.contains(`"label":"io_only"`), "should not surface std::io::io_only under file::, got: %s", result);
+}
+
+// Companion to the above: the first module in the same multi-module file resolves too,
+// and does not leak the second module's declarations.
+fn void test_completion_module_scope_multi_module_first() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	String file_content = "module std::io;\nstruct File { int handle; }\nfn void io_only() {}\nmodule std::io::file;\nfn void load() {}";
+	docs.open("file:///file.c3", file_content, 1);
+
+	// import std::io; then type io::
+	String content = "module lsp;\nimport std::io;\nfn void main() { io::";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///file.c3");
+
+	assert(result.contains(`"label":"File"`), "expected File from std::io, got: %s", result);
+	assert(result.contains(`"label":"io_only"`), "expected io_only from std::io, got: %s", result);
+	// Must NOT surface the sub-module's declarations under io::
+	assert(!result.contains(`"label":"load"`), "should not surface std::io::file::load under io::, got: %s", result);
+}
+
 fn void test_completion_dot_real_handler_code() @test {
 	DString out = dstring::temp();
 	DocumentList* docs = mem::new(DocumentList);

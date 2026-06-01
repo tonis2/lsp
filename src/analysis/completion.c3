@@ -301,10 +301,7 @@ fn void collect_module_completions(String uri, String content, String module_nam
 	// 1. Search open documents for files declaring this module
 	for (sz d = 0; d < docs.size; d++)
 	{
-		if (has_module_declaration(docs.entries[d].content, module_name, full_module))
-		{
-			collect_declarations_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count, docs.entries[d].get_tokens());
-		}
+		collect_declarations_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count, docs.entries[d].get_tokens(), module_name, full_module);
 	}
 
 	// 2. Search project files on disk
@@ -332,13 +329,19 @@ fn void collect_module_completions(String uri, String content, String module_nam
 }
 
 // Collect only top-level declarations (functions, types, constants, macros) with proper kinds.
-fn void collect_declarations_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, TokenStream* cached = null) @private
+// When short_name/full_name are given, only declarations inside a matching `module` section
+// are collected — a single C3 file may declare several modules (e.g. std/io/file.c3 opens with
+// `module std::io;` and later `module std::io::file;`). When both are empty, collect from all.
+fn void collect_declarations_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, TokenStream* cached = null, String short_name = "", String full_name = "") @private
 {
 	TokenStream owned;
 	TokenStream* stream;
 	if (cached != null) { stream = cached; }
 	else { owned = token_stream_tokenize(content); stream = &owned; }
 	defer { if (cached == null) owned.free(); }
+
+	bool filter_module = short_name.len > 0 || full_name.len > 0;
+	bool in_target = !filter_module; // when not filtering, everything is in scope
 
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
@@ -348,6 +351,33 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 
 		switch (tt)
 		{
+			case MODULE:
+				// Track the current module section so later declarations are gated by it.
+				if (filter_module)
+				{
+					DString mod_path = dstring::temp();
+					bool first_part = true;
+					for (sz j = i + 1; j < stream.tokens.size; j++)
+					{
+						TokenType jt = stream.tokens.entries[j].type;
+						if (is_ident(jt) || jt == TYPE_IDENT || jt == CONST_IDENT)
+						{
+							if (!first_part) mod_path.append("::");
+							mod_path.append(stream.tokens.entries[j].text);
+							first_part = false;
+						}
+						else if (jt == SCOPE)
+						{
+							continue;
+						}
+						else
+						{
+							break;
+						}
+					}
+					in_target = module_path_matches(mod_path.str_view(), short_name, full_name);
+				}
+				continue;
 			case FUNC:
 			case MACRO:
 				// fn [RetType] name( or fn [RetType] Type.name(
@@ -420,6 +450,7 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 				continue;
 		}
 
+		if (!in_target) continue; // declaration belongs to a non-matching module section
 		if (name.len == 0 || kind == 0) continue;
 		if (prefix.len > 0 && !starts_with_ci(name, prefix)) continue;
 		if (name == prefix) continue;
@@ -482,64 +513,13 @@ fn String last_module_segment(String mod_path) @private
 	return mod_path;
 }
 
-// Check if file content declares a module matching the short or full name.
-// short_name: "process", full_name: "std::os::process" (may be empty)
-fn bool has_module_declaration(String content, String short_name, String full_name) @private
+// Does a declared module path match the requested module? Matches on the full path,
+// the bare short name, or the last segment (e.g. "std::os::process" matches "process").
+fn bool module_path_matches(String declared, String short_name, String full_name) @private
 {
-	Lexer lex;
-	lex.init(content);
-
-	while (true)
-	{
-		if (try tok = lex.next())
-		{
-			if (tok.type == MODULE)
-			{
-				// Collect the module path
-				DString mod_path = dstring::temp();
-				bool first_part = true;
-				while (true)
-				{
-					if (try next = lex.next())
-					{
-						if (is_ident(next.type) || next.type == TYPE_IDENT || next.type == CONST_IDENT)
-						{
-							if (!first_part) mod_path.append("::");
-							mod_path.append(next.text);
-							first_part = false;
-						}
-						else if (next.type == SCOPE)
-						{
-							continue;
-						}
-						else
-						{
-							break;
-						}
-					}
-					else
-					{
-						break;
-					}
-				}
-				String declared = mod_path.str_view();
-				// Match full path, short name, or last segment
-				if (declared == short_name) return true;
-				if (full_name.len > 0 && declared == full_name) return true;
-				String last_seg = last_module_segment(declared);
-				if (last_seg == short_name) return true;
-				return false;
-			}
-			// Module must be the first declaration
-			if (tok.type == IMPORT || tok.type == FUNC || tok.type == STRUCT) return false;
-		}
-		else
-		{
-			if (lex.at_end()) break;
-			lex.pos++;
-			lex.col++;
-		}
-	}
+	if (declared == short_name) return true;
+	if (full_name.len > 0 && declared == full_name) return true;
+	if (last_module_segment(declared) == short_name) return true;
 	return false;
 }
 
@@ -555,8 +535,6 @@ fn void scan_dir_module_decls(String dir_path, String short_name, String full_na
 	PathList entries;
 	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
 	defer { foreach (&e : entries) e.free(mem); entries.free(); }
-
-	bool check_module = short_name.len > 0 || full_name.len > 0;
 
 	foreach (entry : entries)
 	{
@@ -576,10 +554,8 @@ fn void scan_dir_module_decls(String dir_path, String short_name, String full_na
 			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
 			if (stream != null)
 			{
-				if (!check_module || has_module_declaration(fc, short_name, full_name))
-				{
-					collect_declarations_from_content(fc, prefix, out, first, seen, seen_count, stream);
-				}
+				// collect_declarations_from_content gates by module section internally.
+				collect_declarations_from_content(fc, prefix, out, first, seen, seen_count, stream, short_name, full_name);
 				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
