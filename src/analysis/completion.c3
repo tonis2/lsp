@@ -255,8 +255,41 @@ fn void emit_completion_item(DString* out, String label, int kind, bool* first) 
 {
 	if (!*first) out.append_char(',');
 	CompletionItem item = { .label = label, .kind = kind, };
+	if (kind == 2 || kind == 3) // Method / Function (incl. macros)
+	{
+		// Insert "label($0)" as a snippet and trigger the parameter-hints popup so
+		// accepting a callable drops the cursor inside the parens with signatures shown.
+		// The label stays the plain name (filtering/display unchanged); only inserted text differs.
+		item.insert_text = snippet_call_text(label);
+		item.insert_text_format = 2; // Snippet
+		item.trigger_signature_help = true;
+	}
 	item.encode(out);
 	*first = false;
+}
+
+// Build a snippet insert text of the form "name($0)", backslash-escaping the snippet
+// metacharacters $ } \ in the name (identifiers are normally safe; defensive only).
+fn String snippet_call_text(String name) @private
+{
+	// Built in the request's temp pool (like mod_path elsewhere); the view stays valid
+	// through item.encode and is released when the completion pool is freed.
+	DString s = dstring::temp();
+	foreach (c : name)
+	{
+		switch (c)
+		{
+			case '$':
+			case '}':
+			case '\\':
+				s.append_char('\\');
+				s.append_char(c);
+			default:
+				s.append_char(c);
+		}
+	}
+	s.append("($0)");
+	return s.str_view();
 }
 
 fn void emit_completion_item_detail(DString* out, String label, int kind, String detail, bool* first) @private
@@ -726,60 +759,101 @@ fn void collect_all_identifiers(String uri, String content, String prefix, Docum
 	}
 }
 
+// Collect free function / macro declaration names from a token stream. Mirrors the
+// FUNC/MACRO -> LPAREN -> preceding-IDENT logic in collect_declarations_from_content,
+// so identifier completions can tag those names as callable (kind 3) and emit the
+// "name($0)" snippet + parameter-hints command. Methods (Type.name) are skipped — they
+// surface through the dot-completion path instead.
+fn void collect_callable_names(TokenStream* stream, String[MAX_DOC_IDENTS]* names, sz* count) @private
+{
+	for (sz i = 0; i < stream.tokens.size; i++)
+	{
+		TokenType tt = stream.tokens.entries[i].type;
+		if (tt != FUNC && tt != MACRO) continue;
+
+		String name = "";
+		for (sz j = i + 1; j < stream.tokens.size && j < i + 64; j++)
+		{
+			if (stream.tokens.entries[j].type == LPAREN)
+			{
+				if (j > 0 && is_ident(stream.tokens.entries[j - 1].type))
+				{
+					if (j >= 2 && stream.tokens.entries[j - 2].type == DOT) break; // method
+					name = stream.tokens.entries[j - 1].text;
+				}
+				break;
+			}
+			if (stream.tokens.entries[j].type == LBRACE || stream.tokens.entries[j].type == EOS) break;
+		}
+		// macro name (no parens)
+		if (name.len == 0 && tt == MACRO && i + 1 < stream.tokens.size && is_ident(stream.tokens.entries[i + 1].type))
+		{
+			name = stream.tokens.entries[i + 1].text;
+		}
+		if (name.len == 0) continue;
+
+		bool dup = false;
+		for (sz k = 0; k < *count; k++) { if ((*names)[k] == name) { dup = true; break; } }
+		if (!dup && *count < MAX_DOC_IDENTS) { (*names)[*count] = name; (*count)++; }
+	}
+}
+
 fn void collect_idents_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
 {
-	Lexer lex;
-	lex.init(content);
+	TokenStream ts = token_stream_tokenize(content);
+	defer ts.free();
 
-	while (true)
+	// Pre-pass: names declared as free functions/macros, so they complete as callables.
+	String[MAX_DOC_IDENTS] callables;
+	sz callable_count = 0;
+	collect_callable_names(&ts, &callables, &callable_count);
+
+	for (sz i = 0; i < ts.tokens.size; i++)
 	{
-		if (try tok = lex.next())
+		String text = ts.tokens.entries[i].text;
+		int kind = 0;
+		switch (ts.tokens.entries[i].type)
 		{
-			int kind = 0;
-			switch (tok.type)
-			{
-				case IDENT:
-					kind = 6; // Variable
-				case TYPE_IDENT:
-					kind = 22; // Struct (type)
-				case CONST_IDENT:
-					kind = 21; // Constant
-				default:
-					continue;
-			}
-
-			if (tok.text.len == 0) continue;
-			if (prefix.len > 0 && !starts_with_ci(tok.text, prefix)) continue;
-
-			// Skip if same as prefix (don't suggest what's already typed)
-			if (tok.text == prefix) continue;
-
-			// Dedup with linear scan
-			bool dup = false;
-			for (sz j = 0; j < *seen_count; j++)
-			{
-				if ((*seen)[j] == tok.text)
+			case IDENT:
+				kind = 6; // Variable
+				// Promote known free functions/macros to Function so they get the call snippet.
+				for (sz k = 0; k < callable_count; k++)
 				{
-					dup = true;
-					break;
+					if (callables[k] == text) { kind = 3; break; }
 				}
-			}
-			if (dup) continue;
-
-			if (*seen_count < MAX_DOC_IDENTS)
-			{
-				(*seen)[*seen_count] = tok.text;
-				(*seen_count)++;
-			}
-
-			emit_completion_item(out, tok.text, kind, first);
+			case TYPE_IDENT:
+				kind = 22; // Struct (type)
+			case CONST_IDENT:
+				kind = 21; // Constant
+			default:
+				continue;
 		}
-		else
+
+		if (text.len == 0) continue;
+		if (prefix.len > 0 && !starts_with_ci(text, prefix)) continue;
+
+		// Skip if same as prefix (don't suggest what's already typed)
+		if (text == prefix) continue;
+
+		// Dedup with linear scan
+		bool dup = false;
+		for (sz j = 0; j < *seen_count; j++)
 		{
-			if (lex.at_end()) break;
-			lex.pos++;
-			lex.col++;
+			if ((*seen)[j] == text)
+			{
+				dup = true;
+				break;
+			}
 		}
+		if (dup) continue;
+
+		if (*seen_count < MAX_DOC_IDENTS)
+		{
+			(*seen)[*seen_count] = text;
+			(*seen_count)++;
+		}
+
+		emit_completion_item(out, text, kind, first);
 	}
 }
 

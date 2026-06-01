@@ -23,11 +23,13 @@ fn void encode_signature_help(String content, sz offset, DString* out, TokenStre
 	sz call_name_idx = stream.tokens.size; // sentinel = not found
 	sz active_param = 0;
 
-	// Find the token index at or just before cursor
+	// Find the token index at or just before cursor. A token that *starts* exactly at the
+	// cursor offset sits to the right of the cursor (e.g. the ')' in "foo(|)") and must be
+	// excluded — otherwise it inflates paren depth below and hides the call's opening '('.
 	sz cursor_tok_idx = 0;
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
-		if (stream.tokens[i].offset <= offset)
+		if (stream.tokens[i].offset < offset)
 		{
 			cursor_tok_idx = i;
 		}

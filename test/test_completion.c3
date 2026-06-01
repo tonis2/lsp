@@ -349,6 +349,50 @@ fn void test_completion_module_scope_declaration_kinds() @test {
 	assert(result.contains(`"kind":21`), "expected Constant kind, got: %s", result);
 }
 
+// Function/method completions insert a "name($0)" snippet and trigger the parameter-hints
+// popup; non-callable items (structs, constants) keep plain-text insertion.
+fn void test_completion_function_snippet_and_signature_help() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	String mod_content = "module mymod;\nfn void do_thing() {}\nstruct Config { int x; }";
+	docs.open("file:///mymod.c3", mod_content, 1);
+
+	String content = "module lsp;\nimport mymod;\nfn void main() { mymod::";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///mymod.c3");
+
+	// The function item carries a snippet insert + signature-help command.
+	assert(result.contains(`"insertText":"do_thing($0)"`), "expected do_thing snippet insert, got: %s", result);
+	assert(result.contains(`"textEditText":"do_thing($0)"`), "expected do_thing textEditText (honored under itemDefaults.editRange), got: %s", result);
+	assert(result.contains(`"insertTextFormat":2`), "expected Snippet insertTextFormat=2, got: %s", result);
+	assert(result.contains(`"command":{"title":"Trigger Parameter Hints","command":"editor.action.triggerParameterHints"}`),
+		"expected triggerParameterHints command, got: %s", result);
+
+	// The struct item must NOT get a snippet/insertText/command.
+	assert(!result.contains(`"insertText":"Config($0)"`), "struct should not get call snippet, got: %s", result);
+}
+
+// A function declared in the SAME file (default identifier context, not module-scope or
+// dot) must also complete as a callable with the snippet + parameter-hints command.
+fn void test_completion_local_function_snippet() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	String content = "module app;\nfn void test_named_default(int times = 1) {}\nint counter = 0;\nfn void main() { test_na";
+	encode_completions("file:///app.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+
+	assert(result.contains(`"insertText":"test_named_default($0)"`), "expected local function snippet, got: %s", result);
+	assert(result.contains(`"textEditText":"test_named_default($0)"`), "expected local function textEditText, got: %s", result);
+	assert(result.contains(`"insertTextFormat":2`), "expected Snippet insertTextFormat=2, got: %s", result);
+	assert(result.contains(`"command":{"title":"Trigger Parameter Hints","command":"editor.action.triggerParameterHints"}`),
+		"expected triggerParameterHints command, got: %s", result);
+}
+
 // Regression: a single file declaring multiple modules, where the requested module is
 // NOT the file's first module (mirrors std/io/file.c3: `module std::io;` then
 // `module std::io::file;`). Completion must scan past the first module and only emit

@@ -56,6 +56,8 @@ struct CompletionItem
 	String detail;
 	String documentation;
 	String insert_text;
+	int insert_text_format;      // 0 = unset, 1 = PlainText, 2 = Snippet
+	bool trigger_signature_help; // emit editor.action.triggerParameterHints command
 }
 
 struct ParameterInformation
@@ -179,6 +181,20 @@ fn void CompletionItem.encode(&self, DString* out)
 		out.append(",\"insertText\":\"");
 		json_escape_into(out, self.insert_text);
 		out.append_char('"');
+		// When the CompletionList provides itemDefaults.editRange (this server always does),
+		// the client takes the inserted text from textEditText (falling back to label) and
+		// IGNORES insertText. Emit both so the snippet applies with or without the default.
+		out.append(",\"textEditText\":\"");
+		json_escape_into(out, self.insert_text);
+		out.append_char('"');
+	}
+	if (self.insert_text_format != 0)
+	{
+		out.appendf(",\"insertTextFormat\":%d", self.insert_text_format);
+	}
+	if (self.trigger_signature_help)
+	{
+		out.append(`,"command":{"title":"Trigger Parameter Hints","command":"editor.action.triggerParameterHints"}`);
 	}
 	out.append_char('}');
 }
