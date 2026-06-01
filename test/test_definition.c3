@@ -174,6 +174,47 @@ fn void test_definition_constdef_block_member_cross_file() @test {
 	ds.close("file:///vk.c3");
 }
 
+fn void test_definition_fluent_chain_cross_file() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Fluent builder pattern (as in the Vulkan bindings): a free fn returns the
+	// builder, each method returns the same builder type, enabling chaining.
+	ds.open("file:///b.c3",
+		"struct Builder { int x; }\n"
+		"fn Builder builder() { Builder b; return b; }\n"
+		"fn Builder Builder.setX(&self, int v) { return *self; }\n"
+		"fn int Builder.fin(&self) { return 0; }", 1);
+
+	// Cursor on ".fin" — a NON-first link reached through builder().setX(1).
+	String content = "int r = builder().setX(1).fin();";
+	encode_definition("file:///test.c3", content, 27, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`file:///b.c3`), "expected jump into builder file, got: %s", result);
+	assert(result.contains(`"line":3`), "got: %s", result);
+	assert(result.contains(`"character":15`), "got: %s", result);
+
+	ds.close("file:///b.c3");
+}
+
+fn void test_definition_fluent_chain_first_link() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Same file: a method invoked directly on a free-function call result
+	// (receiver is a call expression — previously unresolved).
+	String content =
+		"struct Builder { int x; }\n"
+		"fn Builder builder() { Builder b; return b; }\n"
+		"fn Builder Builder.setX(&self, int v) { return *self; }\n"
+		"fn void test() { builder().setX(1); }";
+	// Cursor on "setX" in the usage (last line)
+	sz off = content.len - 8; // inside "setX(1); }" → on setX
+	encode_definition("file:///test.c3", content, off, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":2`), "expected setX declaration on line 2, got: %s", result);
+}
+
 fn void test_definition_cross_file() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);

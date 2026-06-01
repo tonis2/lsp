@@ -503,12 +503,38 @@ fn String resolve_alias_in_project(String file_path, String type_name)
 // Handles chained access: for stream.tokens.method(), resolves stream→TokenStream,
 // then TokenStream.tokens→TokenList, returning "TokenList".
 // Returns the type name (e.g. "TokenStream"), or empty string if not resolvable.
-fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, DocumentList* docs)
+fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, DocumentList* docs, int depth = 0)
 {
 	if (cursor_idx < 2) return "";
+	if (depth > 32) return ""; // bound recursion on pathological chains
 	if (self.entries[cursor_idx - 1].type != DOT) return "";
 
 	Token recv = self.entries[cursor_idx - 2];
+
+	// Receiver is a call expression: `foo(...).` or `recv.method(...).`. Resolve the
+	// call's return type and use it as the receiver type. The recursion below walks
+	// fluent builder chains (`builder().setA(..).setB(..).build(..)`) link by link.
+	if (recv.type == RPAREN)
+	{
+		if (try lparen = self.match_paren_backward(cursor_idx - 2))
+		{
+			if (lparen == 0) return "";
+			sz name_idx = lparen - 1;
+			Token callee = self.entries[name_idx];
+			if (!is_ident(callee.type)) return "";
+			if (name_idx >= 1 && self.entries[name_idx - 1].type == DOT)
+			{
+				// Method call — resolve the method's own receiver type first, then its return type.
+				String inner = self.resolve_receiver_type(name_idx, uri, docs, depth + 1);
+				if (inner.len == 0) return "";
+				return self.resolve_call_return_type_across(inner, callee.text, uri, docs);
+			}
+			// Free function call (possibly module-qualified, e.g. `mod::fn(..)`).
+			return self.resolve_call_return_type_across("", callee.text, uri, docs);
+		}
+		return "";
+	}
+
 	if (!is_ident(recv.type) && recv.type != TYPE_IDENT && recv.type != CONST_IDENT) return "";
 
 	// If receiver is a TYPE_IDENT, it IS the type (e.g. Type.CONSTANT)
@@ -520,7 +546,7 @@ fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, Docu
 	if (cursor_idx >= 4 && self.entries[cursor_idx - 3].type == DOT)
 	{
 		// Recursively resolve the chain
-		String parent_type = self.resolve_receiver_type(cursor_idx - 2, uri, docs);
+		String parent_type = self.resolve_receiver_type(cursor_idx - 2, uri, docs, depth + 1);
 		if (parent_type.len > 0)
 		{
 			// For struct field lookup, resolve aliases (e.g. LineOffsets → List)
@@ -698,6 +724,199 @@ fn String resolve_field_type_in_dir(String dir_path, String struct_type, String 
 fn String TokenList.resolve_method_type(&self, sz cursor_idx, String uri, DocumentList* docs)
 {
 	return self.resolve_receiver_type(cursor_idx, uri, docs);
+}
+
+// Find the matching '(' for the ')' at rparen_idx by scanning left with paren depth.
+// Only parentheses affect depth; brackets/braces inside the call args are ignored.
+fn sz? TokenList.match_paren_backward(&self, sz rparen_idx)
+{
+	if (rparen_idx >= self.size || self.entries[rparen_idx].type != RPAREN) return TOKEN_NOT_FOUND~;
+	int depth = 0;
+	for (sz k = rparen_idx + 1; k > 0; k--)
+	{
+		sz i = k - 1;
+		TokenType t = self.entries[i].type;
+		if (t == RPAREN)
+		{
+			depth++;
+		}
+		else if (t == LPAREN)
+		{
+			depth--;
+			if (depth == 0) return i;
+		}
+	}
+	return TOKEN_NOT_FOUND~;
+}
+
+// Find the return type of a free function declared as `fn <RET> name(...)`.
+// Returns <RET>'s TYPE_IDENT text, or "" if not found or the return type is a builtin
+// (a builtin has no chainable members downstream, so stopping there is correct).
+fn String TokenList.find_function_return_type(&self, String name)
+{
+	for (sz i = 0; i + 2 < self.size; i++)
+	{
+		if (self.entries[i].type != FUNC) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT) continue; // <RET>
+		for (sz j = i + 2; j < self.size && j < i + 64; j++)
+		{
+			TokenType jt = self.entries[j].type;
+			if (jt == LPAREN)
+			{
+				// `fn <RET> name(` — name not preceded by DOT (else it is a method).
+				if (is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
+					&& (j < 2 || self.entries[j - 2].type != DOT))
+				{
+					return self.entries[i + 1].text;
+				}
+				break;
+			}
+			if (jt == LBRACE || jt == EOS) break;
+		}
+	}
+	return "";
+}
+
+// Find the return type of a method declared as `fn <RET> Type.method(...)`.
+fn String TokenList.find_method_return_type(&self, String type_name, String method_name)
+{
+	for (sz i = 0; i + 2 < self.size; i++)
+	{
+		if (self.entries[i].type != FUNC) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT) continue; // <RET>
+		for (sz j = i + 2; j < self.size && j < i + 64; j++)
+		{
+			TokenType jt = self.entries[j].type;
+			if (jt == LPAREN)
+			{
+				// `fn <RET> Type.method(`
+				if (j >= 4 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == method_name
+					&& self.entries[j - 2].type == DOT
+					&& self.entries[j - 3].type == TYPE_IDENT && self.entries[j - 3].text == type_name)
+				{
+					return self.entries[i + 1].text;
+				}
+				break;
+			}
+			if (jt == LBRACE || jt == EOS) break;
+		}
+	}
+	return "";
+}
+
+// Resolve a call's return type across current file, open docs, and project files on disk.
+// When type_name is empty, `name` is a free function; otherwise a method on type_name.
+fn String TokenList.resolve_call_return_type_across(&self, String type_name, String name, String uri, DocumentList* docs)
+{
+	// 1. Current file
+	String result = type_name.len > 0
+		? self.find_method_return_type(type_name, name)
+		: self.find_function_return_type(name);
+	if (result.len > 0) return result;
+
+	// 2. Open documents (reuse their cached token streams)
+	for (sz d = 0; d < docs.size; d++)
+	{
+		TokenStream* doc_stream = docs.entries[d].get_tokens();
+		result = type_name.len > 0
+			? doc_stream.tokens.find_method_return_type(type_name, name)
+			: doc_stream.tokens.find_function_return_type(name);
+		if (result.len > 0) return result;
+	}
+
+	// 3. Project files on disk
+	String file_path = uri_to_path(uri);
+	if (file_path.len > 0)
+	{
+		result = resolve_return_type_in_project(file_path, type_name, name);
+		if (result.len > 0) return result;
+	}
+	return "";
+}
+
+fn String resolve_return_type_in_project(String file_path, String type_name, String name) @private
+{
+	ProjectDirs pdirs;
+	pdirs.get_search_dirs(file_path);
+	if (pdirs.project_root.len == 0) return "";
+
+	for (sz i = 0; i < pdirs.count; i++)
+	{
+		DString search_path = dstring::temp();
+		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
+		String result = resolve_return_type_in_dir(search_path.str_view(), type_name, name, 0);
+		if (result.len > 0) return result;
+	}
+	return "";
+}
+
+fn String resolve_return_type_in_dir(String dir_path, String type_name, String name, int depth) @private
+{
+	if (depth > MAX_SCAN_DEPTH) return "";
+
+	Path p;
+	if (try pp = path::tnew(dir_path))
+	{
+		p = pp;
+	}
+	else
+	{
+		return "";
+	}
+	PathList entries;
+	if (try el = path::ls(mem, p))
+	{
+		entries = el;
+	}
+	else
+	{
+		return "";
+	}
+	defer
+	{
+		foreach (&e : entries) e.free(mem);
+		entries.free();
+	}
+
+	foreach (entry : entries)
+	{
+		String entry_name = (String)entry;
+		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
+		defer mem::free(path_buf);
+		path_buf[:dir_path.len] = dir_path[:dir_path.len];
+		path_buf[dir_path.len] = '/';
+		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
+		String full_path = (String)path_buf;
+
+		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
+		{
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
+			{
+				String result = type_name.len > 0
+					? stream.tokens.find_method_return_type(type_name, name)
+					: stream.tokens.find_function_return_type(name);
+				if (result.len > 0)
+				{
+					// Copy before any free — result slices into the file content.
+					DString copy = dstring::temp();
+					copy.append(result);
+					if (owns) { owned.free(); mem::free((char*)fc.ptr); }
+					return copy.str_view();
+				}
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
+			}
+		}
+		else
+		{
+			String result = resolve_return_type_in_dir(full_path, type_name, name, depth + 1);
+			if (result.len > 0) return result;
+		}
+	}
+	return "";
 }
 
 // Find the type of a struct field: struct TypeName { FieldType field_name; }

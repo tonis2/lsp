@@ -154,6 +154,24 @@ fn void test_completion_dot_no_keywords() @test {
 	assert(!result.contains(`"label":"$sizeof"`), "no CT keywords in dot completion");
 }
 
+fn void test_completion_dot_after_fluent_chain() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// Completion after a `.` that follows a chained method call: the receiver
+	// `builder().setX(1)` must resolve to Builder so its methods are offered.
+	String content =
+		"struct Builder { int x; }\n"
+		"fn Builder builder() { Builder b; return b; }\n"
+		"fn Builder Builder.setX(&self, int v) { return *self; }\n"
+		"fn int Builder.fin(&self) { return 0; }\n"
+		"fn void test() { builder().setX(1).";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"setX"`), "expected method setX after chain, got: %s", result);
+	assert(result.contains(`"label":"fin"`), "expected method fin after chain, got: %s", result);
+}
+
 fn void test_completion_dot_cross_file() @test {
 	DString out = dstring::temp();
 	DocumentList* docs = mem::new(DocumentList);

@@ -22,6 +22,23 @@ fn void test_hover_builtin_type() @test {
 	assert(result.contains("32-bit signed integer"), "got: %s", result);
 }
 
+fn void test_hover_fluent_chain_method() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content =
+		"struct Builder { int x; }\n"
+		"fn Builder builder() { Builder b; return b; }\n"
+		"fn Builder Builder.setX(&self, int v) { return *self; }\n"
+		"fn int Builder.fin(&self) { return 0; }\n"
+		"int r = builder().setX(1).fin();";
+	// Cursor on the usage's ".fin" (the 'f'), reached through the chain.
+	// Trailing ".fin();" is 7 chars, so 'f' sits at len-6.
+	encode_hover("file:///test.c3", content, content.len - 6, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("Builder.fin"), "expected fin signature in hover, got: %s", result);
+}
+
 fn void test_hover_identifier() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);
