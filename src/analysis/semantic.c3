@@ -39,10 +39,13 @@ fn sz LineOffsets.find_line(&self, sz offset)
 	return low > 0 ? low - 1 : 0;
 }
 
-fn void encode_semantic_tokens(String content, DString* out)
+fn void encode_semantic_tokens(String content, DString* out, TokenStream* cached = null)
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 	LineOffsets* lo = stream.get_line_offsets();
 
 	sz prev_line = 0;

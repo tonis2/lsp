@@ -134,3 +134,25 @@ fn void test_symbols_method_orphan() @test {
 	assert(result.contains(`"name":"MyType.do_thing"`), "got: %s", result);
 	assert(result.contains(`"kind":12`), "got: %s", result); // Function
 }
+
+fn void test_symbols_no_truncation() @test {
+	// More declarations than the old fixed cap (512). All must be emitted — no silent
+	// truncation now that the symbol store is a heap-backed list.
+	// Names need a lowercase letter to lex as TYPE_IDENT (all-caps+digits would be CONST_IDENT).
+	const int N = 600;
+	DString src = dstring::temp();
+	for (int i = 0; i < N; i++) {
+		src.appendf("struct Foo%d {}\n", i);
+	}
+	DString out = dstring::temp();
+	encode_document_symbols(src.str_view(), &out);
+	String result = out.str_view();
+
+	// Count struct symbols (kind 23) — one per declaration.
+	int count = 0;
+	String needle = `"kind":23`;
+	for (usz i = 0; i + needle.len <= result.len; i++) {
+		if (result[i:needle.len] == needle) count++;
+	}
+	assert(count == N, "expected %d structs, got %d", N, count);
+}

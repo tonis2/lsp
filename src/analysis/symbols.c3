@@ -2,6 +2,7 @@ module lsp;
 
 import std::core::dstring;
 import std::core::mem;
+import std::collections::list;
 import c3::lexer;
 
 const sz MAX_LOOKAHEAD = 64;
@@ -14,20 +15,23 @@ struct SymbolEntry
 	bool is_child;
 }
 
-fn void encode_document_symbols(String content, DString* out)
+fn void encode_document_symbols(String content, DString* out, TokenStream* cached = null)
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 	LineOffsets* lo = stream.get_line_offsets();
 
-	// Collect all symbols first
-	SymbolEntry[MAX_SYMBOLS] entries;
-	sz entry_count = 0;
+	// Collect all symbols first. Heap-backed lists (not fixed stack arrays) so large
+	// files aren't silently truncated at MAX_SYMBOLS and don't put ~130KB on the stack.
+	List{SymbolEntry} syms;
+	syms.init(mem);
+	defer syms.free();
 
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
-		if (entry_count >= MAX_SYMBOLS) break;
-
 		Token tok = stream.tokens.entries[i];
 		String name = "";
 		String parent_type = "";
@@ -46,7 +50,7 @@ fn void encode_document_symbols(String content, DString* out)
 				{
 					Token first = stream.tokens.entries[i + 1];
 					sz path_end = stream.tokens.scope_path_end(i + 1);
-					push_module_symbol(entries[..], &entry_count, lo, content,
+					push_module_symbol(&syms, lo, content,
 						first.offset, path_end - first.offset, tok.offset,
 						stream.tokens.find_eos_end(i + 2));
 				}
@@ -60,7 +64,7 @@ fn void encode_document_symbols(String content, DString* out)
 				{
 					Token first = stream.tokens.entries[j];
 					sz path_end = stream.tokens.scope_path_end(j);
-					push_module_symbol(entries[..], &entry_count, lo, content,
+					push_module_symbol(&syms, lo, content,
 						first.offset, path_end - first.offset, tok.offset, eos_end);
 					// advance past this path
 					sz k = j + 1;
@@ -212,7 +216,7 @@ fn void encode_document_symbols(String content, DString* out)
 		sz sel_end_line = sel_line;
 		sz sel_end_char = sel_char + name_len;
 
-		entries[entry_count] = {
+		syms.push({
 			.sym = {
 				.name = name,
 				.kind = kind,
@@ -226,72 +230,71 @@ fn void encode_document_symbols(String content, DString* out)
 				},
 			},
 			.parent_type = parent_type,
-		};
-		entry_count++;
+		});
 	}
 
-	// Second pass: nest methods under their parent type symbols
-	// Flat pool for all children across all parents
-	DocumentSymbol[MAX_SYMBOLS] children_pool;
-	sz pool_used = 0;
+	// Second pass: nest methods under their parent type symbols.
+	// Reserve the pool to the symbol count up front so it never reallocates — the
+	// children slices assigned below point into its backing buffer and must stay valid
+	// until the symbols are encoded. Total children across all parents <= syms.size.
+	List{DocumentSymbol} children_pool;
+	children_pool.init(mem, syms.size > 0 ? syms.size : 1);
+	defer children_pool.free();
 
-	for (sz i = 0; i < entry_count; i++)
+	for (sz i = 0; i < syms.size; i++)
 	{
-		int k = entries[i].sym.kind;
+		int k = syms.entries[i].sym.kind;
 		// Only types can have children (struct, enum, interface)
 		if (k != 23 && k != 10 && k != 11) continue;
-		String type_name = entries[i].sym.name;
+		String type_name = syms.entries[i].sym.name;
 
-		sz start = pool_used;
-		for (sz j = 0; j < entry_count; j++)
+		sz start = children_pool.size;
+		for (sz j = 0; j < syms.size; j++)
 		{
-			if (pool_used >= MAX_SYMBOLS) break;
-			if (entries[j].parent_type.len > 0 && entries[j].parent_type == type_name)
+			if (syms.entries[j].parent_type.len > 0 && syms.entries[j].parent_type == type_name)
 			{
-				children_pool[pool_used] = entries[j].sym;
-				pool_used++;
-				entries[j].is_child = true;
+				children_pool.push(syms.entries[j].sym);
+				syms.entries[j].is_child = true;
 			}
 		}
 
-		if (pool_used > start)
+		if (children_pool.size > start)
 		{
-			entries[i].sym.children = children_pool[start..pool_used - 1];
+			syms.entries[i].sym.children = children_pool.entries[start..children_pool.size - 1];
 		}
 	}
 
 	// Encode: output top-level symbols only
 	bool first = true;
-	for (sz i = 0; i < entry_count; i++)
+	for (sz i = 0; i < syms.size; i++)
 	{
-		if (entries[i].is_child) continue;
+		if (syms.entries[i].is_child) continue;
 
-		if (entries[i].sym.kind == 6)
+		if (syms.entries[i].sym.kind == 6)
 		{
-			if (entries[i].parent_type.len > 0)
+			if (syms.entries[i].parent_type.len > 0)
 			{
 				// Orphan method (no matching struct in this file) — show as Type.method
 				DString combined = dstring::temp();
-				combined.append(entries[i].parent_type);
+				combined.append(syms.entries[i].parent_type);
 				combined.append_char('.');
-				combined.append(entries[i].sym.name);
-				entries[i].sym.name = combined.str_view();
+				combined.append(syms.entries[i].sym.name);
+				syms.entries[i].sym.name = combined.str_view();
 			}
-			entries[i].sym.kind = 12; // Function
+			syms.entries[i].sym.kind = 12; // Function
 		}
 
 		if (!first) out.append_char(',');
-		entries[i].sym.encode(out);
+		syms.entries[i].sym.encode(out);
 		first = false;
 	}
 }
 
 // Emit a Module (kind 2) symbol whose name is the full scoped path
 // content[name_offset:name_len]. Mirrors the inline entry-build for other kinds.
-fn void push_module_symbol(SymbolEntry[] entries, sz* count, LineOffsets* lo, String content,
+fn void push_module_symbol(List{SymbolEntry}* syms, LineOffsets* lo, String content,
                            sz name_offset, sz name_len, sz decl_offset, sz end_offset)
 {
-	if (*count >= MAX_SYMBOLS) return;
 	if (end_offset == 0) end_offset = name_offset + name_len;
 
 	sz decl_line = lo.find_line(decl_offset);
@@ -301,7 +304,7 @@ fn void push_module_symbol(SymbolEntry[] entries, sz* count, LineOffsets* lo, St
 	sz sel_line  = lo.find_line(name_offset);
 	sz sel_char  = name_offset - lo.entries[sel_line];
 
-	entries[*count] = {
+	syms.push({
 		.sym = {
 			.name = content[name_offset : name_len],
 			.kind = 2, // Module
@@ -314,8 +317,7 @@ fn void push_module_symbol(SymbolEntry[] entries, sz* count, LineOffsets* lo, St
 				.end   = {.line = sel_line, .character = sel_char + name_len},
 			},
 		},
-	};
-	(*count)++;
+	});
 }
 
 // Given the index of the first IDENT of a module path, walk (IDENT (SCOPE IDENT)*)

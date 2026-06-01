@@ -25,6 +25,12 @@ struct LspServer
 	PublishedFiles diag_files;
 	bool diag_pending;
 	String diag_pending_uri;
+	// Trailing-edge debounce state for the cheap lexer diagnostics on large files.
+	bool lex_diag_pending;
+	String lex_diag_pending_uri;
+	Time last_lex_diag_time;
+	// Persistent cache of tokenized on-disk files (project + stdlib), keyed by path+mtime.
+	FileCache fcache;
 }
 
 fn void LspServer.init(&self, String stdlib_path, String compiler_path, long diag_delay_ms, String sentry_dsn)
@@ -32,6 +38,10 @@ fn void LspServer.init(&self, String stdlib_path, String compiler_path, long dia
 	*self = { .running = true, .stdlib_path = stdlib_path, .compiler_path = compiler_path, .diag_delay_ms = diag_delay_ms, .sentry = parse_sentry_dsn(sentry_dsn), };
 	self.documents.init(mem);
 	self.diag_files.init(mem);
+	self.fcache.init(mem);
+	// Publish the cache so the cross-file scan_dir_* helpers can consult it. The server
+	// is a stable stack value for the whole program, so &self.fcache is valid for life.
+	g_file_cache = &self.fcache;
 }
 
 fn void LspServer.handle_message(&self, String message)
@@ -154,17 +164,35 @@ fn void LspServer.handle_message(&self, String message)
 	self.flush_pending_diagnostics();
 }
 
-// Run a throttled-and-deferred compiler diagnostics request if its delay window
-// has now elapsed. Called after every dispatched message.
+// Run throttled-and-deferred diagnostics whose delay windows have now elapsed. Called
+// after every dispatched message; the server blocks on stdin, so we piggyback on
+// incoming messages (e.g. didChange keystrokes) to run deferred work.
 fn void LspServer.flush_pending_diagnostics(&self)
 {
-	if (!self.diag_pending) return;
-
 	Time now = time::now();
-	Duration elapsed = now - self.last_diag_time;
 	Duration delay = time::ms(self.diag_delay_ms);
-	if ((long)elapsed < (long)delay && (long)self.last_diag_time > 0) return;
 
-	self.diag_pending = false;
-	self.publish_compiler_diagnostics(self.diag_pending_uri);
+	// Deferred compiler diagnostics (project build).
+	if (self.diag_pending)
+	{
+		Duration elapsed = now - self.last_diag_time;
+		if ((long)elapsed >= (long)delay || (long)self.last_diag_time == 0)
+		{
+			self.diag_pending = false;
+			self.publish_compiler_diagnostics(self.diag_pending_uri);
+		}
+	}
+
+	// Deferred lexer diagnostics for large files (re-read the current content).
+	if (self.lex_diag_pending)
+	{
+		Duration elapsed = now - self.last_lex_diag_time;
+		if ((long)elapsed >= (long)delay || (long)self.last_lex_diag_time == 0)
+		{
+			self.lex_diag_pending = false;
+			self.last_lex_diag_time = now;
+			Document* d = self.documents.find(self.lex_diag_pending_uri);
+			if (d != null) publish_diagnostics(self.lex_diag_pending_uri, d.content);
+		}
+	}
 }

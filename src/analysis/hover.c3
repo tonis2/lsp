@@ -29,8 +29,11 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 				{
 					DString doc = dstring::temp();
 
-					// Tokenize to get cursor index for DOT detection
-					TokenStream hover_stream = token_stream_tokenize(content);
+					// Tokenize to get cursor index for DOT detection (reuse the open
+					// document's cached token stream when available).
+					TokenStream hover_owned;
+					bool hover_owns;
+					TokenStream* hover_stream = token_stream_for_doc(uri, content, docs, &hover_owned, &hover_owns);
 					Token hover_tok;
 					sz hover_idx;
 					bool have_idx = hover_stream.tokens.find_token_at(offset, &hover_tok, &hover_idx);
@@ -94,7 +97,7 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc);
 						}
 					}
-					hover_stream.free();
+					if (hover_owns) hover_owned.free();
 
 					if (doc.str_view().len > 0)
 					{
@@ -143,14 +146,20 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 // Searches: current file -> open documents -> project files -> stdlib.
 fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out, String method_type = "") @private
 {
+	// Cached token stream for the current document (reused across the searches below).
+	TokenStream cur_owned;
+	bool cur_owns;
+	TokenStream* cur_stream = token_stream_for_doc(uri, content, docs, &cur_owned, &cur_owns);
+	defer { if (cur_owns) cur_owned.free(); }
+
 	// If method type specified, try method-specific search first with each type candidate
 	if (method_type.len > 0)
 	{
-		if (try_extract_docs_from(content, cursor_tok, out, method_type)) return;
+		if (try_extract_docs_from(content, cursor_tok, out, method_type, cur_stream)) return;
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
-			if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, method_type)) return;
+			if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, method_type, docs.entries[d].get_tokens())) return;
 		}
 		String file_path = uri_to_path(uri);
 		if (file_path.len > 0)
@@ -165,13 +174,13 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 	}
 
 	// 1. Current file
-	if (try_extract_docs_from(content, cursor_tok, out)) return;
+	if (try_extract_docs_from(content, cursor_tok, out, "", cur_stream)) return;
 
 	// 2. Open documents
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out)) return;
+		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, "", docs.entries[d].get_tokens())) return;
 	}
 
 	// 3. Project files on disk
@@ -192,14 +201,20 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 // Searches: current file -> open documents -> project files -> stdlib.
 fn void find_hover_field_docs(String uri, String content, String type_name, String field_name, DocumentList* docs, String stdlib_path, DString* out) @private
 {
+	// Cached token stream for the current document.
+	TokenStream cur_owned;
+	bool cur_owns;
+	TokenStream* cur_stream = token_stream_for_doc(uri, content, docs, &cur_owned, &cur_owns);
+	defer { if (cur_owns) cur_owned.free(); }
+
 	// 1. Current file
-	if (try_extract_field_docs_from(content, type_name, field_name, out)) return;
+	if (try_extract_field_docs_from(content, type_name, field_name, out, cur_stream)) return;
 
 	// 2. Open documents
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		if (try_extract_field_docs_from(docs.entries[d].content, type_name, field_name, out)) return;
+		if (try_extract_field_docs_from(docs.entries[d].content, type_name, field_name, out, docs.entries[d].get_tokens())) return;
 	}
 
 	// 3. Project files on disk
@@ -217,10 +232,13 @@ fn void find_hover_field_docs(String uri, String content, String type_name, Stri
 }
 
 // Tokenize content, find a struct field declaration, and extract doc comment + signature.
-fn bool try_extract_field_docs_from(String content, String type_name, String field_name, DString* out) @private
+fn bool try_extract_field_docs_from(String content, String type_name, String field_name, DString* out, TokenStream* cached = null) @private
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 
 	if (try found = stream.tokens.find_struct_field(type_name, field_name))
 	{
@@ -231,10 +249,13 @@ fn bool try_extract_field_docs_from(String content, String type_name, String fie
 }
 
 // Tokenize content, find the declaration of target, and extract doc comment + signature.
-fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "") @private
+fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "", TokenStream* cached = null) @private
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 
 	if (try decl_idx = stream.tokens.find_declaration_in(target, method_type))
 	{
@@ -444,10 +465,15 @@ fn bool scan_dir_docs(String dir_path, Token target, DString* out, int depth, St
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				defer mem::free(file_content);
-				if (try_extract_docs_from((String)file_content, target, out, method_type)) return true;
+				bool found = try_extract_docs_from(fc, target, out, method_type, stream);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
+				if (found) return true;
 			}
 		}
 		else
@@ -502,10 +528,15 @@ fn bool scan_dir_field_docs(String dir_path, String type_name, String field_name
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				defer mem::free(file_content);
-				if (try_extract_field_docs_from((String)file_content, type_name, field_name, out)) return true;
+				bool found = try_extract_field_docs_from(fc, type_name, field_name, out, stream);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
+				if (found) return true;
 			}
 		}
 		else

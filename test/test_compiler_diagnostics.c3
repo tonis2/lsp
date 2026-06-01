@@ -107,13 +107,13 @@ fn void test_compiler_path_relative_no_root() @test {
 	assert(resolve_compiler_path("/tmp/foo.c3", "") == "/tmp/foo.c3");
 }
 
-// --- parse_compiler_diagnostics ---
+// --- CompilerDiagList.parse ---
 
 fn void test_parse_single_diagnostic() @test {
 	CompilerDiagList diags;
 	diags.tinit();
 	String out = "> LSPERR|error|\"/proj/src/a.c3\"|3|5|\"undefined symbol\"\n";
-	parse_compiler_diagnostics(&diags, out, "/proj");
+	diags.parse(out, "/proj");
 	assert(diags.len() == 1);
 	assert(diags[0].file == "/proj/src/a.c3");
 	assert(diags[0].line == 2); // 0-indexed
@@ -127,7 +127,7 @@ fn void test_parse_groups_two_files() @test {
 	CompilerDiagList diags;
 	diags.tinit();
 	String out = "LSPERR|error|\"/proj/a.c3\"|1|1|\"err a\"\nLSPERR|warning|\"/proj/b.c3\"|2|2|\"warn b\"\n";
-	parse_compiler_diagnostics(&diags, out, "/proj");
+	diags.parse(out, "/proj");
 	assert(diags.len() == 2);
 	assert(diags[0].file == "/proj/a.c3");
 	assert(diags[1].file == "/proj/b.c3");
@@ -138,7 +138,7 @@ fn void test_parse_relative_path() @test {
 	CompilerDiagList diags;
 	diags.tinit();
 	String out = "LSPERR|error|\"src/x.c3\"|10|1|\"oops\"\n";
-	parse_compiler_diagnostics(&diags, out, "/home/u/proj");
+	diags.parse(out, "/home/u/proj");
 	assert(diags.len() == 1);
 	assert(diags[0].file == "/home/u/proj/src/x.c3");
 }
@@ -147,6 +147,6 @@ fn void test_parse_ignores_non_lsperr() @test {
 	CompilerDiagList diags;
 	diags.tinit();
 	String out = "Compiling...\nsome other output\n";
-	parse_compiler_diagnostics(&diags, out, "/proj");
+	diags.parse(out, "/proj");
 	assert(diags.len() == 0);
 }

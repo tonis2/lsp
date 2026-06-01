@@ -406,9 +406,8 @@ fn String TokenList.resolve_type_alias_across(&self, String type_name, DocumentL
 
 	for (sz d = 0; d < docs.size; d++)
 	{
-		TokenStream doc_stream = token_stream_tokenize(docs.entries[d].content);
+		TokenStream* doc_stream = docs.entries[d].get_tokens();
 		resolved = doc_stream.tokens.resolve_type_alias(type_name);
-		doc_stream.free();
 		if (resolved.len > 0) return resolved;
 	}
 	return "";
@@ -455,21 +454,22 @@ fn String resolve_alias_in_dir(String dir_path, String type_name, int depth) @pr
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				TokenStream stream = token_stream_tokenize((String)file_content);
 				String resolved = stream.tokens.resolve_type_alias(type_name);
 				if (resolved.len > 0)
 				{
-					// Copy before freeing — resolved points into file_content
+					// Copy before any free — resolved points into the file content.
 					DString copy = dstring::temp();
 					copy.append(resolved);
-					stream.free();
-					mem::free(file_content);
+					if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 					return copy.str_view();
 				}
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
 		else
@@ -595,9 +595,8 @@ fn String TokenList.resolve_field_type_across(&self, String struct_type, String 
 	// 2. Open documents
 	for (sz d = 0; d < docs.size; d++)
 	{
-		TokenStream doc_stream = token_stream_tokenize(docs.entries[d].content);
+		TokenStream* doc_stream = docs.entries[d].get_tokens();
 		result = doc_stream.tokens.find_struct_field_type(struct_type, field_name);
-		doc_stream.free();
 		if (result.len > 0) return result;
 	}
 
@@ -668,20 +667,21 @@ fn String resolve_field_type_in_dir(String dir_path, String struct_type, String 
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				TokenStream stream = token_stream_tokenize((String)file_content);
 				String result = stream.tokens.find_struct_field_type(struct_type, field_name);
 				if (result.len > 0)
 				{
 					DString copy = dstring::temp();
 					copy.append(result);
-					stream.free();
-					mem::free(file_content);
+					if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 					return copy.str_view();
 				}
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
 		else
@@ -788,8 +788,10 @@ fn bool try_find_struct_field(String type_name, String field_name, String uri, S
 {
 	// 1. Current file
 	{
-		TokenStream stream = token_stream_tokenize(content);
-		defer stream.free();
+		TokenStream owned;
+		bool owns;
+		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+		defer { if (owns) owned.free(); }
 		if (try found = stream.tokens.find_struct_field(type_name, field_name))
 		{
 			emit_location(uri, content, stream.tokens.entries[found], out);
@@ -797,18 +799,16 @@ fn bool try_find_struct_field(String type_name, String field_name, String uri, S
 		}
 	}
 
-	// 2. Open documents
+	// 2. Open documents (reuse their cached token streams)
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		TokenStream* other_stream = docs.entries[d].get_tokens();
 		if (try found = other_stream.tokens.find_struct_field(type_name, field_name))
 		{
 			emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
-			other_stream.free();
 			return true;
 		}
-		other_stream.free();
 	}
 
 	// 3. Project files on disk
@@ -883,21 +883,21 @@ fn bool scan_dir_struct_field(String dir_path, String type_name, String field_na
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String content;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
+			if (stream != null)
 			{
-				String content = (String)file_content;
-				TokenStream stream = token_stream_tokenize(content);
 				if (try found = stream.tokens.find_struct_field(type_name, field_name))
 				{
 					DString uri = dstring::temp();
 					append_file_uri(&uri, full_path);
 					emit_location(uri.str_view(), content, stream.tokens.entries[found], out);
-					stream.free();
-					mem::free(file_content);
+					if (owns) { owned.free(); mem::free((char*)content.ptr); }
 					return true;
 				}
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)content.ptr); }
 			}
 		}
 		else
@@ -925,20 +925,18 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 		}
 	}
 
-	// 2. Search all other open documents
+	// 2. Search all other open documents (reuse their cached token streams)
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
 
-		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		TokenStream* other_stream = docs.entries[d].get_tokens();
 
 		if (try found = other_stream.tokens.find_declaration_in(cursor_tok, method_type))
 		{
 			emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
-			other_stream.free();
 			return true;
 		}
-		other_stream.free();
 	}
 
 	// 3. Scan project files on disk (src/ and lib/ relative to file)
@@ -967,8 +965,11 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 // Searches: current file -> open documents -> project files on disk -> stdlib.
 fn void encode_definition(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, DString* out)
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	// Reuse the open document's cached token stream when available.
+	TokenStream owned;
+	bool owns;
+	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+	defer { if (owns) owned.free(); }
 
 	// Find the token at cursor
 	Token cursor_tok;
@@ -1260,24 +1261,23 @@ fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int dept
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			// Read and tokenize this file
-			if (try file_content = file::load(mem, full_path))
+			// Read and tokenize this file (cached on disk by path+mtime)
+			TokenStream owned;
+			String content;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
+			if (stream != null)
 			{
-				String content = (String)file_content;
-				TokenStream stream = token_stream_tokenize(content);
-
 				if (try found = stream.tokens.find_declaration_in(target, method_type))
 				{
 					// Build file:// URI from path
 					DString uri = dstring::temp();
 					append_file_uri(&uri, full_path);
 					emit_location(uri.str_view(), content, stream.tokens.entries[found], out);
-					stream.free();
-					mem::free(file_content);
+					if (owns) { owned.free(); mem::free((char*)content.ptr); }
 					return true;
 				}
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)content.ptr); }
 			}
 		}
 		else

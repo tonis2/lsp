@@ -5,6 +5,11 @@ import c3::lexer;
 
 const MAX_DIAGNOSTICS = 20;
 
+// Documents larger than this (bytes) get debounced lexer diagnostics instead of a full
+// O(n) scan on every keystroke, keeping editing responsive on very large sources
+// (e.g. generated Vulkan bindings). Smaller files keep scanning on every change.
+const sz LARGE_FILE_BYTES = 256 * 1024;
+
 fn void publish_diagnostics(String uri, String content)
 {
 	DString diags = dstring::temp();

@@ -8,10 +8,13 @@ import c3::lexer;
 // Finds the function being called at cursor position by walking backwards
 // to find the function name, then searches the file for its declaration
 // to extract the full signature.
-fn void encode_signature_help(String content, sz offset, DString* out)
+fn void encode_signature_help(String content, sz offset, DString* out, TokenStream* cached = null)
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 
 	// Find which token the cursor is at or after
 	// Walk backwards to find the function call context:

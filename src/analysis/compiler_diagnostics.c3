@@ -105,7 +105,7 @@ fn void LspServer.publish_compiler_diagnostics(&self, String uri)
 	// errors from sticking in the editor when they are fixed.
 	CompilerDiagList diags;
 	diags.tinit();
-	parse_compiler_diagnostics(&diags, output, project_root);
+	diags.parse(output, project_root);
 
 	self.publish_grouped_diagnostics(&diags);
 
@@ -118,10 +118,10 @@ fn void LspServer.publish_compiler_diagnostics(&self, String uri)
 //   LSPERR|severity|"file"|line|col|"message"
 // File paths are resolved to file:// URIs; relative paths are joined to
 // project_root. Capped at MAX_COMPILER_DIAGNOSTICS total.
-fn void parse_compiler_diagnostics(CompilerDiagList* out, String output, String project_root)
+fn void CompilerDiagList.parse(&self, String output, String project_root)
 {
 	sz pos = 0;
-	while (pos < output.len && out.len() < MAX_COMPILER_DIAGNOSTICS)
+	while (pos < output.len && self.len() < MAX_COMPILER_DIAGNOSTICS)
 	{
 		// Find next line
 		sz line_end = pos;
@@ -231,7 +231,7 @@ fn void parse_compiler_diagnostics(CompilerDiagList* out, String output, String 
 			sev = 3;
 		}
 
-		out.push({ .file = resolve_compiler_path(file_str, project_root), .line = diag_line, .col = diag_col, .severity = sev, .message = msg_str });
+		self.push({ .file = resolve_compiler_path(file_str, project_root), .line = diag_line, .col = diag_col, .severity = sev, .message = msg_str });
 	}
 }
 
@@ -260,7 +260,7 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 		{
 			if (d2.file != d.file) continue;
 			if (n > 0) arr.append_char(',');
-			append_compiler_diag_json(&arr, d2);
+			d2.encode(&arr);
 			n++;
 		}
 		arr.append_char(']');
@@ -291,20 +291,20 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 }
 
 // Append a single diagnostic object (LSP Diagnostic) as JSON.
-fn void append_compiler_diag_json(DString* out, CompilerDiag d) @private
+fn void CompilerDiag.encode(&self, DString* out)
 {
 	out.append(`{"range":{"start":{"line":`);
-	out.appendf("%d", d.line);
+	out.appendf("%d", self.line);
 	out.append(`,"character":`);
-	out.appendf("%d", d.col);
+	out.appendf("%d", self.col);
 	out.append(`},"end":{"line":`);
-	out.appendf("%d", d.line);
+	out.appendf("%d", self.line);
 	out.append(`,"character":`);
-	out.appendf("%d", d.col + 1);
+	out.appendf("%d", self.col + 1);
 	out.append(`}},"severity":`);
-	out.appendf("%d", d.severity);
+	out.appendf("%d", self.severity);
 	out.append(`,"source":"c3c","message":"`);
-	json_escape_into(out, d.message);
+	json_escape_into(out, self.message);
 	out.append(`"}`);
 }
 

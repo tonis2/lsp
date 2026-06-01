@@ -296,7 +296,7 @@ fn void collect_module_completions(String uri, String content, String module_nam
 	{
 		if (has_module_declaration(docs.entries[d].content, module_name, full_module))
 		{
-			collect_declarations_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count);
+			collect_declarations_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count, docs.entries[d].get_tokens());
 		}
 	}
 
@@ -325,10 +325,13 @@ fn void collect_module_completions(String uri, String content, String module_nam
 }
 
 // Collect only top-level declarations (functions, types, constants, macros) with proper kinds.
-fn void collect_declarations_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+fn void collect_declarations_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, TokenStream* cached = null) @private
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
@@ -560,14 +563,17 @@ fn void scan_dir_module_decls(String dir_path, String short_name, String full_na
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				String fc = (String)file_content;
 				if (!check_module || has_module_declaration(fc, short_name, full_name))
 				{
-					collect_declarations_from_content(fc, prefix, out, first, seen, seen_count);
+					collect_declarations_from_content(fc, prefix, out, first, seen, seen_count, stream);
 				}
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
 		else
@@ -817,11 +823,14 @@ fn void scan_dir_idents(String dir_path, String prefix, DString* out, bool* firs
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				String fc = (String)file_content;
 				collect_idents_from_content(fc, prefix, out, first, seen, seen_count);
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
 		else
@@ -834,8 +843,10 @@ fn void scan_dir_idents(String dir_path, String prefix, DString* out, bool* firs
 // DOT-expression completion: resolve receiver type and collect fields + methods
 fn void collect_dot_completions(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first) @private
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	bool owns;
+	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+	defer { if (owns) owned.free(); }
 
 	// Find the token at cursor offset
 	Token cursor_tok;
@@ -1045,18 +1056,19 @@ fn void collect_struct_fields(String type_name, String uri, String content, Docu
 {
 	// 1. Current file
 	{
-		TokenStream stream = token_stream_tokenize(content);
-		defer stream.free();
+		TokenStream owned;
+		bool owns;
+		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+		defer { if (owns) owned.free(); }
 		stream.tokens.collect_struct_fields_into(type_name, prefix, out, first, seen, seen_count);
 	}
 
-	// 2. Open documents
+	// 2. Open documents (reuse their cached token streams)
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		TokenStream* other_stream = docs.entries[d].get_tokens();
 		other_stream.tokens.collect_struct_fields_into(type_name, prefix, out, first, seen, seen_count);
-		other_stream.free();
 	}
 
 	// 3. Project files on disk
@@ -1088,18 +1100,19 @@ fn void collect_type_methods(String type_name, String uri, String content, Docum
 {
 	// 1. Current file
 	{
-		TokenStream stream = token_stream_tokenize(content);
-		defer stream.free();
+		TokenStream owned;
+		bool owns;
+		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+		defer { if (owns) owned.free(); }
 		stream.tokens.collect_methods_into(type_name, prefix, out, first, seen, seen_count);
 	}
 
-	// 2. Open documents
+	// 2. Open documents (reuse their cached token streams)
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		TokenStream* other_stream = docs.entries[d].get_tokens();
 		other_stream.tokens.collect_methods_into(type_name, prefix, out, first, seen, seen_count);
-		other_stream.free();
 	}
 
 	// 3. Project files on disk
@@ -1131,18 +1144,19 @@ fn void collect_enum_members(String type_name, String uri, String content, Docum
 {
 	// 1. Current file
 	{
-		TokenStream stream = token_stream_tokenize(content);
-		defer stream.free();
+		TokenStream owned;
+		bool owns;
+		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+		defer { if (owns) owned.free(); }
 		stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
 	}
 
-	// 2. Open documents
+	// 2. Open documents (reuse their cached token streams)
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		TokenStream* other_stream = docs.entries[d].get_tokens();
 		other_stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
-		other_stream.free();
 	}
 
 	// 3. Project files on disk
@@ -1193,13 +1207,14 @@ fn void scan_dir_fields(String dir_path, String type_name, String prefix, DStrin
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				String fc = (String)file_content;
-				TokenStream stream = token_stream_tokenize(fc);
 				stream.tokens.collect_struct_fields_into(type_name, prefix, out, first, seen, seen_count);
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
 		else
@@ -1231,13 +1246,14 @@ fn void scan_dir_methods(String dir_path, String type_name, String prefix, DStri
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				String fc = (String)file_content;
-				TokenStream stream = token_stream_tokenize(fc);
 				stream.tokens.collect_methods_into(type_name, prefix, out, first, seen, seen_count);
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
 		else
@@ -1269,13 +1285,14 @@ fn void scan_dir_enum_members(String dir_path, String type_name, String prefix, 
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String fc;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
+			if (stream != null)
 			{
-				String fc = (String)file_content;
-				TokenStream stream = token_stream_tokenize(fc);
 				stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 			}
 		}
 		else

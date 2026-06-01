@@ -8,10 +8,13 @@ import c3::lexer;
 
 // Encode document highlights (same-file occurrences of the symbol under cursor).
 // Output: JSON array of DocumentHighlight objects, or empty string if none.
-fn void encode_document_highlights(String content, sz offset, DString* out)
+fn void encode_document_highlights(String content, sz offset, DString* out, TokenStream* cached = null)
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 
 	Token cursor_tok;
 	sz cursor_idx;
@@ -82,8 +85,11 @@ fn void encode_document_highlights(String content, sz offset, DString* out)
 // Output: JSON array of Location objects, or empty string if none.
 fn void encode_references(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, bool include_decl, DString* out)
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	// Reuse the open document's cached token stream when available.
+	TokenStream owned;
+	bool owns;
+	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+	defer { if (owns) owned.free(); }
 
 	Token cursor_tok;
 	sz cursor_idx;
@@ -119,14 +125,13 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 		// Member accesses (e.g. .tokens, .type) cannot be resolved without type
 		// information, so cross-file matches would be false positives.
 
-		// 2. Open documents
+		// 2. Open documents (reuse their cached token streams)
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
 
-			TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+			TokenStream* other_stream = docs.entries[d].get_tokens();
 			other_stream.tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first);
-			other_stream.free();
 		}
 
 		// 3. Scan project files on disk
@@ -245,8 +250,11 @@ fn sz[2] TokenList.find_function_scope(&self, sz offset)
 // Output: JSON WorkspaceEdit object, or empty string if none.
 fn void encode_rename(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, String new_name, DString* out)
 {
-	TokenStream stream = token_stream_tokenize(content);
-	defer stream.free();
+	// Reuse the open document's cached token stream when available.
+	TokenStream owned;
+	bool owns;
+	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+	defer { if (owns) owned.free(); }
 
 	Token cursor_tok;
 	sz cursor_idx;
@@ -275,14 +283,13 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 		// 1. Current file
 		stream.tokens.collect_rename_edits(uri, content, cursor_tok, new_name, out, &first_uri);
 
-		// 2. Open documents
+		// 2. Open documents (reuse their cached token streams)
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
 
-			TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+			TokenStream* other_stream = docs.entries[d].get_tokens();
 			other_stream.tokens.collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, cursor_tok, new_name, out, &first_uri);
-			other_stream.free();
 		}
 
 		// 3. Scan project files on disk (skip stdlib — should not rename stdlib symbols)
@@ -457,17 +464,17 @@ fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String content;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
+			if (stream != null)
 			{
-				String content = (String)file_content;
-				TokenStream stream = token_stream_tokenize(content);
-
 				DString uri = dstring::temp();
 				append_file_uri(&uri, full_path);
 				stream.tokens.collect_rename_edits(uri.str_view(), content, target, new_name, out, first_uri);
 
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)content.ptr); }
 			}
 		}
 		else
@@ -533,17 +540,17 @@ fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, boo
 
 		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
 		{
-			if (try file_content = file::load(mem, full_path))
+			TokenStream owned;
+			String content;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
+			if (stream != null)
 			{
-				String content = (String)file_content;
-				TokenStream stream = token_stream_tokenize(content);
-
 				DString uri = dstring::temp();
 				append_file_uri(&uri, full_path);
 				stream.tokens.collect_refs(uri.str_view(), content, target, out, first);
 
-				stream.free();
-				mem::free(file_content);
+				if (owns) { owned.free(); mem::free((char*)content.ptr); }
 			}
 		}
 		else

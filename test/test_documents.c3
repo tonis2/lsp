@@ -77,6 +77,45 @@ fn void test_document_store_close_missing_is_noop() @test {
 	assert(store.len() == 1);
 }
 
+fn void test_document_get_tokens_caches() @test {
+	DocumentList store;
+	store.open("file:///a.c3", "fn void foo() {}", 1);
+	defer store.close("file:///a.c3");
+
+	Document* doc = store.find("file:///a.c3");
+	TokenStream* t1 = doc.get_tokens();
+	TokenStream* t2 = doc.get_tokens();
+	assert(t1 == t2, "get_tokens should return the same cached stream");
+	assert(t1.tokens.size > 0, "cached stream should be populated");
+}
+
+fn void test_document_update_invalidates_tokens() @test {
+	DocumentList store;
+	store.open("file:///a.c3", "fn void foo() {}", 1);
+	defer store.close("file:///a.c3");
+
+	Document* doc = store.find("file:///a.c3");
+	doc.get_tokens();
+	assert(doc.tokens != null, "tokens should be cached after get_tokens");
+
+	store.update("file:///a.c3", "fn void foo() {} fn void bar() {}", 2);
+	doc = store.find("file:///a.c3");
+	assert(doc.tokens == null, "update must invalidate the cached tokens");
+
+	// Rebuilding picks up the new content (no use-after-free of the freed buffer).
+	TokenStream* t = doc.get_tokens();
+	assert(t.content == "fn void foo() {} fn void bar() {}", "rebuilt tokens must use the new content");
+}
+
+fn void test_document_close_frees_tokens() @test {
+	DocumentList store;
+	store.open("file:///a.c3", "fn void foo() {}", 1);
+	Document* doc = store.find("file:///a.c3");
+	doc.get_tokens(); // build the cache, then close must free it cleanly
+	store.close("file:///a.c3");
+	assert(store.find("file:///a.c3") == null);
+}
+
 fn void test_document_content_is_independent_copy() @test {
 	DocumentList store;
 	defer store.close("file:///a.c3");

@@ -86,6 +86,21 @@ fn void LspServer.handle_shutdown(&self, String id_json)
 fn void LspServer.handle_exit(&self)
 {
 	self.running = false;
+
+	// Release the on-disk token cache (and detach the global handle).
+	g_file_cache = null;
+	self.fcache.free_all();
+
+	// Close every open document (frees content, uri, and cached tokens), then the lists.
+	while (self.documents.size > 0)
+	{
+		self.documents.close(self.documents.entries[0].uri);
+	}
+	self.documents.free();
+	self.diag_files.free();
+
+	if (self.diag_pending_uri.len > 0) mem::free((char*)self.diag_pending_uri.ptr);
+	if (self.lex_diag_pending_uri.len > 0) mem::free((char*)self.lex_diag_pending_uri.ptr);
 }
 
 fn void LspServer.handle_did_open(&self, Object* msg)
@@ -112,7 +127,7 @@ fn void LspServer.handle_did_change(&self, Object* msg)
 	String text     = first.get_string("text") ?? "";
 
 	self.documents.update(uri, text, version);
-	publish_diagnostics(uri, text);
+	self.maybe_publish_lex_diagnostics(uri, text);
 }
 
 fn void LspServer.handle_did_close(&self, Object* msg)
@@ -158,6 +173,46 @@ fn void LspServer.maybe_run_compiler_diagnostics(&self, String uri)
 	self.diag_pending = true;
 }
 
+// Publish the cheap lexer diagnostics, debouncing for large files so a full O(n) scan
+// doesn't run on every keystroke. Small files scan immediately (unchanged behavior).
+fn void LspServer.maybe_publish_lex_diagnostics(&self, String uri, String content)
+{
+	if (content.len <= LARGE_FILE_BYTES)
+	{
+		publish_diagnostics(uri, content);
+		return;
+	}
+
+	// Large file: leading-edge run, then defer until the window elapses. The trailing
+	// run is flushed by flush_pending_diagnostics on a later incoming message, so the
+	// final state is never dropped.
+	Time now         = time::now();
+	Duration elapsed = now - self.last_lex_diag_time;
+	Duration delay   = time::ms(self.diag_delay_ms > 0 ? self.diag_delay_ms : 500);
+	if ((long)self.last_lex_diag_time == 0 || (long)elapsed >= (long)delay)
+	{
+		self.last_lex_diag_time = now;
+		self.lex_diag_pending = false;
+		publish_diagnostics(uri, content);
+		return;
+	}
+
+	self.set_pending_lex_diag_uri(uri);
+	self.lex_diag_pending = true;
+}
+
+// Store an owned copy of the URI whose lexer diagnostics are pending a deferred run.
+fn void LspServer.set_pending_lex_diag_uri(&self, String uri)
+{
+	if (self.lex_diag_pending_uri.len > 0)
+	{
+		mem::free((char*)self.lex_diag_pending_uri.ptr);
+	}
+	char[] copy = mem::new_array(char, uri.len);
+	copy[..] = uri[..];
+	self.lex_diag_pending_uri = (String)copy;
+}
+
 // Store an owned copy of the URI whose diagnostics are pending a deferred run.
 fn void LspServer.set_pending_diag_uri(&self, String uri)
 {
@@ -183,7 +238,7 @@ fn void LspServer.handle_semantic_tokens(&self, Object* msg, String id_json)
 	}
 
 	DString data = dstring::temp();
-	encode_semantic_tokens(doc.content, &data);
+	encode_semantic_tokens(doc.content, &data, doc.get_tokens());
 
 	DString result = dstring::temp();
 	result.appendf(`{"data":[%s]}`, data.str_view());
@@ -223,7 +278,7 @@ fn void LspServer.handle_document_symbol(&self, Object* msg, String id_json)
 	}
 
 	DString data = dstring::temp();
-	encode_document_symbols(doc.content, &data);
+	encode_document_symbols(doc.content, &data, doc.get_tokens());
 
 	DString result = dstring::temp();
 	result.appendf("[%s]", data.str_view());
@@ -339,7 +394,7 @@ fn void LspServer.handle_signature_help(&self, Object* msg, String id_json)
 	sz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
-	encode_signature_help(doc.content, offset, &data);
+	encode_signature_help(doc.content, offset, &data, doc.get_tokens());
 
 	if (data.str_view().len == 0)
 	{
@@ -370,7 +425,7 @@ fn void LspServer.handle_document_highlight(&self, Object* msg, String id_json)
 	sz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
-	encode_document_highlights(doc.content, offset, &data);
+	encode_document_highlights(doc.content, offset, &data, doc.get_tokens());
 
 	if (data.str_view().len == 0)
 	{
