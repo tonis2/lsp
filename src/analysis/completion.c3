@@ -176,7 +176,24 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 		}
 	}
 
-	out.append(`{"isIncomplete":false,"items":[`);
+	// Emit an explicit replacement range covering the typed prefix so the client
+	// overwrites it instead of inserting after it. Without this, VS Code's default
+	// "current word" range excludes leading $/@/# (e.g. "$str" + "$stringify" → "$$stringify").
+	// prefix_start..offset never crosses a newline (the backward scan stops at non-ident chars).
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	lo.build(content);
+	sz cur_line   = lo.find_line(offset);
+	sz line_start = lo.entries[cur_line];
+	Range edit_range = {
+		.start = { .line = cur_line, .character = prefix_start - line_start },
+		.end   = { .line = cur_line, .character = offset - line_start },
+	};
+
+	out.append(`{"isIncomplete":false,"itemDefaults":{"editRange":`);
+	edit_range.encode(out);
+	out.append(`},"items":[`);
 	bool first = true;
 
 	if (is_dot_context)
@@ -866,6 +883,13 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 	{
 		collect_type_methods(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
 	}
+
+	// Collect enum members (Type.MEMBER) — for an enum/faultdef receiver
+	collect_enum_members(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+	if (resolved_type.len > 0 && resolved_type != recv_type)
+	{
+		collect_enum_members(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+	}
 }
 
 // Collect all struct fields matching prefix from a TokenList
@@ -966,6 +990,56 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 	}
 }
 
+// Collect enum/faultdef members matching prefix from a TokenList (enum Type { MEMBER, ... } patterns)
+fn void TokenList.collect_enum_members_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count)
+{
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		TokenType kw = self.entries[i].type;
+		if (kw != ENUM && kw != FAULTDEF) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+
+		sz brace = i + 2;
+		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
+		if (brace >= self.size) continue;
+
+		// Members are the first CONST_IDENT after the opening brace or after each
+		// top-level comma; the expect_member flag skips associated-value initializers
+		// like `A = SOME_CONST`.
+		sz depth = 1;
+		bool expect_member = true;
+		for (sz j = brace + 1; j < self.size && depth > 0; j++)
+		{
+			TokenType tt = self.entries[j].type;
+			if (tt == LBRACE) { depth++; continue; }
+			if (tt == RBRACE) { depth--; continue; }
+			if (depth != 1) continue;
+			if (tt == COMMA) { expect_member = true; continue; }
+			if (!expect_member) continue;
+			expect_member = false;
+
+			if (tt != CONST_IDENT) continue;
+			String member_name = self.entries[j].text;
+			if (prefix.len > 0 && !starts_with_ci(member_name, prefix)) continue;
+
+			// Dedup
+			bool dup = false;
+			for (sz k = 0; k < *seen_count; k++)
+			{
+				if ((*seen)[k] == member_name) { dup = true; break; }
+			}
+			if (dup) continue;
+			if (*seen_count < MAX_DOC_IDENTS)
+			{
+				(*seen)[*seen_count] = member_name;
+				(*seen_count)++;
+			}
+
+			emit_completion_item(out, member_name, 20, first); // 20 = EnumMember
+		}
+	}
+}
+
 // Collect struct fields across current file, open docs, project files, and stdlib
 fn void collect_struct_fields(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
 {
@@ -1052,6 +1126,49 @@ fn void collect_type_methods(String type_name, String uri, String content, Docum
 	}
 }
 
+// Collect enum/faultdef members across current file, open docs, project files, and stdlib
+fn void collect_enum_members(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+{
+	// 1. Current file
+	{
+		TokenStream stream = token_stream_tokenize(content);
+		defer stream.free();
+		stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
+	}
+
+	// 2. Open documents
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].uri == uri) continue;
+		TokenStream other_stream = token_stream_tokenize(docs.entries[d].content);
+		other_stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
+		other_stream.free();
+	}
+
+	// 3. Project files on disk
+	String file_path = uri_to_path(uri);
+	if (file_path.len > 0)
+	{
+		ProjectDirs pdirs;
+		pdirs.get_search_dirs(file_path);
+		if (pdirs.project_root.len > 0)
+		{
+			for (sz i = 0; i < pdirs.count; i++)
+			{
+				DString search_path = dstring::temp();
+				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
+				scan_dir_enum_members(search_path.str_view(), type_name, prefix, out, first, seen, seen_count, 0);
+			}
+		}
+	}
+
+	// 4. Stdlib
+	if (stdlib_path.len > 0)
+	{
+		scan_dir_enum_members(stdlib_path, type_name, prefix, out, first, seen, seen_count, 0);
+	}
+}
+
 const int COMPLETION_MAX_SCAN_DEPTH = 5;
 
 fn void scan_dir_fields(String dir_path, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, int depth) @private
@@ -1126,6 +1243,44 @@ fn void scan_dir_methods(String dir_path, String type_name, String prefix, DStri
 		else
 		{
 			scan_dir_methods(full_path, type_name, prefix, out, first, seen, seen_count, depth + 1);
+		}
+	}
+}
+
+fn void scan_dir_enum_members(String dir_path, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, int depth) @private
+{
+	if (depth > COMPLETION_MAX_SCAN_DEPTH) return;
+
+	Path p;
+	if (try pp = path::tnew(dir_path)) { p = pp; } else { return; }
+	PathList entries;
+	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
+	defer { foreach (&e : entries) e.free(mem); entries.free(); }
+
+	foreach (entry : entries)
+	{
+		String entry_name = (String)entry;
+		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
+		defer mem::free(path_buf);
+		path_buf[:dir_path.len] = dir_path[:dir_path.len];
+		path_buf[dir_path.len] = '/';
+		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
+		String full_path = (String)path_buf;
+
+		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
+		{
+			if (try file_content = file::load(mem, full_path))
+			{
+				String fc = (String)file_content;
+				TokenStream stream = token_stream_tokenize(fc);
+				stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
+				stream.free();
+				mem::free(file_content);
+			}
+		}
+		else
+		{
+			scan_dir_enum_members(full_path, type_name, prefix, out, first, seen, seen_count, depth + 1);
 		}
 	}
 }

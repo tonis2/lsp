@@ -460,3 +460,91 @@ fn void test_completion_dot_self_field_method() @test {
 	assert(result.contains(`"label":"open"`), "expected open method from DocumentList, got: %s", result);
 	assert(result.contains(`"label":"close"`), "expected close method from DocumentList, got: %s", result);
 }
+
+// --- editRange (itemDefaults) tests ---
+
+fn void test_completion_edit_range_ct_prefix() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// "$str" at offset 4 — editRange must cover the whole "$str" (incl. the $),
+	// otherwise accepting "$stringify" yields "$$stringify".
+	encode_completions("", "$str", 4, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"$stringify"`), "got: %s", result);
+	assert(result.contains(`"itemDefaults":{"editRange":{"start":{"line":0,"character":0},"end":{"line":0,"character":4}}}`), "got: %s", result);
+}
+
+fn void test_completion_edit_range_later_line() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "fn x() {}\n$str";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"itemDefaults":{"editRange":{"start":{"line":1,"character":0},"end":{"line":1,"character":4}}}`), "got: %s", result);
+}
+
+fn void test_completion_edit_range_dot_partial() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// "f.ge" — editRange covers only the partial "ge" (chars 27..29), not the receiver.
+	String content = "struct Foo { int x; }\nFoo f; f.ge";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"itemDefaults":{"editRange":{"start":{"line":1,"character":9},"end":{"line":1,"character":11}}}`), "got: %s", result);
+}
+
+// --- enum-member completion tests ---
+
+fn void test_completion_enum_members() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "enum Color { RED, GREEN, BLUE }\nfn void t() { Color.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"RED"`), "expected RED, got: %s", result);
+	assert(result.contains(`"label":"GREEN"`), "expected GREEN, got: %s", result);
+	assert(result.contains(`"label":"BLUE"`), "expected BLUE, got: %s", result);
+	assert(result.contains(`"kind":20`), "expected EnumMember kind=20, got: %s", result);
+}
+
+fn void test_completion_enum_members_prefix() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "enum Color { RED, GREEN, BLUE }\nfn void t() { Color.RE";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"RED"`), "expected RED, got: %s", result);
+	assert(!result.contains(`"label":"GREEN"`), "GREEN should be filtered by prefix, got: %s", result);
+	assert(!result.contains(`"label":"BLUE"`), "BLUE should be filtered by prefix, got: %s", result);
+}
+
+fn void test_completion_enum_members_assoc_values() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// Associated-value initializers (= MAX) must not be suggested as members.
+	String content = "const int MAX = 9;\nenum Level : int { LOW = 1, HIGH = MAX }\nfn void t() { Level.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"LOW"`), "expected LOW, got: %s", result);
+	assert(result.contains(`"label":"HIGH"`), "expected HIGH, got: %s", result);
+	assert(!result.contains(`"label":"MAX"`), "associated-value const MAX should not be a member, got: %s", result);
+}
+
+fn void test_completion_enum_members_no_leak() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// Non-dot context with an enum in the file: members must NOT appear at top level.
+	String content = "enum Color { RED, GREEN, BLUE }\nfn void t() { RE";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	// RED may still appear as a plain document identifier (kind 21), but never as an
+	// EnumMember (kind 20) — enum members are only emitted in dot context.
+	assert(!result.contains(`"kind":20`), "enum members should not leak into non-dot completion, got: %s", result);
+}
