@@ -71,6 +71,31 @@ fn void test_signature_closed_parens_with_args() @test {
 	assert(result.contains(`"activeParameter":1`), "got: %s", result);
 }
 
+// A method call `recv.method(` must drop the implicit `self` receiver so the first
+// hint and activeParameter line up with the caller's first real argument.
+fn void test_signature_method_skips_self() @test {
+	DString out = dstring::temp();
+	String content = "struct Foo { int x; }\nfn int Foo.scale(self, int factor) {}\nFoo f;\nf.scale(";
+	encode_signature_help(content, content.len, &out);
+	String result = out.str_view();
+	assert(result.contains("Foo.scale"), "got: %s", result);
+	assert(result.contains("int factor"), "got: %s", result);
+	// `self` is the receiver and must not appear as a parameter hint.
+	assert(!result.contains(`{"label":"self"}`), "self should be dropped, got: %s", result);
+	assert(result.contains(`"activeParameter":0`), "got: %s", result);
+}
+
+fn void test_signature_method_second_param() @test {
+	DString out = dstring::temp();
+	String content = "struct Foo { int x; }\nfn int Foo.add(self, int a, int b) {}\nFoo f;\nf.add(1, ";
+	encode_signature_help(content, content.len, &out);
+	String result = out.str_view();
+	// Receiver dropped; the cursor sits on the second real arg -> activeParameter 1.
+	assert(result.contains("int a"), "got: %s", result);
+	assert(result.contains("int b"), "got: %s", result);
+	assert(result.contains(`"activeParameter":1`), "got: %s", result);
+}
+
 fn void test_signature_macro() @test {
 	DString out = dstring::temp();
 	String content = "macro swap(a, b) { }\nswap(";

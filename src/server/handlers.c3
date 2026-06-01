@@ -394,7 +394,7 @@ fn void LspServer.handle_signature_help(&self, Object* msg, String id_json)
 	sz offset = position_to_offset(doc.content, line, character);
 
 	DString data = dstring::temp();
-	encode_signature_help(doc.content, offset, &data, doc.get_tokens());
+	encode_signature_help(doc.content, offset, &data, doc.get_tokens(), uri, &self.documents, self.stdlib_path);
 
 	if (data.str_view().len == 0)
 	{
