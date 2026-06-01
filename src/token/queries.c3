@@ -65,33 +65,10 @@ fn Token? TokenStream.find_declaration_of(&self, Token target, sz target_idx)
 				}
 			}
 
-			// enum member: enum Foo { NAME, ... }
-			for (sz i = 0; i + 1 < self.tokens.size; i++)
+			// enum / faultdef / constdef member: enum Foo { NAME }, constdef Bar : T { NAME = v }, faultdef NAME
+			if (try found = self.tokens.find_enum_or_constdef_member(name))
 			{
-				TokenType kw = self.tokens.get(i).type;
-				if (kw != ENUM && kw != FAULTDEF) continue;
-				// Find opening brace
-				sz brace = i + 1;
-				while (brace < self.tokens.size && self.tokens.get(brace).type != LBRACE) brace++;
-				if (brace >= self.tokens.size) continue;
-				// Scan enum body
-				sz depth = 1;
-				for (sz j = brace + 1; j < self.tokens.size && depth > 0; j++)
-				{
-					Token t = self.tokens.get(j);
-					if (t.type == LBRACE)
-					{
-						depth++;
-					}
-					else if (t.type == RBRACE)
-					{
-						depth--;
-					}
-					else if (depth == 1 && t.type == CONST_IDENT && t.text == name)
-					{
-						return t;
-					}
-				}
+				return self.tokens.entries[found];
 			}
 
 		case IDENT:

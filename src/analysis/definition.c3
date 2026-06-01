@@ -1049,6 +1049,51 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 	stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out);
 }
 
+// Find an enum/faultdef/constdef member named `name`. Handles both the block form
+// (enum E { NAME }, constdef Format : uint { FORMAT_X = 44 }) and the braceless form
+// (faultdef A, NAME; / constdef NAME = 100), in which members sit in declaration
+// position — right after the keyword and after each top-level comma — so value
+// expressions on the right of '=' are not mistaken for declarations.
+fn sz? TokenList.find_enum_or_constdef_member(&self, String name)
+{
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		TokenType kw = self.entries[i].type;
+		if (kw != ENUM && kw != FAULTDEF && kw != CONSTDEF) continue;
+
+		// Locate the first LBRACE or EOS after the keyword to tell block from braceless.
+		sz j = i + 1;
+		while (j < self.size && self.entries[j].type != LBRACE && self.entries[j].type != EOS) j++;
+		if (j >= self.size) continue;
+
+		if (self.entries[j].type == LBRACE)
+		{
+			// Block form: scan members at brace depth 1.
+			sz depth = 1;
+			for (sz k = j + 1; k < self.size && depth > 0; k++)
+			{
+				TokenType t = self.entries[k].type;
+				if (t == LBRACE) { depth++; continue; }
+				if (t == RBRACE) { depth--; continue; }
+				if (depth == 1 && t == CONST_IDENT && self.entries[k].text == name) return k;
+			}
+		}
+		else
+		{
+			// Braceless form: members are in declaration position only.
+			bool decl_pos = true;
+			for (sz k = i + 1; k < j; k++)
+			{
+				TokenType t = self.entries[k].type;
+				if (t == COMMA) { decl_pos = true; continue; }
+				if (decl_pos && t == CONST_IDENT && self.entries[k].text == name) return k;
+				decl_pos = false;
+			}
+		}
+	}
+	return TOKEN_NOT_FOUND~;
+}
+
 // Search for a declaration in a token stream (not tied to a cursor position).
 fn sz? TokenList.find_declaration_in(&self, Token target, String method_type = "")
 {
@@ -1099,34 +1144,8 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 					return i + 2;
 				}
 			}
-			// enum member: enum Foo { NAME, ... }
-			for (sz i = 0; i + 1 < self.size; i++)
-			{
-				if (self.get(i).type != ENUM && self.get(i).type != FAULTDEF) continue;
-				// Find the opening brace
-				sz brace = i + 1;
-				while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
-				if (brace >= self.size) continue;
-				// Scan enum body for matching CONST_IDENT
-				sz depth = 1;
-				for (sz j = brace + 1; j < self.size && depth > 0; j++)
-				{
-					if (self.entries[j].type == LBRACE)
-					{
-						depth++;
-						continue;
-					}
-					if (self.entries[j].type == RBRACE)
-					{
-						depth--;
-						continue;
-					}
-					if (depth == 1 && self.entries[j].type == CONST_IDENT && self.entries[j].text == name)
-					{
-						return j;
-					}
-				}
-			}
+			// enum / faultdef / constdef member: enum Foo { NAME }, constdef Bar : T { NAME = v }, faultdef NAME
+			if (try found = self.find_enum_or_constdef_member(name)) return found;
 		case IDENT:
 		case AT_IDENT:
 			if (method_type.len > 0)

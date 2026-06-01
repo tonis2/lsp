@@ -144,6 +144,36 @@ fn void test_definition_enum_member_cross_file() @test {
 	ds.close("file:///types.c3");
 }
 
+fn void test_definition_constdef_block_member() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Block-form constdef (as used by the Vulkan bindings): the members are
+	// module-scoped constants used unqualified.
+	String content = "constdef Format : uint { FORMAT_X = 44 }\nFormat f = FORMAT_X;";
+	// Cursor on "FORMAT_X" in usage (offset 53, inside the second occurrence)
+	encode_definition("file:///test.c3", content, 53, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":25`), "got: %s", result);
+}
+
+fn void test_definition_constdef_block_member_cross_file() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///vk.c3", "constdef Format : uint { FORMAT_X = 44 }", 1);
+
+	String content = "Format f = FORMAT_X;";
+	// Cursor on "FORMAT_X" at offset 12
+	encode_definition("file:///test.c3", content, 12, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`file:///vk.c3`), "got: %s", result);
+	assert(result.contains(`"character":25`), "got: %s", result);
+
+	ds.close("file:///vk.c3");
+}
+
 fn void test_definition_cross_file() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);
