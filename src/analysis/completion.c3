@@ -361,6 +361,41 @@ fn void collect_module_completions(String uri, String content, String module_nam
 	}
 }
 
+fn String get_submodule_segment(String declared, String target) @private
+{
+	if (target.len == 0) return "";
+
+	// Check if declared starts with target + "::"
+	if (declared.len > target.len + 2 && declared.starts_with(target) && declared[target.len] == ':' && declared[target.len + 1] == ':')
+	{
+		String rem = declared[target.len + 2..];
+		if (try idx = rem.index_of("::"))
+		{
+			if (idx > 0) return rem[..idx - 1];
+			return "";
+		}
+		return rem;
+	}
+
+	// Check if declared contains "::" + target + "::"
+	DString pattern = dstring::temp();
+	pattern.appendf("::%s::", target);
+	String pat_str = pattern.str_view();
+	if (try idx = declared.index_of(pat_str))
+	{
+		sz start_idx = idx + pat_str.len;
+		String rem = declared[start_idx..];
+		if (try next_idx = rem.index_of("::"))
+		{
+			if (next_idx > 0) return rem[..next_idx - 1];
+			return "";
+		}
+		return rem;
+	}
+
+	return "";
+}
+
 // Collect only top-level declarations (functions, types, constants, macros) with proper kinds.
 // When short_name/full_name are given, only declarations inside a matching `module` section
 // are collected — a single C3 file may declare several modules (e.g. std/io/file.c3 opens with
@@ -408,7 +443,35 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 							break;
 						}
 					}
-					in_target = module_path_matches(mod_path.str_view(), short_name, full_name);
+					String declared_mod = mod_path.str_view();
+					in_target = module_path_matches(declared_mod, short_name, full_name);
+
+					// Check for submodule completion
+					String sub = get_submodule_segment(declared_mod, short_name);
+					if (sub.len == 0 && full_name.len > 0)
+					{
+						sub = get_submodule_segment(declared_mod, full_name);
+					}
+					if (sub.len > 0)
+					{
+						if (prefix.len == 0 || starts_with_ci(sub, prefix))
+						{
+							bool dup = false;
+							for (sz k = 0; k < *seen_count; k++)
+							{
+								if ((*seen)[k] == sub) { dup = true; break; }
+							}
+							if (!dup)
+							{
+								if (*seen_count < MAX_DOC_IDENTS)
+								{
+									(*seen)[*seen_count] = sub;
+									(*seen_count)++;
+								}
+								emit_completion_item(out, sub, 9, first);
+							}
+						}
+					}
 				}
 				continue;
 			case FUNC:
