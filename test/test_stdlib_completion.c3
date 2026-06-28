@@ -7,12 +7,9 @@ import std::io::path;
 
 fn String get_test_stdlib_path() {
 	// Candidate paths for standard library
-	String[3] candidates = {
-		"H:/scoop/apps/c3/0.8.1/lib/std",
-		"C:/scoop/apps/c3/current/lib/std",
-		"H:/scoop/apps/c3/current/lib/std"
-	};
+	String[1] candidates = { "" };
 	foreach (c : candidates) {
+		if (c.len == 0) continue;
 		if (try pp = path::tnew(c)) {
 			if (try el = path::ls(mem, pp)) {
 				foreach (&e : el) e.free(mem);
@@ -21,6 +18,7 @@ fn String get_test_stdlib_path() {
 			}
 		}
 	}
+	builtin::panic("Fill in with path to c3 std", "", "", 0);
 	return "";
 }
 
