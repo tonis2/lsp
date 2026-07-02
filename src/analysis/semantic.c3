@@ -91,7 +91,59 @@ fn void classify_roles(TokenStream* stream, SemanticCategory[] roles)
 		{
 			// The declared type name: struct Foo, enum Bar, alias Baz, ...
 			roles[i + 1] = CLASS;
+
+			if (tt == STRUCT || tt == UNION || tt == BITSTRUCT)
+			{
+				classify_struct_fields(stream, roles, i);
+			}
 		}
+	}
+}
+
+// Classify field declarations inside a struct/union/bitstruct body beginning
+// at `kw_idx`: a field's leading type gets the primitive declaration-accent
+// color if it's a builtin type (int, bool, ...), same treatment as a
+// primitive function return type. A class field type is left as TYPE —
+// regular type green, same as every other type reference.
+fn void classify_struct_fields(TokenStream* stream, SemanticCategory[] roles, sz kw_idx)
+{
+	sz n = stream.tokens.size;
+
+	// Find the '{' that opens the body.
+	sz brace = -1;
+	for (sz j = kw_idx + 1; j < n; j++)
+	{
+		TokenType t = stream.tokens.entries[j].type;
+		if (t == LBRACE) { brace = j; break; }
+		if (t == EOS || t == EOF) return;
+	}
+	if (brace < 0) return;
+
+	sz depth = 0;
+	bool at_field_start = false;
+	for (sz j = brace; j < n; j++)
+	{
+		TokenType t = stream.tokens.entries[j].type;
+		if (t == LBRACE) { depth++; at_field_start = (depth == 1); continue; }
+		if (t == RBRACE)
+		{
+			depth--;
+			if (depth == 0) break;
+			at_field_start = false;
+			continue;
+		}
+		if (depth != 1) continue;
+
+		if (t == EOS) { at_field_start = true; continue; }
+
+		// Comments don't count as the start of a declaration — skip over
+		// them without losing the "at start of field" state.
+		if (t == LINE_COMMENT || t == BLOCK_COMMENT || t == CONTRACT) continue;
+
+		if (!at_field_start) continue;
+		at_field_start = false;
+
+		if (is_builtin_type_token(t)) roles[j] = DECL_ACCENT;
 	}
 }
 

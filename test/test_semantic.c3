@@ -253,6 +253,21 @@ fn void test_encode_class_return_type() @test {
 		"got: %s", out.str_view());
 }
 
+fn void test_encode_struct_field_types() @test {
+	DString out = dstring::temp();
+	// "struct Point { String name; int version; }":
+	//   struct  → KEYWORD(7)
+	//   Point   → CLASS(14)          [declared type name]
+	//   String  → TYPE(1)            [class field type — NOT accented]
+	//   name    → VARIABLE(4)
+	//   int     → DECL_ACCENT(17)    [primitive field type — accented, like a
+	//                                 primitive return type]
+	//   version → VARIABLE(4)
+	encode_semantic_tokens("struct Point { String name; int version; }", &out);
+	assert(out.str_view() == "0,0,6,7,0,0,7,5,14,0,0,8,6,1,0,0,7,4,4,0,0,6,3,17,0,0,4,7,4,0",
+		"got: %s", out.str_view());
+}
+
 fn void test_encode_type_declaration() @test {
 	DString out = dstring::temp();
 	// "struct Point" → struct KEYWORD (7), Point CLASS (14)
