@@ -244,8 +244,8 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 	for (sz i = 0; i < syms.size; i++)
 	{
 		int k = syms.entries[i].sym.kind;
-		// Only types can have children (struct, enum, interface)
-		if (k != 23 && k != 10 && k != 11) continue;
+		// Only types can have children (struct, enum, interface, typedef/alias)
+		if (k != 23 && k != 10 && k != 11 && k != 26) continue;
 		String type_name = syms.entries[i].sym.name;
 
 		sz start = children_pool.size;

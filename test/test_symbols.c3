@@ -126,6 +126,20 @@ fn void test_symbols_method_nested() @test {
 	assert(!result.contains(`"name":"World.block_type_at"`), "method should be nested, got: %s", result);
 }
 
+fn void test_symbols_method_nested_typedef() @test {
+	DString out = dstring::temp();
+	// typedef-declared opaque types (kind 26) can have methods too — they
+	// should nest the same way struct/enum/interface methods do.
+	// https://github.com/tonis2/lsp/issues/10
+	encode_document_symbols("typedef Cursor = void*;\nfn void Cursor.next() {}\nfn void Cursor.reset() {}", &out);
+	String result = out.str_view();
+	assert(result.contains(`"children":`), "expected children array, got: %s", result);
+	assert(result.contains(`"name":"next"`), "got: %s", result);
+	assert(result.contains(`"name":"reset"`), "got: %s", result);
+	assert(!result.contains(`"name":"Cursor.next"`), "method should be nested, got: %s", result);
+	assert(!result.contains(`"name":"Cursor.reset"`), "method should be nested, got: %s", result);
+}
+
 fn void test_symbols_method_orphan() @test {
 	DString out = dstring::temp();
 	// Method without matching struct in same file — should show as Type.method at top level
