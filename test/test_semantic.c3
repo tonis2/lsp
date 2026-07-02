@@ -5,31 +5,30 @@ import std::core::mem;
 import c3::lexer;
 
 // -- map_token_type --
-// The LSP only emits semantic tokens for identifiers and decorators.
-// Keywords, operators, comments, strings, numbers, and builtin types
-// are skipped (-1) to let the TextMate grammar handle them.
+// The LSP owns all syntax coloring: it emits semantic tokens for keywords,
+// builtin types, literals, comments and identifiers. Only operators,
+// punctuation and structural tokens are skipped (-1).
 
 fn void test_map_keywords() @test {
-	// Keywords are skipped — TextMate handles nuanced keyword scoping
-	assert(map_token_type(MODULE) == SKIP);
-	assert(map_token_type(FUNC) == SKIP);
-	assert(map_token_type(MACRO) == SKIP);
-	assert(map_token_type(IF) == SKIP);
-	assert(map_token_type(RETURN) == SKIP);
-	assert(map_token_type(WHILE) == SKIP);
-	assert(map_token_type(STRUCT) == SKIP);
-	assert(map_token_type(ENUM) == SKIP);
+	assert(map_token_type(MODULE) == KEYWORD);
+	assert(map_token_type(FUNC) == KEYWORD);
+	assert(map_token_type(MACRO) == KEYWORD);
+	assert(map_token_type(IF) == KEYWORD);
+	assert(map_token_type(RETURN) == KEYWORD);
+	assert(map_token_type(WHILE) == KEYWORD);
+	assert(map_token_type(STRUCT) == KEYWORD);
+	assert(map_token_type(ENUM) == KEYWORD);
 }
 
 fn void test_map_types() @test {
 	// User type identifiers are emitted as TYPE
 	assert(map_token_type(TYPE_IDENT) == SemanticCategory.TYPE);
 	assert(map_token_type(CT_TYPE_IDENT) == SemanticCategory.TYPE);
-	// Builtin types are skipped — TextMate handles as storage.type.built-in
-	assert(map_token_type(VOID) == SKIP);
-	assert(map_token_type(INT) == SKIP);
-	assert(map_token_type(BOOL) == SKIP);
-	assert(map_token_type(USZ) == SKIP);
+	// Builtin types are also emitted as TYPE — colored like user types
+	assert(map_token_type(VOID) == SemanticCategory.TYPE);
+	assert(map_token_type(INT) == SemanticCategory.TYPE);
+	assert(map_token_type(BOOL) == SemanticCategory.TYPE);
+	assert(map_token_type(USZ) == SemanticCategory.TYPE);
 }
 
 fn void test_map_identifiers() @test {
@@ -39,18 +38,16 @@ fn void test_map_identifiers() @test {
 }
 
 fn void test_map_literals() @test {
-	// Skipped — TextMate handles string/number coloring
-	assert(map_token_type(STRING) == SKIP);
-	assert(map_token_type(CHAR_LITERAL) == SKIP);
-	assert(map_token_type(INTEGER) == SKIP);
-	assert(map_token_type(REAL) == SKIP);
+	assert(map_token_type(STRING) == STRING_CAT);
+	assert(map_token_type(CHAR_LITERAL) == STRING_CAT);
+	assert(map_token_type(INTEGER) == NUMBER);
+	assert(map_token_type(REAL) == NUMBER);
 }
 
 fn void test_map_comments() @test {
-	// Skipped — TextMate handles comment coloring
-	assert(map_token_type(LINE_COMMENT) == SKIP);
-	assert(map_token_type(BLOCK_COMMENT) == SKIP);
-	assert(map_token_type(CONTRACT) == SKIP);
+	assert(map_token_type(LINE_COMMENT) == COMMENT);
+	assert(map_token_type(BLOCK_COMMENT) == COMMENT);
+	assert(map_token_type(CONTRACT) == COMMENT);
 }
 
 fn void test_map_decorators() @test {
@@ -69,10 +66,10 @@ fn void test_map_operators() @test {
 }
 
 fn void test_map_ct_keywords() @test {
-	// CT keywords are skipped — TextMate handles them
-	assert(map_token_type(CT_IF) == SKIP);
-	assert(map_token_type(CT_SIZEOF) == SKIP);
-	assert(map_token_type(BUILTIN) == SKIP);
+	// CT keywords and the $$ builtin are emitted as KEYWORD
+	assert(map_token_type(CT_IF) == KEYWORD);
+	assert(map_token_type(CT_SIZEOF) == KEYWORD);
+	assert(map_token_type(BUILTIN) == KEYWORD);
 	// CT identifiers are emitted as macro
 	assert(map_token_type(CT_IDENT) == MACRO_CAT);
 }
@@ -140,58 +137,58 @@ fn void test_encode_empty() @test {
 
 fn void test_encode_single_keyword() @test {
 	DString out = dstring::temp();
-	// "fn" is FUNC — skipped (TextMate handles keywords)
+	// "fn" is FUNC → KEYWORD (index 7), len 2
 	encode_semantic_tokens("fn", &out);
-	assert(out.str_view() == "", "Keywords should be skipped, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,2,7,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_two_tokens_same_line() @test {
 	DString out = dstring::temp();
-	// "fn x" → FUNC skipped, IDENT "x" at col 3, len 1, type 4
+	// "fn x" → "fn" KEYWORD (7), IDENT "x" at col 3 → VARIABLE (4)
 	encode_semantic_tokens("fn x", &out);
-	assert(out.str_view() == "0,3,1,4,0", "got: %s", out.str_view());
+	assert(out.str_view() == "0,0,2,7,0,0,3,1,4,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_multiline() @test {
 	DString out = dstring::temp();
-	// "fn\nx" → FUNC skipped, IDENT at line 1 col 0
+	// "fn\nx" → "fn" KEYWORD (7), IDENT "x" at line 1 col 0 → VARIABLE (4)
 	encode_semantic_tokens("fn\nx", &out);
-	assert(out.str_view() == "1,0,1,4,0", "got: %s", out.str_view());
+	assert(out.str_view() == "0,0,2,7,0,1,0,1,4,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_comment() @test {
 	DString out = dstring::temp();
-	// Comments are skipped — TextMate handles them
+	// "// hello" → LINE_COMMENT → COMMENT (9), len 8
 	encode_semantic_tokens("// hello", &out);
-	assert(out.str_view() == "", "Comments should be skipped, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,8,9,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_string_literal() @test {
 	DString out = dstring::temp();
-	// Strings are skipped — TextMate handles them
+	// `"hello"` → STRING → STRING_CAT (10), len 7
 	encode_semantic_tokens(`"hello"`, &out);
-	assert(out.str_view() == "", "Strings should be skipped, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,7,10,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_number() @test {
 	DString out = dstring::temp();
-	// Numbers are skipped — TextMate handles them
+	// "42" → INTEGER → NUMBER (11), len 2
 	encode_semantic_tokens("42", &out);
-	assert(out.str_view() == "", "Numbers should be skipped, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,2,11,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_multiline_block_comment() @test {
 	DString out = dstring::temp();
-	// Block comments are skipped — TextMate handles them
+	// "/* a\nb */" → BLOCK_COMMENT → COMMENT (9), split per line
 	encode_semantic_tokens("/* a\nb */", &out);
-	assert(out.str_view() == "", "Block comments should be skipped, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,4,9,0,1,0,4,9,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_multiline_string() @test {
 	DString out = dstring::temp();
-	// Multi-line strings are skipped — TextMate handles them
+	// "`a\nb`" → STRING → STRING_CAT (10), split per line
 	encode_semantic_tokens("`a\nb`", &out);
-	assert(out.str_view() == "", "Strings should be skipped, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,2,10,0,1,0,2,10,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_function_call() @test {
@@ -203,16 +200,104 @@ fn void test_encode_function_call() @test {
 
 fn void test_encode_variable_not_function() @test {
 	DString out = dstring::temp();
-	// "fn x" → IDENT "x" not followed by LPAREN → VARIABLE (index 4)
+	// "fn x" → "fn" KEYWORD (7), "x" not followed by LPAREN → VARIABLE (4)
 	encode_semantic_tokens("fn x", &out);
-	assert(out.str_view() == "0,3,1,4,0", "Variable should stay variable, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,2,7,0,0,3,1,4,0", "Variable should stay variable, got: %s", out.str_view());
 }
 
 fn void test_encode_variable_assignment() @test {
 	DString out = dstring::temp();
-	// "int x = 1;" → IDENT "x" followed by EQ, not LPAREN → VARIABLE (4)
+	// "int x = 1;" → "int" TYPE (1), "x" → VARIABLE (4), "1" → NUMBER (11)
 	encode_semantic_tokens("int x = 1;", &out);
-	assert(out.str_view() == "0,4,1,4,0", "Assignment target should be variable, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,3,1,0,0,4,1,4,0,0,4,1,11,0", "got: %s", out.str_view());
+}
+
+fn void test_encode_namespace() @test {
+	DString out = dstring::temp();
+	// "io::print()" → "io" before "::" → NAMESPACE (0), "print" before "(" → FUNCTION (5)
+	encode_semantic_tokens("io::print()", &out);
+	assert(out.str_view() == "0,0,2,0,0,0,4,5,5,0", "got: %s", out.str_view());
+}
+
+// -- role-aware classification --
+
+fn void test_encode_method_signature() @test {
+	DString out = dstring::temp();
+	// "fn void Foo.bar(int x)":
+	//   fn    → DECL_ACCENT (17) [signature keyword]
+	//   void  → DECL_ACCENT (17) [return type, same accent as "fn"]
+	//   Foo   → CLASS (14)       [receiver type, before ".name("]
+	//   bar   → FUNCTION (5)     [method name, before "("]
+	//   int   → TYPE (1)         [parameter type — NOT the return type, stays plain]
+	//   x     → PARAMETER (15)   [parameter name, before ")"]
+	encode_semantic_tokens("fn void Foo.bar(int x)", &out);
+	assert(out.str_view() == "0,0,2,17,0,0,3,4,17,0,0,5,3,14,0,0,4,3,5,0,0,4,3,1,0,0,4,1,15,0",
+		"got: %s", out.str_view());
+}
+
+fn void test_encode_plain_function_signature() @test {
+	DString out = dstring::temp();
+	// "fn int add(int a)": no receiver — "add" is the name, "a" a parameter
+	//   fn(17, accent) int(17, accent — return type) add(5) int(1, param type) a(15)
+	encode_semantic_tokens("fn int add(int a)", &out);
+	assert(out.str_view() == "0,0,2,17,0,0,3,3,17,0,0,4,3,5,0,0,4,3,1,0,0,4,1,15,0",
+		"got: %s", out.str_view());
+}
+
+fn void test_encode_class_return_type() @test {
+	DString out = dstring::temp();
+	// "fn Foo bar()": fn → DECL_ACCENT(17), Foo → TYPE(1) [class return type,
+	// NOT accented — regular type green], bar → FUNCTION(5)
+	encode_semantic_tokens("fn Foo bar()", &out);
+	assert(out.str_view() == "0,0,2,17,0,0,3,3,1,0,0,4,3,5,0",
+		"got: %s", out.str_view());
+}
+
+fn void test_encode_type_declaration() @test {
+	DString out = dstring::temp();
+	// "struct Point" → struct KEYWORD (7), Point CLASS (14)
+	encode_semantic_tokens("struct Point", &out);
+	assert(out.str_view() == "0,0,6,7,0,0,7,5,14,0", "got: %s", out.str_view());
+}
+
+fn void test_encode_property_access() @test {
+	DString out = dstring::temp();
+	// "x.y" → "x" VARIABLE (4), "y" after "." not a call → PROPERTY (16)
+	encode_semantic_tokens("x.y", &out);
+	assert(out.str_view() == "0,0,1,4,0,0,2,1,16,0", "got: %s", out.str_view());
+}
+
+fn void test_encode_param_not_leaked_to_call() @test {
+	DString out = dstring::temp();
+	// "foo(x)" is a call, NOT a declaration → "x" stays VARIABLE (4), not PARAMETER
+	encode_semantic_tokens("foo(x)", &out);
+	assert(out.str_view() == "0,0,3,5,0,0,4,1,4,0", "got: %s", out.str_view());
+}
+
+// -- UTF-16 length encoding (LSP positions are UTF-16 code units, not bytes) --
+
+fn void test_encode_utf16_string() @test {
+	DString out = dstring::temp();
+	// `"café"` → STRING (10). Bytes = 7 (é is 2 bytes), but UTF-16 length = 6.
+	encode_semantic_tokens(`"café"`, &out);
+	assert(out.str_view() == "0,0,6,10,0", "got: %s", out.str_view());
+}
+
+fn void test_encode_utf16_comment() @test {
+	DString out = dstring::temp();
+	// "// á" → COMMENT (9). Bytes = 5 (á is 2 bytes), but UTF-16 length = 4.
+	encode_semantic_tokens("// á", &out);
+	assert(out.str_view() == "0,0,4,9,0", "got: %s", out.str_view());
+}
+
+fn void test_encode_utf16_char_offset() @test {
+	DString out = dstring::temp();
+	// `x "é" y` — the trailing "y" must be offset by UTF-16 columns, not bytes.
+	//   x(0) VARIABLE(4); "é"(2) STRING(10), 4 UTF-16 cols wide as bytes but
+	//   token at UTF-16 col 2 len 3; y at UTF-16 col 6.
+	//   x: 0,0,1,4,0   "é": col2 len3 → 0,2,3,10,0   y: col6 → 0,4,1,4,0
+	encode_semantic_tokens(`x "é" y`, &out);
+	assert(out.str_view() == "0,0,1,4,0,0,2,3,10,0,0,4,1,4,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_const_ident() @test {

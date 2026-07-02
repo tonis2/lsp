@@ -5,7 +5,7 @@ import std::core::mem;
 import std::collections::object;
 import std::time;
 
-const TOKEN_TYPES_LEGEND = `["namespace","type","enum","struct","variable","function","macro","keyword","decorator","comment","string","number","operator","enumMember"]`;
+const TOKEN_TYPES_LEGEND = `["namespace","type","enum","struct","variable","function","macro","keyword","decorator","comment","string","number","operator","enumMember","class","parameter","property","typeParameter"]`;
 
 fn sz position_to_offset(String content, int line, int character)
 {

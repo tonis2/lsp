@@ -24,25 +24,42 @@ enum SemanticCategory : char (int index)
 	NUMBER      { 11 },
 	OPERATOR    { 12 },
 	ENUM_MEMBER { 13 },
+	CLASS       { 14 },
+	PARAMETER   { 15 },
+	PROPERTY    { 16 },
+	// Reuses the standard "typeParameter" legend slot as a "declaration
+	// accent" color: the fn/macro keyword plus a *primitive* return type
+	// (void, int, bool, ...), so `fn void foo(...)` reads as one visual
+	// unit distinct from other keywords. A class return type is left as
+	// TYPE instead — it renders as a regular (green) type reference.
+	DECL_ACCENT { 17 },
 	SKIP        { -1 },
 }
 
 // Maps a TokenType to its semantic token category index.
-// Only emits tokens where the LSP adds value over the TextMate grammar.
-// Keywords, operators, comments, strings, numbers, and builtin types are
-// left to TextMate which has more nuanced scoping for these.
+// The LSP owns all syntax coloring: it emits a semantic token for every
+// meaningful token so VS Code colors from the lexer (accurate) rather than
+// relying on the TextMate grammar's regex approximation. Only operators,
+// punctuation and structural tokens are left uncolored (SKIP).
 fn SemanticCategory map_token_type(TokenType t)
 {
 	switch (t)
 	{
-		// Identifiers — LSP adds value by confirming token kind from lexer
+		// Identifiers — kind is confirmed by the lexer.
+		// IDENT may be refined to FUNCTION / NAMESPACE in the encoder
+		// based on the following token ( "(" or "::" ).
 		case TYPE_IDENT:
+		case AT_TYPE_IDENT:
+		case HASH_TYPE_IDENT:
 		case CT_TYPE_IDENT:
 			return TYPE;
 		case CONST_IDENT:
+		case AT_CONST_IDENT:
+		case HASH_CONST_IDENT:
 		case CT_CONST_IDENT:
 			return ENUM_MEMBER;
 		case IDENT:
+		case HASH_IDENT:
 			return VARIABLE;
 		case CT_IDENT:
 			return MACRO_CAT;
@@ -54,14 +71,141 @@ fn SemanticCategory map_token_type(TokenType t)
 		case AT_IDENT:
 			return DECORATOR;
 
-		// Everything else: skip and let TextMate grammar handle it.
-		// TextMate provides more nuanced scoping for:
-		// - Keywords: keyword.declaration.* vs keyword.control vs storage.modifier
-		// - Builtin types: storage.type.built-in.primitive
-		// - Literals: constant.language (true/false/null), constant.numeric
-		// - Comments: comment.line vs comment.block vs comment.block.documentation
-		// - Strings: string.quoted.double vs string.quoted.single vs string.quoted.other
-		// - Operators: keyword.operator.* with specific sub-scopes
+		// Builtin types — colored like user types.
+		case VOID:
+		case BOOL:
+		case CHAR:
+		case ICHAR:
+		case SHORT:
+		case USHORT:
+		case INT:
+		case UINT:
+		case LONG:
+		case ULONG:
+		case INT128:
+		case UINT128:
+		case FLOAT:
+		case DOUBLE:
+		case FLOAT16:
+		case BFLOAT16:
+		case FLOAT128:
+		case IPTR:
+		case UPTR:
+		case ISZ:
+		case USZ:
+		case FAULT:
+		case ANY:
+		case TYPEID:
+			return TYPE;
+
+		// Comments and contracts
+		case LINE_COMMENT:
+		case BLOCK_COMMENT:
+		case CONTRACT:
+			return COMMENT;
+
+		// String / char / bytes literals
+		case STRING:
+		case CHAR_LITERAL:
+		case BYTES:
+			return STRING_CAT;
+
+		// Numeric literals
+		case INTEGER:
+		case REAL:
+			return NUMBER;
+
+		// Keywords — declarations, control flow, storage, literals.
+		case ALIAS:
+		case ASM:
+		case ASSERT:
+		case ATTRDEF:
+		case BITSTRUCT:
+		case CONST:
+		case CONSTDEF:
+		case ENUM:
+		case FAULTDEF:
+		case FUNC:
+		case IMPORT:
+		case INTERFACE:
+		case MACRO:
+		case MODULE:
+		case STRUCT:
+		case UNION:
+		case TYPEDEF:
+		case BREAK:
+		case CASE:
+		case CATCH:
+		case CONTINUE:
+		case DEFAULT:
+		case DEFER:
+		case DO:
+		case ELSE:
+		case EXTERN:
+		case FALSE:
+		case FOR:
+		case FOREACH:
+		case FOREACH_R:
+		case IF:
+		case INLINE:
+		case LENGTHOF:
+		case NEXTCASE:
+		case NULL:
+		case RETURN:
+		case STATIC:
+		case SWITCH:
+		case TLOCAL:
+		case TRUE:
+		case TRY:
+		case VAR:
+		case WHILE:
+			return KEYWORD;
+
+		// Compile-time ($) keywords and the $$ builtin intrinsic.
+		case CT_ALIGNOF:
+		case CT_ASSERT:
+		case CT_ASSIGNABLE:
+		case CT_CASE:
+		case CT_DEFAULT:
+		case CT_DEFINED:
+		case CT_ECHO:
+		case CT_ELSE:
+		case CT_ENDFOR:
+		case CT_ENDFOREACH:
+		case CT_ENDIF:
+		case CT_ENDSWITCH:
+		case CT_ERROR:
+		case CT_EVAL:
+		case CT_EVALTYPE:
+		case CT_EXEC:
+		case CT_EXTNAMEOF:
+		case CT_FEATURE:
+		case CT_FOR:
+		case CT_FOREACH:
+		case CT_IF:
+		case CT_IS_CONST:
+		case CT_INCLUDE:
+		case CT_KINDOF:
+		case CT_NAMEOF:
+		case CT_OFFSETOF:
+		case CT_QNAMEOF:
+		case CT_SIZEOF:
+		case CT_STRINGIFY:
+		case CT_SWITCH:
+		case CT_TYPEFROM:
+		case CT_TYPEOF:
+		case CT_VAARG:
+		case CT_VACONST:
+		case CT_VACOUNT:
+		case CT_VAEXPR:
+		case CT_VAREF:
+		case CT_VATYPE:
+		case CT_VASPLAT:
+		case BUILTIN:
+			return KEYWORD;
+
+		// Operators, assignment, comparison, punctuation and structure
+		// tokens stay uncolored.
 		default:
 			return SKIP;
 	}
@@ -113,6 +257,44 @@ fn bool is_type_token(TokenType t)
 		case TYPEID:
 		case TYPE_IDENT:
 		case VAR:
+			return true;
+		default:
+			return false;
+	}
+}
+
+// Checks if a token is a builtin primitive type (void, int, bool, ...), as
+// opposed to a user-defined type name (TYPE_IDENT). Used to decide whether a
+// function's return type gets the primitive declaration-accent color or is
+// left as a regular (green) type reference.
+fn bool is_builtin_type_token(TokenType t)
+{
+	switch (t)
+	{
+		case VOID:
+		case BOOL:
+		case CHAR:
+		case ICHAR:
+		case SHORT:
+		case USHORT:
+		case INT:
+		case UINT:
+		case LONG:
+		case ULONG:
+		case INT128:
+		case UINT128:
+		case FLOAT:
+		case DOUBLE:
+		case FLOAT16:
+		case BFLOAT16:
+		case FLOAT128:
+		case IPTR:
+		case UPTR:
+		case ISZ:
+		case USZ:
+		case FAULT:
+		case ANY:
+		case TYPEID:
 			return true;
 		default:
 			return false;
