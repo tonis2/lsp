@@ -360,3 +360,69 @@ fn void test_definition_generic_fn_return() @test {
 	assert(result.contains(`"line":1`), "got: %s", result);
 	assert(result.contains(`"character":13`), "got: %s", result);
 }
+
+// Go-to-definition on the last segment of an import path jumps to the module
+// declaration in the same file. "module foo::bar;" has `foo` at line 0, char 7.
+fn void test_definition_import_same_file() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module foo::bar;\nimport foo::bar;";
+	// Cursor on "bar" in the import (offset 30, within the 29..31 token).
+	encode_definition("file:///test.c3", content, 30, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":7`), "got: %s", result);
+}
+
+// Clicking an intermediate segment resolves the path only up to that segment:
+// "foo" in `import foo::bar;` jumps to `module foo;`, not to `foo::bar`.
+fn void test_definition_import_intermediate_segment() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module foo;\nimport foo::bar;";
+	// Cursor on "foo" in the import (offset 20, within the 19..21 token).
+	encode_definition("file:///test.c3", content, 20, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":7`), "got: %s", result);
+}
+
+// Comma-separated imports (`import a, b;`): a segment of the second group still
+// resolves, exercising the comma walk-back to the IMPORT keyword.
+fn void test_definition_import_multi_on_one_line() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module baz::qux;\nimport foo::bar, baz::qux;";
+	// Cursor on the second "qux" (offset 40, within the 39..41 token).
+	encode_definition("file:///test.c3", content, 40, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":7`), "got: %s", result);
+}
+
+// An import whose module is declared nowhere yields no result (not a crash).
+fn void test_definition_import_unknown_no_result() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "import foo::bar;";
+	// Cursor on "bar" (offset 12, within the 11..13 token).
+	encode_definition("file:///test.c3", content, 12, ds, "", &out);
+	assert(out.str_view() == "", "got: %s", out.str_view());
+}
+
+// Regression: a `foo::bar` in ordinary expression position (not an import) must
+// NOT be intercepted as a module reference. A `module foo::bar;` decl is present,
+// so a misfire would wrongly emit its Location; correct behavior is empty output.
+fn void test_definition_import_not_import_context() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module foo::bar;\nfn void t() { foo::bar(); }";
+	// Cursor on "bar" in the call (offset 37, within the 36..38 token).
+	encode_definition("file:///test.c3", content, 37, ds, "", &out);
+	assert(out.str_view() == "", "got: %s", out.str_view());
+}

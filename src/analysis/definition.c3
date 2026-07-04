@@ -1210,6 +1210,61 @@ fn String TokenList.resolve_module_prefix(&self, sz cursor_idx)
 	return mod_path.str_view();
 }
 
+// If cursor_idx sits on a segment of an `import a::b::c;` statement, returns the
+// module path from the start of that import group up to and INCLUDING the cursor
+// segment (e.g. cursor on `core` in `import std::core::dstring;` yields "std::core").
+// Returns "" when the cursor is not inside an import path. Handles comma-separated
+// imports (`import a::b, c::d;`) by walking back across earlier groups to the keyword.
+fn String TokenList.import_module_path_at(&self, sz cursor_idx)
+{
+	if (cursor_idx >= self.size) return "";
+	TokenType ct = self.entries[cursor_idx].type;
+	if (ct != IDENT && ct != TYPE_IDENT) return "";
+
+	// Walk back to the start of the qualifier chain the cursor belongs to.
+	sz start_idx = cursor_idx;
+	while (start_idx > 0)
+	{
+		TokenType prev_t = self.entries[start_idx - 1].type;
+		if (prev_t == IDENT || prev_t == TYPE_IDENT || prev_t == SCOPE)
+		{
+			start_idx--;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	// Confirm the chain is part of an import: scanning back from the chain start we
+	// must reach an IMPORT keyword, optionally across comma-separated import groups
+	// (`import a::b, c::d;`). Anything else means this is an ordinary expression.
+	bool in_import = false;
+	for (sz j = start_idx; j > 0; j--)
+	{
+		TokenType t = self.entries[j - 1].type;
+		if (t == IMPORT) { in_import = true; break; }
+		if (t == COMMA || t == IDENT || t == TYPE_IDENT || t == SCOPE) continue;
+		break;
+	}
+	if (!in_import) return "";
+
+	// Build the path from chain start up to AND INCLUDING the cursor segment.
+	DString path = dstring::temp();
+	bool first = true;
+	for (sz i = start_idx; i <= cursor_idx; i++)
+	{
+		TokenType t = self.entries[i].type;
+		if (t == IDENT || t == TYPE_IDENT)
+		{
+			if (!first) path.append("::");
+			path.append(self.entries[i].text);
+			first = false;
+		}
+	}
+	return path.str_view();
+}
+
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
 // Returns true if a definition was found and emitted.
 fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, String uri, String content, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "")
@@ -1260,6 +1315,77 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 	return false;
 }
 
+// Returns the index of the first name-segment token of a `module <module_path>;`
+// declaration whose full path exactly equals module_path, or the empty optional.
+// The match is exact so `std::io` does not resolve to a `module std::io::file;`
+// declaration; exact-compare also handles files carrying several module decls.
+fn sz? TokenList.find_module_decl(&self, String module_path)
+{
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		if (self.entries[i].type != MODULE) continue;
+		if (self.module_path_at(i) != module_path) continue;
+
+		// First name segment after MODULE (skip the leading `::`, if any).
+		for (sz j = i + 1; j < self.size; j++)
+		{
+			TokenType t = self.entries[j].type;
+			if (t == IDENT || t == TYPE_IDENT || t == CONST_IDENT) return j;
+			if (t == SCOPE) continue;
+			break;
+		}
+		return i; // fallback: the MODULE keyword itself
+	}
+	return TOKEN_NOT_FOUND~;
+}
+
+// 4-step search for a `module <path>;` declaration, mirroring try_find_definition:
+// current file -> open docs -> project files -> stdlib. Emits a Location and
+// returns true on the first match.
+fn bool TokenList.try_find_module_definition(&self, String module_path, String uri, String content, DocumentList* docs, String stdlib_path, DString* out)
+{
+	// 1. Current file
+	if (try idx = self.find_module_decl(module_path))
+	{
+		emit_location(uri, content, self.entries[idx], out);
+		return true;
+	}
+
+	// 2. Other open documents (reuse their cached token streams)
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].uri == uri) continue;
+
+		TokenStream* other = docs.entries[d].get_tokens();
+		if (try idx = other.tokens.find_module_decl(module_path))
+		{
+			emit_location(docs.entries[d].uri, docs.entries[d].content, other.tokens.entries[idx], out);
+			return true;
+		}
+	}
+
+	// 3. Project files on disk
+	String file_path = uri_to_path(uri);
+	if (file_path.len > 0)
+	{
+		if (try found = scan_project_for_module(file_path, module_path, out))
+		{
+			if (found) return true;
+		}
+	}
+
+	// 4. Stdlib path
+	if (stdlib_path.len > 0)
+	{
+		if (scan_dir_for_module(stdlib_path, module_path, out, 0))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 // Encodes a go-to-definition / go-to-declaration response.
 // Searches: current file -> open documents -> project files on disk -> stdlib.
 fn void encode_definition(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, DString* out)
@@ -1278,6 +1404,15 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 	// Only navigate for identifier-like tokens
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+
+	// Import path: `import std::core::dstring;` — jump to the module declaration
+	// rather than searching for a same-named symbol (which never exists).
+	String import_path = stream.tokens.import_module_path_at(cursor_idx);
+	if (import_path.len > 0)
+	{
+		stream.tokens.try_find_module_definition(import_path, uri, content, docs, stdlib_path, out);
+		return; // import segments never resolve as ordinary symbols
+	}
 
 	// For DOT-preceded tokens (field/method access), resolve the receiver type
 	// to avoid jumping to unrelated declarations with the same name.
@@ -1642,6 +1777,96 @@ fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int dept
 		{
 			// Try to recurse into subdirectories
 			if (scan_dir_recursive(full_path, target, out, depth + 1, method_type, module_filter))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Twin of scan_project_files for module-declaration lookup: walks the project
+// search dirs looking for a `module <module_path>;` declaration.
+fn bool? scan_project_for_module(String file_path, String module_path, DString* out) @private
+{
+	ProjectDirs pdirs;
+	pdirs.get_search_dirs(file_path);
+	if (pdirs.project_root.len == 0) return false;
+
+	for (sz i = 0; i < pdirs.count; i++)
+	{
+		DString search_path = dstring::temp();
+		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
+		if (scan_dir_for_module(search_path.str_view(), module_path, out, 0))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// Twin of scan_dir_recursive that emits the location of a `module <module_path>;`
+// declaration instead of a symbol declaration.
+fn bool scan_dir_for_module(String dir_path, String module_path, DString* out, int depth) @private
+{
+	if (depth > MAX_SCAN_DEPTH) return false;
+
+	Path p;
+	if (try pp = path::tnew(dir_path))
+	{
+		p = pp;
+	}
+	else
+	{
+		return false;
+	}
+	PathList entries;
+	if (try el = path::ls(mem, p))
+	{
+		entries = el;
+	}
+	else
+	{
+		return false;
+	}
+	defer
+	{
+		foreach (&e : entries) e.free(mem);
+		entries.free();
+	}
+
+	foreach (entry : entries)
+	{
+		String entry_name = (String)entry;
+		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
+		defer mem::free(path_buf);
+		path_buf[:dir_path.len] = dir_path[:dir_path.len];
+		path_buf[dir_path.len] = '/';
+		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
+		String full_path = (String)path_buf;
+
+		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
+		{
+			TokenStream owned;
+			String content;
+			bool owns;
+			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
+			if (stream != null)
+			{
+				if (try idx = stream.tokens.find_module_decl(module_path))
+				{
+					DString uri = dstring::temp();
+					append_file_uri(&uri, full_path);
+					emit_location(uri.str_view(), content, stream.tokens.entries[idx], out);
+					if (owns) { owned.free(); mem::free((char*)content.ptr); }
+					return true;
+				}
+				if (owns) { owned.free(); mem::free((char*)content.ptr); }
+			}
+		}
+		else
+		{
+			if (scan_dir_for_module(full_path, module_path, out, depth + 1))
 			{
 				return true;
 			}
