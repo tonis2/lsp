@@ -20,7 +20,7 @@ NB! Uses C3 `project.json` `sources: []`, for reference/auto-complete targets, s
 
 ## Building
 
-Requires the [C3 compiler](https://github.com/c3lang/c3c) (v0.7.x or later).
+Requires the [C3 compiler](https://github.com/c3lang/c3c) (v0.8.x or later).
 
 ```sh
 # Build
