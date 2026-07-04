@@ -349,28 +349,10 @@ fn void collect_module_completions(String uri, String content, String module_nam
 		collect_declarations_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count, docs.entries[d].get_tokens(), module_name, full_module);
 	}
 
-	// 2. Search project files on disk
+	// 2 + 3. Search project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		ProjectDirs pdirs;
-		pdirs.get_search_dirs(file_path);
-		if (pdirs.project_root.len > 0)
-		{
-			for (sz i = 0; i < pdirs.count; i++)
-			{
-				DString search_path = dstring::temp();
-				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-				scan_dir_module_decls(search_path.str_view(), module_name, full_module, prefix, out, first, &seen, &seen_count, 0);
-			}
-		}
-	}
-
-	// 3. Search stdlib
-	if (stdlib_path.len > 0)
-	{
-		scan_dir_module_decls(stdlib_path, module_name, full_module, prefix, out, first, &seen, &seen_count, 0);
-	}
+	ModuleDeclsScan scan = { module_name, full_module, prefix, out, first, &seen, &seen_count };
+	scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
 
 // Collect only top-level declarations (functions, types, constants, macros) with proper kinds.
@@ -618,47 +600,24 @@ fn bool module_path_matches(String declared, String short_name, String full_name
 	return false;
 }
 
-// Scan directory recursively, collecting declarations from files that declare the given module.
-// When short_name and full_name are both empty, collects from all files (for stdlib dir scanning).
-fn void scan_dir_module_decls(String dir_path, String short_name, String full_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, int depth) @private
+// On-disk module-member completion, driven through the shared scan engine.
+struct ModuleDeclsScan (FileVisitor) @private
 {
-	if (depth > COMPLETION_MAX_SCAN_DEPTH) return;
-	if (*seen_count >= MAX_DOC_IDENTS) return;
+	String short_name;
+	String full_name;
+	String prefix;
+	DString* out;
+	bool* first;
+	String[MAX_DOC_IDENTS]* seen;
+	sz* seen_count;
+}
 
-	Path p;
-	if (try pp = path::tnew(dir_path)) { p = pp; } else { return; }
-	PathList entries;
-	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
-	defer { foreach (&e : entries) e.free(mem); entries.free(); }
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				// collect_declarations_from_content gates by module section internally.
-				collect_declarations_from_content(fc, prefix, out, first, seen, seen_count, stream, short_name, full_name);
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			scan_dir_module_decls(full_path, short_name, full_name, prefix, out, first, seen, seen_count, depth + 1);
-		}
-	}
+fn bool ModuleDeclsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	if (*self.seen_count >= MAX_DOC_IDENTS) return true; // capacity reached — stop scanning
+	// collect_declarations_from_content gates by module section internally.
+	collect_declarations_from_content(content, self.prefix, self.out, self.first, self.seen, self.seen_count, stream, self.short_name, self.full_name);
+	return false;
 }
 
 const sz MAX_IMPORTS = 32;
@@ -781,19 +740,10 @@ fn void collect_all_identifiers(String uri, String content, String prefix, Docum
 
 	// 3. Project files on disk
 	String file_path = uri_to_path(uri);
+	IdentsScan scan = { prefix, out, first, &seen, &seen_count };
 	if (file_path.len > 0)
 	{
-		ProjectDirs pdirs;
-		pdirs.get_search_dirs(file_path);
-		if (pdirs.project_root.len > 0)
-		{
-			for (sz i = 0; i < pdirs.count; i++)
-			{
-				DString search_path = dstring::temp();
-				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-				scan_dir_idents(search_path.str_view(), prefix, out, first, &seen, &seen_count, 0);
-			}
-		}
+		scan_project_dirs(file_path, &scan);
 	}
 
 	// 4. Imported stdlib modules
@@ -816,7 +766,7 @@ fn void collect_all_identifiers(String uri, String content, String prefix, Docum
 
 			DString full_dir = dstring::temp();
 			full_dir.appendf("%s/%s", stdlib_path, mod_dir);
-			scan_dir_idents(full_dir.str_view(), prefix, out, first, &seen, &seen_count, 0);
+			scan_dir(full_dir.str_view(), &scan);
 		}
 	}
 }
@@ -933,44 +883,21 @@ fn void collect_idents_from_content(String content, String prefix, DString* out,
 	}
 }
 
-fn void scan_dir_idents(String dir_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, int depth) @private
+// On-disk identifier completion, driven through the shared scan engine.
+struct IdentsScan (FileVisitor) @private
 {
-	if (depth > COMPLETION_MAX_SCAN_DEPTH) return;
-	if (*seen_count >= MAX_DOC_IDENTS) return;
+	String prefix;
+	DString* out;
+	bool* first;
+	String[MAX_DOC_IDENTS]* seen;
+	sz* seen_count;
+}
 
-	Path p;
-	if (try pp = path::tnew(dir_path)) { p = pp; } else { return; }
-	PathList entries;
-	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
-	defer { foreach (&e : entries) e.free(mem); entries.free(); }
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				collect_idents_from_content(fc, prefix, out, first, seen, seen_count);
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			scan_dir_idents(full_path, prefix, out, first, seen, seen_count, depth + 1);
-		}
-	}
+fn bool IdentsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	if (*self.seen_count >= MAX_DOC_IDENTS) return true; // capacity reached — stop scanning
+	collect_idents_from_content(content, self.prefix, self.out, self.first, self.seen, self.seen_count);
+	return false;
 }
 
 // DOT-expression completion: resolve receiver type and collect fields + methods
@@ -1201,252 +1128,63 @@ fn void TokenList.collect_enum_members_into(&self, String type_name, String pref
 }
 
 // Collect struct fields across current file, open docs, project files, and stdlib
+// One member-collection routine per member kind (fields / methods / enum members) —
+// all three share the same 4-step search, differing only in the TokenList collector.
+alias MemberCollectFn = fn void(TokenList*, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count);
+
+struct MemberScan (FileVisitor) @private
+{
+	MemberCollectFn collect;
+	String type_name;
+	String prefix;
+	DString* out;
+	bool* first;
+	String[MAX_DOC_IDENTS]* seen;
+	sz* seen_count;
+}
+
+fn bool MemberScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	self.collect(&stream.tokens, self.type_name, self.prefix, self.out, self.first, self.seen, self.seen_count);
+	return false; // collect-all: never stop early
+}
+
+// Collect type members (per `collect`) across current file, open docs, project files, and stdlib.
+fn void collect_members_all(MemberCollectFn collect, String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+{
+	// 1. Current file
+	{
+		TokenStream owned;
+		bool owns;
+		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+		defer { if (owns) owned.free(); }
+		collect(&stream.tokens, type_name, prefix, out, first, seen, seen_count);
+	}
+
+	// 2. Open documents (reuse their cached token streams)
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].uri == uri) continue;
+		TokenStream* other_stream = docs.entries[d].get_tokens();
+		collect(&other_stream.tokens, type_name, prefix, out, first, seen, seen_count);
+	}
+
+	// 3 + 4. Project files on disk, then stdlib
+	MemberScan scan = { collect, type_name, prefix, out, first, seen, seen_count };
+	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
+}
+
 fn void collect_struct_fields(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
 {
-	// 1. Current file
-	{
-		TokenStream owned;
-		bool owns;
-		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
-		defer { if (owns) owned.free(); }
-		stream.tokens.collect_struct_fields_into(type_name, prefix, out, first, seen, seen_count);
-	}
-
-	// 2. Open documents (reuse their cached token streams)
-	for (sz d = 0; d < docs.size; d++)
-	{
-		if (docs.entries[d].uri == uri) continue;
-		TokenStream* other_stream = docs.entries[d].get_tokens();
-		other_stream.tokens.collect_struct_fields_into(type_name, prefix, out, first, seen, seen_count);
-	}
-
-	// 3. Project files on disk
-	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		ProjectDirs pdirs;
-		pdirs.get_search_dirs(file_path);
-		if (pdirs.project_root.len > 0)
-		{
-			for (sz i = 0; i < pdirs.count; i++)
-			{
-				DString search_path = dstring::temp();
-				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-				scan_dir_fields(search_path.str_view(), type_name, prefix, out, first, seen, seen_count, 0);
-			}
-		}
-	}
-
-	// 4. Stdlib
-	if (stdlib_path.len > 0)
-	{
-		scan_dir_fields(stdlib_path, type_name, prefix, out, first, seen, seen_count, 0);
-	}
+	collect_members_all(&TokenList.collect_struct_fields_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count);
 }
 
-// Collect methods across current file, open docs, project files, and stdlib
 fn void collect_type_methods(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
 {
-	// 1. Current file
-	{
-		TokenStream owned;
-		bool owns;
-		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
-		defer { if (owns) owned.free(); }
-		stream.tokens.collect_methods_into(type_name, prefix, out, first, seen, seen_count);
-	}
-
-	// 2. Open documents (reuse their cached token streams)
-	for (sz d = 0; d < docs.size; d++)
-	{
-		if (docs.entries[d].uri == uri) continue;
-		TokenStream* other_stream = docs.entries[d].get_tokens();
-		other_stream.tokens.collect_methods_into(type_name, prefix, out, first, seen, seen_count);
-	}
-
-	// 3. Project files on disk
-	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		ProjectDirs pdirs;
-		pdirs.get_search_dirs(file_path);
-		if (pdirs.project_root.len > 0)
-		{
-			for (sz i = 0; i < pdirs.count; i++)
-			{
-				DString search_path = dstring::temp();
-				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-				scan_dir_methods(search_path.str_view(), type_name, prefix, out, first, seen, seen_count, 0);
-			}
-		}
-	}
-
-	// 4. Stdlib
-	if (stdlib_path.len > 0)
-	{
-		scan_dir_methods(stdlib_path, type_name, prefix, out, first, seen, seen_count, 0);
-	}
+	collect_members_all(&TokenList.collect_methods_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count);
 }
 
-// Collect enum/faultdef members across current file, open docs, project files, and stdlib
 fn void collect_enum_members(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
 {
-	// 1. Current file
-	{
-		TokenStream owned;
-		bool owns;
-		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
-		defer { if (owns) owned.free(); }
-		stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
-	}
-
-	// 2. Open documents (reuse their cached token streams)
-	for (sz d = 0; d < docs.size; d++)
-	{
-		if (docs.entries[d].uri == uri) continue;
-		TokenStream* other_stream = docs.entries[d].get_tokens();
-		other_stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
-	}
-
-	// 3. Project files on disk
-	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		ProjectDirs pdirs;
-		pdirs.get_search_dirs(file_path);
-		if (pdirs.project_root.len > 0)
-		{
-			for (sz i = 0; i < pdirs.count; i++)
-			{
-				DString search_path = dstring::temp();
-				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-				scan_dir_enum_members(search_path.str_view(), type_name, prefix, out, first, seen, seen_count, 0);
-			}
-		}
-	}
-
-	// 4. Stdlib
-	if (stdlib_path.len > 0)
-	{
-		scan_dir_enum_members(stdlib_path, type_name, prefix, out, first, seen, seen_count, 0);
-	}
-}
-
-const int COMPLETION_MAX_SCAN_DEPTH = 5;
-
-fn void scan_dir_fields(String dir_path, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, int depth) @private
-{
-	if (depth > COMPLETION_MAX_SCAN_DEPTH) return;
-
-	Path p;
-	if (try pp = path::tnew(dir_path)) { p = pp; } else { return; }
-	PathList entries;
-	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
-	defer { foreach (&e : entries) e.free(mem); entries.free(); }
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				stream.tokens.collect_struct_fields_into(type_name, prefix, out, first, seen, seen_count);
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			scan_dir_fields(full_path, type_name, prefix, out, first, seen, seen_count, depth + 1);
-		}
-	}
-}
-
-fn void scan_dir_methods(String dir_path, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, int depth) @private
-{
-	if (depth > COMPLETION_MAX_SCAN_DEPTH) return;
-
-	Path p;
-	if (try pp = path::tnew(dir_path)) { p = pp; } else { return; }
-	PathList entries;
-	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
-	defer { foreach (&e : entries) e.free(mem); entries.free(); }
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				stream.tokens.collect_methods_into(type_name, prefix, out, first, seen, seen_count);
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			scan_dir_methods(full_path, type_name, prefix, out, first, seen, seen_count, depth + 1);
-		}
-	}
-}
-
-fn void scan_dir_enum_members(String dir_path, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, int depth) @private
-{
-	if (depth > COMPLETION_MAX_SCAN_DEPTH) return;
-
-	Path p;
-	if (try pp = path::tnew(dir_path)) { p = pp; } else { return; }
-	PathList entries;
-	if (try el = path::ls(mem, p)) { entries = el; } else { return; }
-	defer { foreach (&e : entries) e.free(mem); entries.free(); }
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				stream.tokens.collect_enum_members_into(type_name, prefix, out, first, seen, seen_count);
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			scan_dir_enum_members(full_path, type_name, prefix, out, first, seen, seen_count, depth + 1);
-		}
-	}
+	collect_members_all(&TokenList.collect_enum_members_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count);
 }

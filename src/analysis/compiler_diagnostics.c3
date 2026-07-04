@@ -291,15 +291,11 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 // Append a single diagnostic object (LSP Diagnostic) as JSON.
 fn void CompilerDiag.encode(&self, DString* out)
 {
-	out.append(`{"range":{"start":{"line":`);
-	out.appendf("%d", self.line);
-	out.append(`,"character":`);
-	out.appendf("%d", self.col);
-	out.append(`},"end":{"line":`);
-	out.appendf("%d", self.line);
-	out.append(`,"character":`);
-	out.appendf("%d", self.col + 1);
-	out.append(`}},"severity":`);
+	// line/col are clamped to >= 0 when parsed, so the sz casts are safe.
+	Range range = { { (sz)self.line, (sz)self.col }, { (sz)self.line, (sz)(self.col + 1) } };
+	out.append(`{"range":`);
+	range.encode(out);
+	out.append(`,"severity":`);
 	out.appendf("%d", self.severity);
 	out.append(`,"source":"c3c","message":"`);
 	json_escape_into(out, self.message);

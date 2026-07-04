@@ -43,13 +43,42 @@ fn void LspServer.init(&self, String stdlib_path, String compiler_path, long dia
 	g_file_cache = &self.fcache;
 }
 
+alias HandlerFn = fn void(LspServer*, Object* msg, String id_json);
+
+struct MethodHandler
+{
+	String method;
+	HandlerFn handler;
+}
+
+// Method dispatch table. A null handler marks a deliberately ignored notification
+// ("initialized"); unknown methods with an id get a -32601 error response.
+const MethodHandler[] HANDLERS = {
+	{ "initialize",                       &LspServer.handle_initialize },
+	{ "initialized",                      null },
+	{ "shutdown",                         &LspServer.handle_shutdown },
+	{ "exit",                             &LspServer.handle_exit },
+	{ "textDocument/didOpen",             &LspServer.handle_did_open },
+	{ "textDocument/didChange",           &LspServer.handle_did_change },
+	{ "textDocument/didClose",            &LspServer.handle_did_close },
+	{ "textDocument/didSave",             &LspServer.handle_did_save },
+	{ "textDocument/semanticTokens/full", &LspServer.handle_semantic_tokens },
+	{ "textDocument/foldingRange",        &LspServer.handle_folding_range },
+	{ "textDocument/documentSymbol",      &LspServer.handle_document_symbol },
+	{ "textDocument/hover",               &LspServer.handle_hover },
+	{ "textDocument/completion",          &LspServer.handle_completion },
+	{ "textDocument/definition",          &LspServer.handle_definition },
+	{ "textDocument/declaration",         &LspServer.handle_definition },
+	{ "textDocument/documentHighlight",   &LspServer.handle_document_highlight },
+	{ "textDocument/references",          &LspServer.handle_references },
+	{ "textDocument/signatureHelp",       &LspServer.handle_signature_help },
+	{ "textDocument/rename",              &LspServer.handle_rename },
+};
+
 fn void LspServer.handle_message(&self, String message)
 {
-	Object* msg = json::tparse(message) ?? null;
-	if (msg == null)
-	{
-		return;
-	}
+	Object*? msg = json::tparse(message);
+	if (catch msg) return;
 
 	// Extract id as raw JSON string for responses
 	String id_json = "null";
@@ -75,83 +104,17 @@ fn void LspServer.handle_message(&self, String message)
 
 	String method = msg.get_string("method") ?? "";
 
-	if (method == "initialize")
+	bool dispatched = false;
+	foreach (h : HANDLERS)
 	{
-		self.handle_initialize(msg, id_json);
+		if (h.method == method)
+		{
+			if (h.handler != null) h.handler(self, msg, id_json);
+			dispatched = true;
+			break;
+		}
 	}
-	else if (method == "initialized")
-	{
-		// No-op notification
-	}
-	else if (method == "shutdown")
-	{
-		self.handle_shutdown(id_json);
-	}
-	else if (method == "exit")
-	{
-		self.handle_exit();
-	}
-	else if (method == "textDocument/didOpen")
-	{
-		self.handle_did_open(msg);
-	}
-	else if (method == "textDocument/didChange")
-	{
-		self.handle_did_change(msg);
-	}
-	else if (method == "textDocument/didClose")
-	{
-		self.handle_did_close(msg);
-	}
-	else if (method == "textDocument/didSave")
-	{
-		self.handle_did_save(msg);
-	}
-	else if (method == "textDocument/semanticTokens/full")
-	{
-		self.handle_semantic_tokens(msg, id_json);
-	}
-	else if (method == "textDocument/foldingRange")
-	{
-		self.handle_folding_range(msg, id_json);
-	}
-	else if (method == "textDocument/documentSymbol")
-	{
-		self.handle_document_symbol(msg, id_json);
-	}
-	else if (method == "textDocument/hover")
-	{
-		self.handle_hover(msg, id_json);
-	}
-	else if (method == "textDocument/completion")
-	{
-		self.handle_completion(msg, id_json);
-	}
-	else if (method == "textDocument/definition")
-	{
-		self.handle_definition(msg, id_json);
-	}
-	else if (method == "textDocument/declaration")
-	{
-		self.handle_definition(msg, id_json);
-	}
-	else if (method == "textDocument/documentHighlight")
-	{
-		self.handle_document_highlight(msg, id_json);
-	}
-	else if (method == "textDocument/references")
-	{
-		self.handle_references(msg, id_json);
-	}
-	else if (method == "textDocument/signatureHelp")
-	{
-		self.handle_signature_help(msg, id_json);
-	}
-	else if (method == "textDocument/rename")
-	{
-		self.handle_rename(msg, id_json);
-	}
-	else if (id_json != "null")
+	if (!dispatched && id_json != "null")
 	{
 		send_error(id_json, -32601, "Method not found");
 	}
@@ -189,8 +152,10 @@ fn void LspServer.flush_pending_diagnostics(&self)
 		{
 			self.lex_diag_pending = false;
 			self.last_lex_diag_time = now;
-			Document* d = self.documents.find(self.lex_diag_pending_uri);
-			if (d != null) publish_diagnostics(self.lex_diag_pending_uri, d.content);
+			if (try d = self.documents.find(self.lex_diag_pending_uri))
+			{
+				publish_diagnostics(self.lex_diag_pending_uri, d.content);
+			}
 		}
 	}
 }

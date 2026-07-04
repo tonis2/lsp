@@ -365,24 +365,15 @@ fn String TokenList.find_variable_type(&self, String var_name)
 			after++; // position just past the closing '}'
 		}
 
-		// Direct: TYPE_IDENT{...} var
+		// Optional pointer/optional suffixes: TYPE_IDENT{...}[*][?] var
+		if (after < self.size && self.entries[after].type == STAR) after++;
+		if (after < self.size && self.entries[after].type == QUESTION) after++;
+
 		if (after < self.size && is_ident(self.entries[after].type) && self.entries[after].text == var_name)
 		{
 			if (after + 1 < self.size)
 			{
 				TokenType next = self.entries[after + 1].type;
-				if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
-				{
-					return self.get(i).text;
-				}
-			}
-		}
-		// Pointer: TYPE_IDENT{...}* var
-		if (after + 1 < self.size && self.entries[after].type == STAR && is_ident(self.entries[after + 1].type) && self.entries[after + 1].text == var_name)
-		{
-			if (after + 2 < self.size)
-			{
-				TokenType next = self.entries[after + 2].type;
 				if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
 				{
 					return self.get(i).text;
@@ -422,89 +413,40 @@ fn String TokenList.resolve_type_alias_across(&self, String type_name, DocumentL
 	return "";
 }
 
-// Recursively scan a directory for an alias definition.
-fn String resolve_alias_in_dir(String dir_path, String type_name, int depth) @private
+// A per-file TokenList query returning a slice of the file content ("" = miss).
+// Used with StringScan to run type-resolution lookups through the scan engine.
+alias StringQueryFn = fn String(TokenList*, String a, String b);
+
+struct StringScan (FileVisitor) @private
 {
-	if (depth > MAX_SCAN_DEPTH) return "";
+	StringQueryFn query;
+	String a;
+	String b;
+	String result;
+}
 
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return "";
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return "";
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
+fn bool StringScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	String r = self.query(&stream.tokens, self.a, self.b);
+	if (r.len == 0) return false;
+	// Copy before any free — the result points into the file content.
+	DString copy = dstring::temp();
+	copy.append(r);
+	self.result = copy.str_view();
+	return true;
+}
 
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				String resolved = stream.tokens.resolve_type_alias(type_name);
-				if (resolved.len > 0)
-				{
-					// Copy before any free — resolved points into the file content.
-					DString copy = dstring::temp();
-					copy.append(resolved);
-					if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-					return copy.str_view();
-				}
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			String resolved = resolve_alias_in_dir(full_path, type_name, depth + 1);
-			if (resolved.len > 0) return resolved;
-		}
-	}
-	return "";
+fn String query_type_alias(TokenList* tokens, String type_name, String unused) @private
+{
+	return tokens.resolve_type_alias(type_name);
 }
 
 // Resolve alias by scanning project files on disk.
 fn String resolve_alias_in_project(String file_path, String type_name)
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return "";
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		String resolved = resolve_alias_in_dir(search_path.str_view(), type_name, 0);
-		if (resolved.len > 0) return resolved;
-	}
-	return "";
+	StringScan scan = { &query_type_alias, type_name, "", "" };
+	scan_project_dirs(file_path, &scan);
+	return scan.result;
 }
 
 // Resolve the type of a receiver in a DOT expression at cursor_idx.
@@ -660,86 +602,16 @@ fn String TokenList.resolve_field_type_across(&self, String struct_type, String 
 	return "";
 }
 
-fn String resolve_field_type_in_project(String file_path, String struct_type, String field_name) @private
+fn String query_field_type(TokenList* tokens, String struct_type, String field_name) @private
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return "";
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		String result = resolve_field_type_in_dir(search_path.str_view(), struct_type, field_name, 0);
-		if (result.len > 0) return result;
-	}
-	return "";
+	return tokens.find_struct_field_type(struct_type, field_name);
 }
 
-fn String resolve_field_type_in_dir(String dir_path, String struct_type, String field_name, int depth) @private
+fn String resolve_field_type_in_project(String file_path, String struct_type, String field_name) @private
 {
-	if (depth > MAX_SCAN_DEPTH) return "";
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return "";
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return "";
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				String result = stream.tokens.find_struct_field_type(struct_type, field_name);
-				if (result.len > 0)
-				{
-					DString copy = dstring::temp();
-					copy.append(result);
-					if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-					return copy.str_view();
-				}
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			String result = resolve_field_type_in_dir(full_path, struct_type, field_name, depth + 1);
-			if (result.len > 0) return result;
-		}
-	}
-	return "";
+	StringScan scan = { &query_field_type, struct_type, field_name, "" };
+	scan_project_dirs(file_path, &scan);
+	return scan.result;
 }
 
 // Detect method call context (IDENT DOT IDENT) and resolve the receiver type.
@@ -871,89 +743,19 @@ fn String TokenList.resolve_call_return_type_across(&self, String type_name, Str
 	return "";
 }
 
-fn String resolve_return_type_in_project(String file_path, String type_name, String name) @private
+// type_name empty = free function lookup, otherwise a method on type_name.
+fn String query_return_type(TokenList* tokens, String type_name, String name) @private
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return "";
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		String result = resolve_return_type_in_dir(search_path.str_view(), type_name, name, 0);
-		if (result.len > 0) return result;
-	}
-	return "";
+	return type_name.len > 0
+		? tokens.find_method_return_type(type_name, name)
+		: tokens.find_function_return_type(name);
 }
 
-fn String resolve_return_type_in_dir(String dir_path, String type_name, String name, int depth) @private
+fn String resolve_return_type_in_project(String file_path, String type_name, String name) @private
 {
-	if (depth > MAX_SCAN_DEPTH) return "";
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return "";
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return "";
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				String result = type_name.len > 0
-					? stream.tokens.find_method_return_type(type_name, name)
-					: stream.tokens.find_function_return_type(name);
-				if (result.len > 0)
-				{
-					// Copy before any free — result slices into the file content.
-					DString copy = dstring::temp();
-					copy.append(result);
-					if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-					return copy.str_view();
-				}
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-			}
-		}
-		else
-		{
-			String result = resolve_return_type_in_dir(full_path, type_name, name, depth + 1);
-			if (result.len > 0) return result;
-		}
-	}
-	return "";
+	StringScan scan = { &query_return_type, type_name, name, "" };
+	scan_project_dirs(file_path, &scan);
+	return scan.result;
 }
 
 // Find the type of a struct field: struct TypeName { FieldType field_name; }
@@ -1072,104 +874,67 @@ fn bool try_find_struct_field(String type_name, String field_name, String uri, S
 		}
 	}
 
-	// 3. Project files on disk
+	// 3 + 4. Project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		ProjectDirs pdirs;
-		pdirs.get_search_dirs(file_path);
-		if (pdirs.project_root.len > 0)
-		{
-			for (sz i = 0; i < pdirs.count; i++)
-			{
-				DString search_path = dstring::temp();
-				search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-				if (scan_dir_struct_field(search_path.str_view(), type_name, field_name, out, 0))
-				{
-					return true;
-				}
-			}
-		}
-	}
+	StructFieldScan scan = { type_name, field_name, out };
+	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
+}
 
-	// 4. Stdlib
-	if (stdlib_path.len > 0)
-	{
-		if (scan_dir_struct_field(stdlib_path, type_name, field_name, out, 0))
-		{
-			return true;
-		}
-	}
+// On-disk struct-field definition lookup, driven through the shared scan engine.
+struct StructFieldScan (FileVisitor) @private
+{
+	String type_name;
+	String field_name;
+	DString* out;
+}
 
+fn bool StructFieldScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	if (try found = stream.tokens.find_struct_field(self.type_name, self.field_name))
+	{
+		DString uri = dstring::temp();
+		append_file_uri(&uri, path);
+		emit_location(uri.str_view(), content, stream.tokens.entries[found], self.out);
+		return true;
+	}
 	return false;
 }
 
-fn bool scan_dir_struct_field(String dir_path, String type_name, String field_name, DString* out, int depth) @private
+// Walk back from idx over the qualifier chain (IDENT/TYPE_IDENT and `::`) to its
+// first token, e.g. from `bar` in `foo::baz::bar` back to `foo`.
+fn sz TokenList.qualifier_chain_start(&self, sz idx)
 {
-	if (depth > MAX_SCAN_DEPTH) return false;
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
+	while (idx > 0)
 	{
-		p = pp;
-	}
-	else
-	{
-		return false;
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return false;
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
+		TokenType prev_t = self.entries[idx - 1].type;
+		if (prev_t == IDENT || prev_t == TYPE_IDENT || prev_t == SCOPE)
 		{
-			TokenStream owned;
-			String content;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
-			if (stream != null)
-			{
-				if (try found = stream.tokens.find_struct_field(type_name, field_name))
-				{
-					DString uri = dstring::temp();
-					append_file_uri(&uri, full_path);
-					emit_location(uri.str_view(), content, stream.tokens.entries[found], out);
-					if (owns) { owned.free(); mem::free((char*)content.ptr); }
-					return true;
-				}
-				if (owns) { owned.free(); mem::free((char*)content.ptr); }
-			}
+			idx--;
 		}
 		else
 		{
-			if (scan_dir_struct_field(full_path, type_name, field_name, out, depth + 1))
-			{
-				return true;
-			}
+			break;
 		}
 	}
-	return false;
+	return idx;
+}
+
+// Join the IDENT/TYPE_IDENT segments in [start, end_exclusive) with "::" (temp-allocated).
+fn String TokenList.join_path_segments(&self, sz start, sz end_exclusive)
+{
+	DString path = dstring::temp();
+	bool first = true;
+	for (sz i = start; i < end_exclusive; i++)
+	{
+		TokenType t = self.entries[i].type;
+		if (t == IDENT || t == TYPE_IDENT)
+		{
+			if (!first) path.append("::");
+			path.append(self.entries[i].text);
+			first = false;
+		}
+	}
+	return path.str_view();
 }
 
 // If the token at cursor_idx is preceded by a `::`, returns the module path written
@@ -1180,34 +945,8 @@ fn String TokenList.resolve_module_prefix(&self, sz cursor_idx)
 	if (cursor_idx < 2) return "";
 	if (self.entries[cursor_idx - 1].type != SCOPE) return "";
 
-	// Walk back over the qualifier chain (idents and `::`) to its start.
-	sz start_idx = cursor_idx - 1;
-	while (start_idx > 0)
-	{
-		TokenType prev_t = self.entries[start_idx - 1].type;
-		if (prev_t == IDENT || prev_t == TYPE_IDENT || prev_t == SCOPE)
-		{
-			start_idx--;
-		}
-		else
-		{
-			break;
-		}
-	}
-
-	DString mod_path = dstring::temp();
-	bool first = true;
-	for (sz i = start_idx; i < cursor_idx - 1; i++)
-	{
-		TokenType t = self.entries[i].type;
-		if (t == IDENT || t == TYPE_IDENT)
-		{
-			if (!first) mod_path.append("::");
-			mod_path.append(self.entries[i].text);
-			first = false;
-		}
-	}
-	return mod_path.str_view();
+	sz start_idx = self.qualifier_chain_start(cursor_idx - 1);
+	return self.join_path_segments(start_idx, cursor_idx - 1);
 }
 
 // If cursor_idx sits on a segment of an `import a::b::c;` statement, returns the
@@ -1222,19 +961,7 @@ fn String TokenList.import_module_path_at(&self, sz cursor_idx)
 	if (ct != IDENT && ct != TYPE_IDENT) return "";
 
 	// Walk back to the start of the qualifier chain the cursor belongs to.
-	sz start_idx = cursor_idx;
-	while (start_idx > 0)
-	{
-		TokenType prev_t = self.entries[start_idx - 1].type;
-		if (prev_t == IDENT || prev_t == TYPE_IDENT || prev_t == SCOPE)
-		{
-			start_idx--;
-		}
-		else
-		{
-			break;
-		}
-	}
+	sz start_idx = self.qualifier_chain_start(cursor_idx);
 
 	// Confirm the chain is part of an import: scanning back from the chain start we
 	// must reach an IMPORT keyword, optionally across comma-separated import groups
@@ -1250,19 +977,7 @@ fn String TokenList.import_module_path_at(&self, sz cursor_idx)
 	if (!in_import) return "";
 
 	// Build the path from chain start up to AND INCLUDING the cursor segment.
-	DString path = dstring::temp();
-	bool first = true;
-	for (sz i = start_idx; i <= cursor_idx; i++)
-	{
-		TokenType t = self.entries[i].type;
-		if (t == IDENT || t == TYPE_IDENT)
-		{
-			if (!first) path.append("::");
-			path.append(self.entries[i].text);
-			first = false;
-		}
-	}
-	return path.str_view();
+	return self.join_path_segments(start_idx, cursor_idx + 1);
 }
 
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
@@ -1293,25 +1008,30 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 		}
 	}
 
-	// 3. Scan project files on disk (src/ and lib/ relative to file)
+	// 3 + 4. Scan project files on disk (src/ and lib/ relative to file), then stdlib
 	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		if (try found = scan_project_files(file_path, cursor_tok, out, method_type, module_filter))
-		{
-			if (found) return true;
-		}
-	}
+	DeclScan scan = { cursor_tok, method_type, module_filter, out };
+	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
+}
 
-	// 4. Scan stdlib path
-	if (stdlib_path.len > 0)
-	{
-		if (scan_dir_recursive(stdlib_path, cursor_tok, out, 0, method_type, module_filter))
-		{
-			return true;
-		}
-	}
+// On-disk symbol-declaration lookup, driven through the shared scan engine.
+struct DeclScan (FileVisitor) @private
+{
+	Token target;
+	String method_type;
+	String module_filter;
+	DString* out;
+}
 
+fn bool DeclScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	if (try found = stream.tokens.find_declaration_in(self.target, self.method_type, self.module_filter))
+	{
+		DString uri = dstring::temp();
+		append_file_uri(&uri, path);
+		emit_location(uri.str_view(), content, stream.tokens.entries[found], self.out);
+		return true;
+	}
 	return false;
 }
 
@@ -1364,25 +1084,28 @@ fn bool TokenList.try_find_module_definition(&self, String module_path, String u
 		}
 	}
 
-	// 3. Project files on disk
+	// 3 + 4. Project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		if (try found = scan_project_for_module(file_path, module_path, out))
-		{
-			if (found) return true;
-		}
-	}
+	ModuleDeclScan scan = { module_path, out };
+	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
+}
 
-	// 4. Stdlib path
-	if (stdlib_path.len > 0)
-	{
-		if (scan_dir_for_module(stdlib_path, module_path, out, 0))
-		{
-			return true;
-		}
-	}
+// On-disk `module <path>;` declaration lookup, driven through the shared scan engine.
+struct ModuleDeclScan (FileVisitor) @private
+{
+	String module_path;
+	DString* out;
+}
 
+fn bool ModuleDeclScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	if (try idx = stream.tokens.find_module_decl(self.module_path))
+	{
+		DString uri = dstring::temp();
+		append_file_uri(&uri, path);
+		emit_location(uri.str_view(), content, stream.tokens.entries[idx], self.out);
+		return true;
+	}
 	return false;
 }
 
@@ -1612,25 +1335,13 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 				for (sz i = 0; i < self.size; i++)
 				{
 					if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
-					for (sz j = i + 1; j < self.size && j < i + 64; j++)
+					if (try j = self.fn_lparen_after(i))
 					{
-						if (self.entries[j].type == LPAREN)
+						if (j >= 3 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name && self.entries[j - 2].type == DOT && self.entries[j - 3].type == TYPE_IDENT
+							&& self.entries[j - 3].text == method_type)
 						{
-							if (j >= 3 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name && self.entries[j - 2].type == DOT && self.entries[j - 3].type == TYPE_IDENT
-								&& self.entries[j - 3].text == method_type)
-							{
-								return j - 1;
-							}
-							break;
+							return j - 1;
 						}
-						// Skip a generic type block `{...}` before the `(` — not the body.
-						if (self.entries[j].type == LBRACE)
-						{
-							j = self.match_rbrace(j);
-							if (j >= self.size) break;
-							continue;
-						}
-						if (self.entries[j].type == EOS) break;
 					}
 				}
 				return TOKEN_NOT_FOUND~;
@@ -1639,25 +1350,13 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 			for (sz i = 0; i < self.size; i++)
 			{
 				if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
-				for (sz j = i + 1; j < self.size && j < i + 64; j++)
+				if (try j = self.fn_lparen_after(i))
 				{
-					if (self.entries[j].type == LPAREN)
+					if (j > 0 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
+						&& self.decl_in_filter(j - 1, module_filter))
 					{
-						if (j > 0 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
-							&& self.decl_in_filter(j - 1, module_filter))
-						{
-							return j - 1;
-						}
-						break;
+						return j - 1;
 					}
-					// Skip a generic type block `{...}` before the `(` — not the body.
-					if (self.entries[j].type == LBRACE)
-					{
-						j = self.match_rbrace(j);
-						if (j >= self.size) break;
-						continue;
-					}
-					if (self.entries[j].type == EOS) break;
 				}
 			}
 			// macro name (no parens)
@@ -1691,188 +1390,24 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 	return TOKEN_NOT_FOUND~;
 }
 
-// Scan project directories for a declaration on disk.
-fn bool? scan_project_files(String file_path, Token target, DString* out, String method_type = "", String module_filter = "") @private
+// Find the parameter-list `(` of the fn/macro declaration starting at kw_idx, looking
+// ahead at most 64 tokens, skipping one generic type block `{...}` before the `(`
+// (not the body) and bailing at end-of-statement.
+fn sz? TokenList.fn_lparen_after(&self, sz kw_idx)
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return false;
-
-	for (sz i = 0; i < pdirs.count; i++)
+	for (sz j = kw_idx + 1; j < self.size && j < kw_idx + 64; j++)
 	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		if (scan_dir_recursive(search_path.str_view(), target, out, 0, method_type, module_filter))
+		if (self.entries[j].type == LPAREN) return j;
+		// Skip a generic type block `{...}` before the `(` — not the body.
+		if (self.entries[j].type == LBRACE)
 		{
-			return true;
+			j = self.match_rbrace(j);
+			if (j >= self.size) break;
+			continue;
 		}
+		if (self.entries[j].type == EOS) break;
 	}
-	return false;
-}
-
-const int MAX_SCAN_DEPTH = 5;
-
-fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int depth, String method_type = "", String module_filter = "") @private
-{
-	if (depth > MAX_SCAN_DEPTH) return false;
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return false;
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		// Not a directory or can't read — silently skip
-		return false;
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		// Build full path: dir_path/entry_name
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			// Read and tokenize this file (cached on disk by path+mtime)
-			TokenStream owned;
-			String content;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
-			if (stream != null)
-			{
-				if (try found = stream.tokens.find_declaration_in(target, method_type, module_filter))
-				{
-					// Build file:// URI from path
-					DString uri = dstring::temp();
-					append_file_uri(&uri, full_path);
-					emit_location(uri.str_view(), content, stream.tokens.entries[found], out);
-					if (owns) { owned.free(); mem::free((char*)content.ptr); }
-					return true;
-				}
-				if (owns) { owned.free(); mem::free((char*)content.ptr); }
-			}
-		}
-		else
-		{
-			// Try to recurse into subdirectories
-			if (scan_dir_recursive(full_path, target, out, depth + 1, method_type, module_filter))
-			{
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-// Twin of scan_project_files for module-declaration lookup: walks the project
-// search dirs looking for a `module <module_path>;` declaration.
-fn bool? scan_project_for_module(String file_path, String module_path, DString* out) @private
-{
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return false;
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		if (scan_dir_for_module(search_path.str_view(), module_path, out, 0))
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
-// Twin of scan_dir_recursive that emits the location of a `module <module_path>;`
-// declaration instead of a symbol declaration.
-fn bool scan_dir_for_module(String dir_path, String module_path, DString* out, int depth) @private
-{
-	if (depth > MAX_SCAN_DEPTH) return false;
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return false;
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return false;
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String content;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
-			if (stream != null)
-			{
-				if (try idx = stream.tokens.find_module_decl(module_path))
-				{
-					DString uri = dstring::temp();
-					append_file_uri(&uri, full_path);
-					emit_location(uri.str_view(), content, stream.tokens.entries[idx], out);
-					if (owns) { owned.free(); mem::free((char*)content.ptr); }
-					return true;
-				}
-				if (owns) { owned.free(); mem::free((char*)content.ptr); }
-			}
-		}
-		else
-		{
-			if (scan_dir_for_module(full_path, module_path, out, depth + 1))
-			{
-				return true;
-			}
-		}
-	}
-	return false;
+	return TOKEN_NOT_FOUND~;
 }
 
 fn String parent_dir(String path) @private

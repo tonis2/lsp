@@ -16,6 +16,8 @@ struct Document
 
 alias DocumentList = List{Document};
 
+faultdef DOC_NOT_FOUND;
+
 // Return the cached token stream for this document, tokenizing on first use.
 fn TokenStream* Document.get_tokens(&self)
 {
@@ -117,11 +119,13 @@ fn TokenStream* token_stream_for_doc(String uri, String content, DocumentList* d
 {
 	if (docs != null)
 	{
-		Document* d = docs.find(uri);
-		if (d != null && d.content.ptr == content.ptr)
+		if (try d = docs.find(uri))
 		{
-			*owns = false;
-			return d.get_tokens();
+			if (d.content.ptr == content.ptr)
+			{
+				*owns = false;
+				return d.get_tokens();
+			}
 		}
 	}
 	*fallback = token_stream_tokenize(content);
@@ -129,7 +133,7 @@ fn TokenStream* token_stream_for_doc(String uri, String content, DocumentList* d
 	return fallback;
 }
 
-fn Document* DocumentList.find(&self, String uri)
+fn Document*? DocumentList.find(&self, String uri)
 {
 	for (sz i = 0; i < self.size; i++)
 	{
@@ -138,5 +142,5 @@ fn Document* DocumentList.find(&self, String uri)
 			return &self.entries[i];
 		}
 	}
-	return null;
+	return DOC_NOT_FOUND~;
 }

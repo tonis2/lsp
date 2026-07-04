@@ -18,21 +18,20 @@ fn void test_file_cache_hit_and_invalidate() @test {
 
 	// First lookup: loads + tokenizes.
 	String c1;
-	TokenStream* s1 = fc.stream_for(path, &c1);
-	assert(s1 != null, "expected a stream for an existing file");
+	TokenStream* s1 = fc.stream_for(path, &c1)!!;
 	assert(s1.tokens.size > 0, "stream should be populated");
 	sz n1 = s1.tokens.size;
 
 	// Second lookup, unchanged mtime: cache hit returns the same stream object.
 	String c2;
-	TokenStream* s2 = fc.stream_for(path, &c2);
+	TokenStream* s2 = fc.stream_for(path, &c2)!!;
 	assert(s1 == s2, "unchanged file must hit the cache (same stream pointer)");
 
 	// Change content and bump mtime: the stale entry is rebuilt against new content.
 	file::save(path, "fn void foo() {} fn void bar() {}")!!;
 	file::set_modified_time(path, (libc::Time_t)2000)!!;
 	String c3;
-	TokenStream* s3 = fc.stream_for(path, &c3);
+	TokenStream* s3 = fc.stream_for(path, &c3)!!;
 	assert(c3 == "fn void foo() {} fn void bar() {}", "stale entry must reload new content");
 	assert(s3.tokens.size > n1, "rebuilt stream should reflect the larger file");
 }
@@ -55,7 +54,8 @@ fn void test_file_cache_used_by_scan() @test {
 	bool first = true;
 	String[MAX_DOC_IDENTS] seen;
 	sz seen_count = 0;
-	scan_dir_enum_members(dir, "Color", "", &out, &first, &seen, &seen_count, 0);
+	MemberScan scan = { &TokenList.collect_enum_members_into, "Color", "", &out, &first, &seen, &seen_count };
+	scan_dir(dir, &scan);
 
 	String r = out.str_view();
 	assert(r.contains(`"label":"RED"`), "expected RED from cached scan, got: %s", r);
@@ -68,6 +68,5 @@ fn void test_file_cache_missing_file() @test {
 	defer fc.free_all();
 
 	String c;
-	TokenStream* s = fc.stream_for("/tmp/lsp_fc_does_not_exist_zzz.c3", &c);
-	assert(s == null, "missing file must return null");
+	assert(!@ok(fc.stream_for("/tmp/lsp_fc_does_not_exist_zzz.c3", &c)), "missing file must return FILE_UNREADABLE");
 }

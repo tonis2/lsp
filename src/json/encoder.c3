@@ -213,6 +213,33 @@ fn void FoldingRange.encode(&self, DString* out)
 
 // Standalone encode functions for complex responses
 
+// The initialize-response capabilities advertised to the client.
+fn void encode_server_capabilities(DString* out, String version)
+{
+	out.append(`{"capabilities":{`);
+	out.append(`"textDocumentSync":{"openClose":true,"change":1,"save":true},`);
+	out.append(`"semanticTokensProvider":{`);
+	out.append(`"legend":{"tokenTypes":`);
+	out.append(TOKEN_TYPES_LEGEND);
+	out.append(`,"tokenModifiers":[]},`);
+	out.append(`"full":true`);
+	out.append(`},`);
+	out.append(`"foldingRangeProvider":true,`);
+	out.append(`"documentSymbolProvider":true,`);
+	out.append(`"hoverProvider":true,`);
+	// ':' is registered so module-path completion can trigger, but only the second ':'
+	// of '::' actually produces items (a lone ':' is neutralized in encode_completions).
+	out.append(`"completionProvider":{"triggerCharacters":[".",":","$","@","#"]},`);
+	out.append(`"definitionProvider":true,`);
+	out.append(`"declarationProvider":true,`);
+	out.append(`"documentHighlightProvider":true,`);
+	out.append(`"referencesProvider":true,`);
+	out.append(`"renameProvider":true,`);
+	out.append(`"signatureHelpProvider":{"triggerCharacters":["(",",","{","}"]}`);
+	out.append(`},`);
+	out.appendf(`"serverInfo":{"name":"c3-lsp","version":"%s"}}`, version);
+}
+
 fn void encode_hover_response(DString* out, String content, Range range)
 {
 	out.append(`{"contents":{"kind":"markdown","value":"`);

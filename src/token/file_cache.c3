@@ -26,6 +26,8 @@ struct CachedFile
 
 alias FileCache = List{CachedFile};
 
+faultdef FILE_UNREADABLE;
+
 // Global handle to the server's file cache. Set by LspServer.init; stays null in unit
 // tests and headless contexts, in which case the scan_dir_* helpers fall back to the
 // original load-and-tokenize-every-time behavior (so tests see no change).
@@ -33,9 +35,9 @@ FileCache* g_file_cache = null;
 
 // Return the cached token stream for the .c3/.c3i file at `abs_path`, loading and
 // tokenizing it on first use and refreshing it when its mtime changes. Sets
-// *out_content to the (cache-owned) file content the tokens slice into. Returns null
-// if the file cannot be read.
-fn TokenStream* FileCache.stream_for(&self, String abs_path, String* out_content)
+// *out_content to the (cache-owned) file content the tokens slice into. Returns
+// FILE_UNREADABLE if the file cannot be read.
+fn TokenStream*? FileCache.stream_for(&self, String abs_path, String* out_content)
 {
 	long mt = (long)(file::last_modified(abs_path) ?? (Time)0);
 
@@ -70,7 +72,7 @@ fn TokenStream* FileCache.stream_for(&self, String abs_path, String* out_content
 	}
 
 	*out_content = "";
-	return null;
+	return FILE_UNREADABLE~;
 }
 
 fn void CachedFile.free(&self)
@@ -99,8 +101,9 @@ fn void FileCache.free_all(&self)
 // file cache. When the cache is active the returned stream and its content are
 // cache-owned and *owns is false. Otherwise the file is loaded and tokenized into
 // *fallback, *owns is true, and the caller MUST free both the stream (*fallback) and
-// the content buffer (mem::free of *content's pointer). Returns null if unreadable.
-fn TokenStream* file_token_stream(String abs_path, TokenStream* fallback, String* content, bool* owns)
+// the content buffer (mem::free of *content's pointer). Returns FILE_UNREADABLE
+// if the file cannot be read.
+fn TokenStream*? file_token_stream(String abs_path, TokenStream* fallback, String* content, bool* owns)
 {
 	if (g_file_cache != null)
 	{
@@ -116,5 +119,5 @@ fn TokenStream* file_token_stream(String abs_path, TokenStream* fallback, String
 	}
 	*owns = false;
 	*content = "";
-	return null;
+	return FILE_UNREADABLE~;
 }

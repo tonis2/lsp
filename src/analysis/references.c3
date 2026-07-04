@@ -134,18 +134,10 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 			other_stream.tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first);
 		}
 
-		// 3. Scan project files on disk
+		// 3 + 4. Scan project files on disk, then stdlib
 		String file_path = uri_to_path(uri);
-		if (file_path.len > 0)
-		{
-			scan_project_files_refs(file_path, cursor_tok, out, &first);
-		}
-
-		// 4. Scan stdlib
-		if (stdlib_path.len > 0)
-		{
-			scan_dir_recursive_refs(stdlib_path, cursor_tok, out, &first, 0);
-		}
+		RefsScan scan = { cursor_tok, out, &first };
+		scan_project_then_stdlib(file_path, stdlib_path, &scan);
 	}
 
 	out.append("]");
@@ -296,7 +288,8 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 		String file_path = uri_to_path(uri);
 		if (file_path.len > 0)
 		{
-			scan_project_files_rename(file_path, cursor_tok, new_name, out, &first_uri);
+			RenameScan scan = { cursor_tok, new_name, out, &first_uri };
+			scan_project_dirs(file_path, &scan);
 		}
 	}
 
@@ -408,154 +401,35 @@ fn void TokenList.collect_rename_edits_scoped(&self, String uri, String content,
 	}
 }
 
-// Scan project directories for rename edits on disk.
-fn void scan_project_files_rename(String file_path, Token target, String new_name, DString* out, bool* first_uri) @private
+// On-disk rename-edit collection, driven through the shared scan engine.
+struct RenameScan (FileVisitor) @private
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return;
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		scan_dir_recursive_rename(search_path.str_view(), target, new_name, out, first_uri, 0);
-	}
+	Token target;
+	String new_name;
+	DString* out;
+	bool* first_uri;
 }
 
-// Recursively scan directories for rename edits.
-fn void scan_dir_recursive_rename(String dir_path, Token target, String new_name, DString* out, bool* first_uri, int depth) @private
+fn bool RenameScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (depth > MAX_SCAN_DEPTH) return;
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return;
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return;
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String content;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
-			if (stream != null)
-			{
-				DString uri = dstring::temp();
-				append_file_uri(&uri, full_path);
-				stream.tokens.collect_rename_edits(uri.str_view(), content, target, new_name, out, first_uri);
-
-				if (owns) { owned.free(); mem::free((char*)content.ptr); }
-			}
-		}
-		else
-		{
-			scan_dir_recursive_rename(full_path, target, new_name, out, first_uri, depth + 1);
-		}
-	}
+	DString uri = dstring::temp();
+	append_file_uri(&uri, path);
+	stream.tokens.collect_rename_edits(uri.str_view(), content, self.target, self.new_name, self.out, self.first_uri);
+	return false; // collect-all: never stop early
 }
 
-// Scan project directories for all references on disk.
-fn void scan_project_files_refs(String file_path, Token target, DString* out, bool* first) @private
+// On-disk reference collection, driven through the shared scan engine.
+struct RefsScan (FileVisitor) @private
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return;
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		scan_dir_recursive_refs(search_path.str_view(), target, out, first, 0);
-	}
+	Token target;
+	DString* out;
+	bool* first;
 }
 
-// Recursively scan directories for all references.
-fn void scan_dir_recursive_refs(String dir_path, Token target, DString* out, bool* first, int depth) @private
+fn bool RefsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (depth > MAX_SCAN_DEPTH) return;
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return;
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return;
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String content;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
-			if (stream != null)
-			{
-				DString uri = dstring::temp();
-				append_file_uri(&uri, full_path);
-				stream.tokens.collect_refs(uri.str_view(), content, target, out, first);
-
-				if (owns) { owned.free(); mem::free((char*)content.ptr); }
-			}
-		}
-		else
-		{
-			scan_dir_recursive_refs(full_path, target, out, first, depth + 1);
-		}
-	}
+	DString uri = dstring::temp();
+	append_file_uri(&uri, path);
+	stream.tokens.collect_refs(uri.str_view(), content, self.target, self.out, self.first);
+	return false; // collect-all: never stop early
 }

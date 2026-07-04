@@ -174,14 +174,8 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 			if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, method_type, docs.entries[d].get_tokens(), module_filter)) return;
 		}
 		String file_path = uri_to_path(uri);
-		if (file_path.len > 0)
-		{
-			if (scan_project_docs(file_path, cursor_tok, out, method_type, module_filter)) return;
-		}
-		if (stdlib_path.len > 0)
-		{
-			if (scan_dir_docs(stdlib_path, cursor_tok, out, 0, method_type, module_filter)) return;
-		}
+		DocsScan scan = { cursor_tok, method_type, module_filter, out };
+		scan_project_then_stdlib(file_path, stdlib_path, &scan);
 		return;
 	}
 
@@ -195,18 +189,10 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, "", docs.entries[d].get_tokens(), module_filter)) return;
 	}
 
-	// 3. Project files on disk
+	// 3 + 4. Project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		if (scan_project_docs(file_path, cursor_tok, out, "", module_filter)) return;
-	}
-
-	// 4. Stdlib
-	if (stdlib_path.len > 0)
-	{
-		if (scan_dir_docs(stdlib_path, cursor_tok, out, 0, "", module_filter)) return;
-	}
+	DocsScan scan = { cursor_tok, "", module_filter, out };
+	scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
 
 // Search for a struct field declaration and extract its doc comment + signature.
@@ -229,18 +215,10 @@ fn void find_hover_field_docs(String uri, String content, String type_name, Stri
 		if (try_extract_field_docs_from(docs.entries[d].content, type_name, field_name, out, docs.entries[d].get_tokens())) return;
 	}
 
-	// 3. Project files on disk
+	// 3 + 4. Project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		if (scan_project_field_docs(file_path, type_name, field_name, out)) return;
-	}
-
-	// 4. Stdlib
-	if (stdlib_path.len > 0)
-	{
-		if (scan_dir_field_docs(stdlib_path, type_name, field_name, out, 0)) return;
-	}
+	FieldDocsScan scan = { type_name, field_name, out };
+	scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
 
 // Tokenize content, find a struct field declaration, and extract doc comment + signature.
@@ -421,140 +399,29 @@ fn String strip_comment_markers(String text) @private
 	return text;
 }
 
-// Scan project dirs for hover docs (mirrors scan_project_files pattern).
-fn bool scan_project_docs(String file_path, Token target, DString* out, String method_type = "", String module_filter = "") @private
+// On-disk hover-doc lookup, driven through the shared scan engine.
+struct DocsScan (FileVisitor) @private
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return false;
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		if (scan_dir_docs(search_path.str_view(), target, out, 0, method_type, module_filter)) return true;
-	}
-	return false;
+	Token target;
+	String method_type;
+	String module_filter;
+	DString* out;
 }
 
-fn bool scan_dir_docs(String dir_path, Token target, DString* out, int depth, String method_type = "", String module_filter = "") @private
+fn bool DocsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (depth > MAX_SCAN_DEPTH) return false;
-
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return false;
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return false;
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				bool found = try_extract_docs_from(fc, target, out, method_type, stream, module_filter);
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-				if (found) return true;
-			}
-		}
-		else
-		{
-			if (scan_dir_docs(full_path, target, out, depth + 1, method_type, module_filter)) return true;
-		}
-	}
-	return false;
+	return try_extract_docs_from(content, self.target, self.out, self.method_type, stream, self.module_filter);
 }
 
-// Scan project dirs for struct field hover docs.
-fn bool scan_project_field_docs(String file_path, String type_name, String field_name, DString* out) @private
+// On-disk struct-field hover-doc lookup, driven through the shared scan engine.
+struct FieldDocsScan (FileVisitor) @private
 {
-	ProjectDirs pdirs;
-	pdirs.get_search_dirs(file_path);
-	if (pdirs.project_root.len == 0) return false;
-
-	for (sz i = 0; i < pdirs.count; i++)
-	{
-		DString search_path = dstring::temp();
-		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		if (scan_dir_field_docs(search_path.str_view(), type_name, field_name, out, 0)) return true;
-	}
-	return false;
+	String type_name;
+	String field_name;
+	DString* out;
 }
 
-fn bool scan_dir_field_docs(String dir_path, String type_name, String field_name, DString* out, int depth) @private
+fn bool FieldDocsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (depth > MAX_SCAN_DEPTH) return false;
-
-	Path p;
-	if (try pp = path::tnew(dir_path)) { p = pp; } else { return false; }
-	PathList entries;
-
-
-	if (try el = path::ls(mem, p)) { entries = el; } else { return false; }
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				bool found = try_extract_field_docs_from(fc, type_name, field_name, out, stream);
-				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
-				if (found) return true;
-			}
-		}
-		else
-		{
-			if (scan_dir_field_docs(full_path, type_name, field_name, out, depth + 1)) return true;
-		}
-	}
-	return false;
+	return try_extract_field_docs_from(content, self.type_name, self.field_name, self.out, stream);
 }

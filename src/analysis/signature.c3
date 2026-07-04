@@ -243,53 +243,10 @@ fn bool search_signature_all(
 		}
 	}
 
-	// 3. Project files on disk.
-	if (uri.len > 0)
-	{
-		String file_path = uri_to_path(uri);
-		if (file_path.len > 0)
-		{
-			ProjectDirs pdirs;
-			pdirs.get_search_dirs(file_path);
-			if (pdirs.project_root.len > 0)
-			{
-				for (sz i = 0; i < pdirs.count; i++)
-				{
-					DString search_path = dstring::temp();
-					search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-					if (scan_dir_for_signature(
-						search_path.str_view(),
-						target,
-						active_param,
-						is_method,
-						method_type,
-						is_generic_help,
-						module_filter,
-						out,
-						0
-					)) return true;
-				}
-			}
-		}
-	}
-
-	// 4. Stdlib.
-	if (stdlib_path.len > 0)
-	{
-		if (scan_dir_for_signature(
-			stdlib_path,
-			target,
-			active_param,
-			is_method,
-			method_type,
-			is_generic_help,
-			module_filter,
-			out,
-			0
-		)) return true;
-	}
-
-	return false;
+	// 3 + 4. Project files on disk, then stdlib.
+	String file_path = uri.len > 0 ? uri_to_path(uri) : "";
+	SignatureScan scan = { target, active_param, is_method, method_type, is_generic_help, module_filter, out };
+	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
 
 // Find `target`'s declaration in this token list and, if found, write its signature JSON.
@@ -531,100 +488,33 @@ fn bool is_self_param(String p) @private
 	return false;
 }
 
-// Recursively scan a directory for `target`'s declaration; on the first match, write its
-// signature JSON (extracted from that file's content) and return true.
-fn bool scan_dir_for_signature(
-	String dir_path,
-	Token target,
-	sz active_param,
-	bool is_method,
-	String method_type,
-	bool is_generic_help,
-	String module_filter,
-	DString* out,
-	int depth
-) @private
+// On-disk signature lookup, driven through the shared scan engine.
+struct SignatureScan (FileVisitor) @private
 {
-	if (depth > MAX_SCAN_DEPTH) return false;
+	Token target;
+	sz active_param;
+	bool is_method;
+	String method_type;
+	bool is_generic_help;
+	String module_filter;
+	DString* out;
+}
 
-	Path p;
-	if (try pp = path::tnew(dir_path))
-	{
-		p = pp;
-	}
-	else
-	{
-		return false;
-	}
-	PathList entries;
-	if (try el = path::ls(mem, p))
-	{
-		entries = el;
-	}
-	else
-	{
-		return false;
-	}
-	defer
-	{
-		foreach (&e : entries) e.free(mem);
-		entries.free();
-	}
-
-	foreach (entry : entries)
-	{
-		String entry_name = (String)entry;
-		char[] path_buf   = mem::new_array(char, dir_path.len + 1 + entry_name.len);
-		defer mem::free(path_buf);
-		path_buf[:dir_path.len] = dir_path[:dir_path.len];
-		path_buf[dir_path.len] = '/';
-		path_buf[dir_path.len + 1..] = entry_name[:entry_name.len];
-		String full_path = (String)path_buf;
-
-		if (entry_name.ends_with(".c3") || entry_name.ends_with(".c3i"))
-		{
-			TokenStream owned;
-			String fc;
-			bool owns;
-			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
-			if (stream != null)
-			{
-				// Extract into a temp buffer and copy out before freeing fc — the label and
-				// parameter strings slice directly into the file content.
-				DString local = dstring::temp();
-				bool hit      = stream.tokens.find_signature(
-					target,
-					active_param,
-					is_method,
-					method_type,
-					fc,
-					&local,
-					is_generic_help,
-					module_filter
-				);
-				if (hit) out.append(local.str_view());
-				if (owns)
-				{
-					owned.free();
-					mem::free((char*)fc.ptr);
-				}
-				if (hit) return true;
-			}
-		}
-		else
-		{
-			if (scan_dir_for_signature(
-				full_path,
-				target,
-				active_param,
-				is_method,
-				method_type,
-				is_generic_help,
-				module_filter,
-				out,
-				depth + 1
-			)) return true;
-		}
-	}
-	return false;
+fn bool SignatureScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	// Extract into a temp buffer and copy out before the file content is freed — the label
+	// and parameter strings slice directly into the file content.
+	DString local = dstring::temp();
+	bool hit = stream.tokens.find_signature(
+		self.target,
+		self.active_param,
+		self.is_method,
+		self.method_type,
+		content,
+		&local,
+		self.is_generic_help,
+		self.module_filter
+	);
+	if (hit) self.out.append(local.str_view());
+	return hit;
 }

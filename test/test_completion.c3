@@ -481,7 +481,7 @@ fn void test_completion_dot_real_handlers_file() @test {
 
 		// Find "Document* doc = self.documents.find(uri);" and insert "doc." after the block
 		sz insert_pos = 0;
-		if (try idx = file_content.index_of("Document* doc = self.documents.find(uri);"))
+		if (try idx = file_content.index_of("Document*? doc = self.documents.find(uri);"))
 		{
 			// Find the next newline after the declaration
 			for (sz i = idx; i < file_content.len; i++)

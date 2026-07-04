@@ -17,6 +17,47 @@ fn sz position_to_offset(String content, int line, int character)
 	return 0;
 }
 
+// --- Typed request decode ---------------------------------------------------
+// All request-param JSON access lives in these helpers so handlers stay thin.
+// Malformed params panic (!!), matching the historical behavior.
+
+struct DocPosition
+{
+	int line;
+	int character;
+}
+
+fn String request_uri(Object* msg) @private
+{
+	return msg.get("params")!!.get("textDocument")!!.get_string("uri") ?? "";
+}
+
+fn DocPosition request_position(Object* msg) @private
+{
+	Object* pos = msg.get("params")!!.get("position")!!;
+	return { .line = pos.get_int("line") ?? 0, .character = pos.get_int("character") ?? 0 };
+}
+
+// Look up an open document; when missing, answer `fallback` and return DOC_NOT_FOUND,
+// so handlers read as `if (try doc = self.doc_or_respond(...)) { ... }`.
+fn Document*? LspServer.doc_or_respond(&self, String uri, String id_json, String fallback)
+{
+	Document*? doc = self.documents.find(uri);
+	if (catch doc)
+	{
+		send_response(id_json, fallback);
+		return DOC_NOT_FOUND~;
+	}
+	return doc;
+}
+
+// Send `data`, falling back when the encoder produced nothing — forwarding an empty
+// buffer would yield `"result":` (invalid JSON) and drop the connection.
+fn void respond_nonempty(String id_json, DString* data, String fallback) @private
+{
+	send_response(id_json, data.str_view().len == 0 ? fallback : data.str_view());
+}
+
 fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 {
 	self.initialized = true;
@@ -56,39 +97,17 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 	}
 
 	DString result = dstring::temp();
-	result.append(`{"capabilities":{`);
-	result.append(`"textDocumentSync":{"openClose":true,"change":1,"save":true},`);
-	result.append(`"semanticTokensProvider":{`);
-	result.append(`"legend":{"tokenTypes":`);
-	result.append(TOKEN_TYPES_LEGEND);
-	result.append(`,"tokenModifiers":[]},`);
-	result.append(`"full":true`);
-	result.append(`},`);
-	result.append(`"foldingRangeProvider":true,`);
-	result.append(`"documentSymbolProvider":true,`);
-	result.append(`"hoverProvider":true,`);
-	// ':' is registered so module-path completion can trigger, but only the second ':'
-	// of '::' actually produces items (a lone ':' is neutralized in encode_completions).
-	result.append(`"completionProvider":{"triggerCharacters":[".",":","$","@","#"]},`);
-	result.append(`"definitionProvider":true,`);
-	result.append(`"declarationProvider":true,`);
-	result.append(`"documentHighlightProvider":true,`);
-	result.append(`"referencesProvider":true,`);
-	result.append(`"renameProvider":true,`);
-	result.append(`"signatureHelpProvider":{"triggerCharacters":["(",",","{","}"]}`);
-	result.append(`},`);
-	result.appendf(`"serverInfo":{"name":"c3-lsp","version":"%s"}}`, VERSION);
-
+	encode_server_capabilities(&result, VERSION);
 	send_response(id_json, result.str_view());
 }
 
-fn void LspServer.handle_shutdown(&self, String id_json)
+fn void LspServer.handle_shutdown(&self, Object* msg, String id_json)
 {
 	self.shutdown_requested = true;
 	send_response(id_json, "null");
 }
 
-fn void LspServer.handle_exit(&self)
+fn void LspServer.handle_exit(&self, Object* msg = null, String id_json = "")
 {
 	self.running = false;
 
@@ -108,19 +127,18 @@ fn void LspServer.handle_exit(&self)
 	if (self.lex_diag_pending_uri.len > 0) mem::free((char*)self.lex_diag_pending_uri.ptr);
 }
 
-fn void LspServer.handle_did_open(&self, Object* msg)
+fn void LspServer.handle_did_open(&self, Object* msg, String id_json = "")
 {
 	Object* td  = msg.get("params")!!.get("textDocument")!!;
 	String uri  = td.get_string("uri") ?? "";
 	String text = td.get_string("text") ?? "";
 	int version = td.get_int("version") ?? 0;
-
 	self.documents.open(uri, text, version);
 	publish_diagnostics(uri, text);
 	self.maybe_run_compiler_diagnostics(uri);
 }
 
-fn void LspServer.handle_did_change(&self, Object* msg)
+fn void LspServer.handle_did_change(&self, Object* msg, String id_json = "")
 {
 	Object* params = msg.get("params")!!;
 	Object* td     = params.get("textDocument")!!;
@@ -135,18 +153,14 @@ fn void LspServer.handle_did_change(&self, Object* msg)
 	self.maybe_publish_lex_diagnostics(uri, text);
 }
 
-fn void LspServer.handle_did_close(&self, Object* msg)
+fn void LspServer.handle_did_close(&self, Object* msg, String id_json = "")
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-	self.documents.close(uri);
+	self.documents.close(request_uri(msg));
 }
 
-fn void LspServer.handle_did_save(&self, Object* msg)
+fn void LspServer.handle_did_save(&self, Object* msg, String id_json = "")
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-	self.maybe_run_compiler_diagnostics(uri);
+	self.maybe_run_compiler_diagnostics(request_uri(msg));
 }
 
 fn void LspServer.maybe_run_compiler_diagnostics(&self, String uri)
@@ -232,296 +246,154 @@ fn void LspServer.set_pending_diag_uri(&self, String uri)
 
 fn void LspServer.handle_semantic_tokens(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	if (try doc = self.doc_or_respond(request_uri(msg), id_json, `{"data":[]}`))
 	{
-		send_response(id_json, `{"data":[]}`);
-		return;
+		DString data = dstring::temp();
+		encode_semantic_tokens(doc.content, &data, doc.get_tokens());
+
+		DString result = dstring::temp();
+		result.appendf(`{"data":[%s]}`, data.str_view());
+		send_response(id_json, result.str_view());
 	}
-
-	DString data = dstring::temp();
-	encode_semantic_tokens(doc.content, &data, doc.get_tokens());
-
-	DString result = dstring::temp();
-	result.appendf(`{"data":[%s]}`, data.str_view());
-	send_response(id_json, result.str_view());
 }
 
 fn void LspServer.handle_folding_range(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	if (try doc = self.doc_or_respond(request_uri(msg), id_json, "[]"))
 	{
-		send_response(id_json, "[]");
-		return;
+		DString data = dstring::temp();
+		encode_folding_ranges(doc.content, &data);
+
+		DString result = dstring::temp();
+		result.appendf("[%s]", data.str_view());
+		send_response(id_json, result.str_view());
 	}
-
-	DString data = dstring::temp();
-	encode_folding_ranges(doc.content, &data);
-
-	DString result = dstring::temp();
-	result.appendf("[%s]", data.str_view());
-	send_response(id_json, result.str_view());
 }
 
 fn void LspServer.handle_document_symbol(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	if (try doc = self.doc_or_respond(request_uri(msg), id_json, "[]"))
 	{
-		send_response(id_json, "[]");
-		return;
+		DString data = dstring::temp();
+		encode_document_symbols(doc.content, &data, doc.get_tokens());
+
+		DString result = dstring::temp();
+		result.appendf("[%s]", data.str_view());
+		send_response(id_json, result.str_view());
 	}
-
-	DString data = dstring::temp();
-	encode_document_symbols(doc.content, &data, doc.get_tokens());
-
-	DString result = dstring::temp();
-	result.appendf("[%s]", data.str_view());
-	send_response(id_json, result.str_view());
 }
 
 fn void LspServer.handle_hover(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "null"))
 	{
-		send_response(id_json, "null");
-		return;
-	}
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
 
-	Object* pos   = msg.get("params")!!.get("position")!!;
-	int line      = pos.get_int("line") ?? 0;
-	int character = pos.get_int("character") ?? 0;
-
-	sz offset = position_to_offset(doc.content, line, character);
-
-	DString data = dstring::temp();
-	encode_hover(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
-
-	if (data.str_view().len == 0)
-	{
-		send_response(id_json, "null");
-	}
-	else
-	{
-		send_response(id_json, data.str_view());
+		DString data = dstring::temp();
+		encode_hover(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
+		respond_nonempty(id_json, &data, "null");
 	}
 }
 
 fn void LspServer.handle_completion(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, `{"isIncomplete":false,"items":[]}`))
 	{
-		send_response(id_json, `{"isIncomplete":false,"items":[]}`);
-		return;
-	}
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
+		if (offset > doc.content.len)
+		{
+			offset = doc.content.len;
+		}
 
-	Object* pos   = msg.get("params")!!.get("position")!!;
-	int line      = pos.get_int("line") ?? 0;
-	int character = pos.get_int("character") ?? 0;
-
-	sz offset = position_to_offset(doc.content, line, character);
-	if (offset > doc.content.len)
-	{
-		offset = doc.content.len;
-	}
-
-	DString data = dstring::temp();
-	encode_completions(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
-	// Never forward an empty buffer as the JSON-RPC result — that yields `"result":`
-	// (invalid JSON) and drops the connection. Fall back to an empty completion list.
-	if (data.str_view().len == 0)
-	{
-		send_response(id_json, `{"isIncomplete":false,"items":[]}`);
-	}
-	else
-	{
-		send_response(id_json, data.str_view());
+		DString data = dstring::temp();
+		encode_completions(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
+		respond_nonempty(id_json, &data, `{"isIncomplete":false,"items":[]}`);
 	}
 }
 
 fn void LspServer.handle_definition(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-
-	if (doc == null)
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "null"))
 	{
-		send_response(id_json, "null");
-		return;
-	}
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
 
-	Object* pos   = msg.get("params")!!.get("position")!!;
-	int line      = pos.get_int("line") ?? 0;
-	int character = pos.get_int("character") ?? 0;
-
-	sz offset = position_to_offset(doc.content, line, character);
-
-	DString data = dstring::temp();
-	encode_definition(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
-
-	if (data.str_view().len == 0)
-	{
-		send_response(id_json, "null");
-	}
-	else
-	{
-		send_response(id_json, data.str_view());
+		DString data = dstring::temp();
+		encode_definition(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
+		respond_nonempty(id_json, &data, "null");
 	}
 }
 
 fn void LspServer.handle_signature_help(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "null"))
 	{
-		send_response(id_json, "null");
-		return;
-	}
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
 
-	Object* pos   = msg.get("params")!!.get("position")!!;
-	int line      = pos.get_int("line") ?? 0;
-	int character = pos.get_int("character") ?? 0;
-
-	sz offset = position_to_offset(doc.content, line, character);
-
-	DString data = dstring::temp();
-	encode_signature_help(doc.content, offset, &data, doc.get_tokens(), uri, &self.documents, self.stdlib_path);
-
-	if (data.str_view().len == 0)
-	{
-		send_response(id_json, "null");
-	}
-	else
-	{
-		send_response(id_json, data.str_view());
+		DString data = dstring::temp();
+		encode_signature_help(doc.content, offset, &data, doc.get_tokens(), uri, &self.documents, self.stdlib_path);
+		respond_nonempty(id_json, &data, "null");
 	}
 }
 
 fn void LspServer.handle_document_highlight(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	if (try doc = self.doc_or_respond(request_uri(msg), id_json, "null"))
 	{
-		send_response(id_json, "null");
-		return;
-	}
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
 
-	Object* pos   = msg.get("params")!!.get("position")!!;
-	int line      = pos.get_int("line") ?? 0;
-	int character = pos.get_int("character") ?? 0;
-
-	sz offset = position_to_offset(doc.content, line, character);
-
-	DString data = dstring::temp();
-	encode_document_highlights(doc.content, offset, &data, doc.get_tokens());
-
-	if (data.str_view().len == 0)
-	{
-		send_response(id_json, "null");
-	}
-	else
-	{
-		send_response(id_json, data.str_view());
+		DString data = dstring::temp();
+		encode_document_highlights(doc.content, offset, &data, doc.get_tokens());
+		respond_nonempty(id_json, &data, "null");
 	}
 }
 
 fn void LspServer.handle_references(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "null"))
 	{
-		send_response(id_json, "null");
-		return;
-	}
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
 
-	Object* pos   = msg.get("params")!!.get("position")!!;
-	int line      = pos.get_int("line") ?? 0;
-	int character = pos.get_int("character") ?? 0;
+		bool include_decl = true;
+		if (try ctx = msg.get("params")!!.get("context"))
+		{
+			include_decl = (ctx.get_int("includeDeclaration") ?? 1) != 0;
+		}
 
-	sz offset = position_to_offset(doc.content, line, character);
-
-	bool include_decl = true;
-	if (try ctx = msg.get("params")!!.get("context"))
-	{
-		include_decl = (ctx.get_int("includeDeclaration") ?? 1) != 0;
-	}
-
-	DString data = dstring::temp();
-	encode_references(uri, doc.content, offset, &self.documents, self.stdlib_path, include_decl, &data);
-
-	if (data.str_view().len == 0)
-	{
-		send_response(id_json, "null");
-	}
-	else
-	{
-		send_response(id_json, data.str_view());
+		DString data = dstring::temp();
+		encode_references(uri, doc.content, offset, &self.documents, self.stdlib_path, include_decl, &data);
+		respond_nonempty(id_json, &data, "null");
 	}
 }
 
 fn void LspServer.handle_rename(&self, Object* msg, String id_json)
 {
-	Object* td = msg.get("params")!!.get("textDocument")!!;
-	String uri = td.get_string("uri") ?? "";
-
-	Document* doc = self.documents.find(uri);
-	if (doc == null)
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "null"))
 	{
-		send_response(id_json, "null");
-		return;
-	}
+		DocPosition p = request_position(msg);
 
-	Object* pos   = msg.get("params")!!.get("position")!!;
-	int line      = pos.get_int("line") ?? 0;
-	int character = pos.get_int("character") ?? 0;
+		String new_name = msg.get("params")!!.get_string("newName") ?? "";
+		if (new_name.len == 0)
+		{
+			send_error(id_json, -32602, "newName is required");
+			return;
+		}
 
-	String new_name = msg.get("params")!!.get_string("newName") ?? "";
-	if (new_name.len == 0)
-	{
-		send_error(id_json, -32602, "newName is required");
-		return;
-	}
+		sz offset = position_to_offset(doc.content, p.line, p.character);
 
-	sz offset = position_to_offset(doc.content, line, character);
-
-	DString data = dstring::temp();
-	encode_rename(uri, doc.content, offset, &self.documents, self.stdlib_path, new_name, &data);
-
-	if (data.str_view().len == 0)
-	{
-		send_response(id_json, "null");
-	}
-	else
-	{
-		send_response(id_json, data.str_view());
+		DString data = dstring::temp();
+		encode_rename(uri, doc.content, offset, &self.documents, self.stdlib_path, new_name, &data);
+		respond_nonempty(id_json, &data, "null");
 	}
 }
