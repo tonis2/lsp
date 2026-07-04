@@ -64,6 +64,7 @@ fn void classify_roles(TokenStream* stream, SemanticCategory[] roles)
 				switch (stream.tokens.entries[i + 1].type)
 				{
 					case LPAREN: c = FUNCTION;
+					case LBRACE: c = FUNCTION; // generic call: foo{Bar}(...)
 					case SCOPE:  c = NAMESPACE;
 					default:     break;
 				}

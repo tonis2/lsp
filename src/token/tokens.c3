@@ -327,6 +327,110 @@ fn bool is_ident(TokenType t)
 	return t == IDENT || t == AT_IDENT;
 }
 
+// --- Balanced-brace / module-path helpers -----------------------------------
+// C3 generics use braces at call/declaration sites (`Foo{int}`, `foo{Bar}(...)`,
+// `fn List{int} get_list()`), so a `{` is not necessarily a function body. The
+// scanners below let forward/backward walks skip a balanced `{...}` block instead
+// of stopping at the first brace. Reused across completion/definition/signature/
+// symbols to avoid the same depth-counting loop being copy-pasted everywhere.
+
+// Given the index of an LBRACE token, returns the index of its matching RBRACE.
+// Returns self.size if the braces are unbalanced (caller treats it as end-of-scan).
+fn sz TokenList.match_rbrace(&self, sz lbrace_idx)
+{
+	sz depth = 0;
+	for (sz j = lbrace_idx; j < self.size; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == LBRACE)
+		{
+			depth++;
+		}
+		else if (t == RBRACE)
+		{
+			depth--;
+			if (depth == 0) return j;
+		}
+	}
+	return self.size;
+}
+
+// Given the index of an RBRACE token, returns the index of its matching LBRACE by
+// scanning backward. Returns self.size if the braces are unbalanced.
+fn sz TokenList.match_lbrace_back(&self, sz rbrace_idx)
+{
+	sz depth = 0;
+	for (sz j = rbrace_idx; ; j--)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == RBRACE)
+		{
+			depth++;
+		}
+		else if (t == LBRACE)
+		{
+			depth--;
+			if (depth == 0) return j;
+		}
+		if (j == 0) break;
+	}
+	return self.size;
+}
+
+// Builds the "a::b::c" module path from the tokens following a MODULE keyword at
+// mod_idx: accumulates ident/type/const segments, skips SCOPE (::), and stops at
+// the first other token (e.g. EOS, or `<` of a generic module declaration).
+fn String TokenList.module_path_at(&self, sz mod_idx)
+{
+	DString path = dstring::temp();
+	bool first = true;
+	for (sz j = mod_idx + 1; j < self.size; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (is_ident(t) || t == TYPE_IDENT || t == CONST_IDENT)
+		{
+			if (!first) path.append("::");
+			path.append(self.entries[j].text);
+			first = false;
+		}
+		else if (t == SCOPE)
+		{
+			continue;
+		}
+		else
+		{
+			break;
+		}
+	}
+	return path.str_view();
+}
+
+// Returns the module path of the declaration at decl_idx by scanning backward to
+// the nearest preceding MODULE keyword (or "" if the declaration is module-less).
+fn String TokenList.module_of_decl(&self, sz decl_idx)
+{
+	for (sz j = decl_idx; ; j--)
+	{
+		if (self.entries[j].type == MODULE) return self.module_path_at(j);
+		if (j == 0) break;
+	}
+	return "";
+}
+
+// From decl_idx, find the first `{` and return the index of its matching `}`, so a
+// loop iterating top-level declarations can skip a type body `{...}` (e.g. an
+// interface's method declarations, which must not be scanned as module functions).
+// Returns decl_idx unchanged when there is no body before the end of the declaration.
+fn sz TokenList.skip_type_body(&self, sz decl_idx)
+{
+	for (sz j = decl_idx; j < self.size; j++)
+	{
+		if (self.entries[j].type == LBRACE) return self.match_rbrace(j);
+		if (self.entries[j].type == EOS) return decl_idx;
+	}
+	return decl_idx;
+}
+
 // Returns a human-readable description for a token (used in hover).
 fn String get_token_description(TokenType t, String text)
 {

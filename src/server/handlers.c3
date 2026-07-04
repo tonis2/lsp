@@ -52,6 +52,16 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 		}
 	}
 
+	// If no stdlib path was supplied (via CLI or client settings), ask the resolved
+	// compiler where it is installed and derive <install dir>/lib/std. Runs after the
+	// overrides above so a client-configured compiler-path is honored. detect_stdlib_path
+	// never throws, so a bad compiler-path just leaves stdlib_path empty.
+	if (self.stdlib_path.len == 0)
+	{
+		String detected = detect_stdlib_path(self.compiler_path);
+		if (detected.len > 0) self.stdlib_path = detected;
+	}
+
 	DString result = dstring::temp();
 	result.append(`{"capabilities":{`);
 	result.append(`"textDocumentSync":{"openClose":true,"change":1,"save":true},`);
@@ -64,13 +74,15 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 	result.append(`"foldingRangeProvider":true,`);
 	result.append(`"documentSymbolProvider":true,`);
 	result.append(`"hoverProvider":true,`);
-	result.append(`"completionProvider":{"triggerCharacters":[".","$","@","#"]},`);
+	// ':' is registered so module-path completion can trigger, but only the second ':'
+	// of '::' actually produces items (a lone ':' is neutralized in encode_completions).
+	result.append(`"completionProvider":{"triggerCharacters":[".",":","$","@","#"]},`);
 	result.append(`"definitionProvider":true,`);
 	result.append(`"declarationProvider":true,`);
 	result.append(`"documentHighlightProvider":true,`);
 	result.append(`"referencesProvider":true,`);
 	result.append(`"renameProvider":true,`);
-	result.append(`"signatureHelpProvider":{"triggerCharacters":["(",","]}`);
+	result.append(`"signatureHelpProvider":{"triggerCharacters":["(",",","{","}"]}`);
 	result.append(`},`);
 	result.appendf(`"serverInfo":{"name":"c3-lsp","version":"%s"}}`, VERSION);
 
@@ -340,7 +352,16 @@ fn void LspServer.handle_completion(&self, Object* msg, String id_json)
 
 	DString data = dstring::temp();
 	encode_completions(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
-	send_response(id_json, data.str_view());
+	// Never forward an empty buffer as the JSON-RPC result — that yields `"result":`
+	// (invalid JSON) and drops the connection. Fall back to an empty completion list.
+	if (data.str_view().len == 0)
+	{
+		send_response(id_json, `{"isIncomplete":false,"items":[]}`);
+	}
+	else
+	{
+		send_response(id_json, data.str_view());
+	}
 }
 
 fn void LspServer.handle_definition(&self, Object* msg, String id_json)

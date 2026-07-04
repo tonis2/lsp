@@ -324,3 +324,39 @@ fn void test_definition_at_ident_macro() @test {
 	assert(result.contains(`"line":0`), "got: %s", result);
 	assert(result.contains(`"character":6`), "got: %s", result);
 }
+
+// A generic-typed local variable resolves its method: `List{int} list; list.add()`.
+fn void test_definition_generic_type_var() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "struct List<Type> {}\nfn void List.add(&self) {}\nfn void test() {\n\tList{int} list;\n\tlist.add();\n}";
+	encode_definition("file:///test.c3", content, 88, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":13`), "got: %s", result);
+}
+
+// A generic-typed struct field resolves its method: `List{int} lst; c.lst.push()`.
+fn void test_definition_generic_struct_field() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "struct List<Type> {}\nfn void List.push(&self) {}\nstruct Container {\n\tList{int} lst;\n}\nfn void test(Container c) {\n\tc.lst.push();\n}";
+	encode_definition("file:///test.c3", content, 121, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":13`), "got: %s", result);
+}
+
+// A generic return type resolves the chained method: `fn List{int} get_list()` → `.pop()`.
+fn void test_definition_generic_fn_return() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "struct List<Type> {}\nfn void List.pop(&self) {}\nfn List{int} get_list() {}\nfn void test() {\n\tget_list().pop();\n}";
+	encode_definition("file:///test.c3", content, 104, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":13`), "got: %s", result);
+}

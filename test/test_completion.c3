@@ -657,3 +657,95 @@ fn void test_completion_enum_members_no_leak() @test {
 	// EnumMember (kind 20) — enum members are only emitted in dot context.
 	assert(!result.contains(`"kind":20`), "enum members should not leak into non-dot completion, got: %s", result);
 }
+
+// A lone ':' (not '::') must still produce a VALID (empty) completion list, never an
+// empty buffer — an empty buffer becomes `"result":` (invalid JSON) and kills the client.
+fn void test_completion_lone_colon_valid_json() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// Cursor right after a single ':' in a case label.
+	String content = "fn void t() { switch (x) { case 1:";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.len > 0, "must emit a valid JSON body, not empty");
+	assert(result.contains(`"items":[]`), "expected empty items list, got: %s", result);
+}
+
+// Single-character prefix on dot completion still filters fields correctly.
+fn void test_completion_dot_single_char_prefix() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct Foo { int x; String name; }\nfn void test() { Foo f; f.x";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"x"`), "expected field x, got: %s", result);
+	assert(!result.contains(`"label":"name"`), "field name should be filtered by prefix 'x', got: %s", result);
+}
+
+// Module-scope completion offers types but not methods or interface methods.
+fn void test_completion_module_scope_skips_methods() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	String mod_content = "module mymod;\nstruct Config {}\nfn void Config.my_method(&self) {}\ninterface InStream { fn void my_interface_method(); }";
+	docs.open("file:///mymod.c3", mod_content, 1);
+
+	String content = "module lsp;\nimport mymod;\nfn void main() { mymod::";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///mymod.c3");
+
+	assert(result.contains(`"label":"Config"`), "expected Config struct, got: %s", result);
+	assert(!result.contains(`"label":"my_method"`), "method should not appear, got: %s", result);
+	assert(!result.contains(`"label":"my_interface_method"`), "interface method should not appear, got: %s", result);
+}
+
+// Module-scope completion offers submodule names as Module items (kind 9).
+fn void test_completion_submodule_scope() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	docs.open("file:///io.c3", "module myproj::io;\nfn void write() {}", 1);
+	docs.open("file:///net.c3", "module myproj::net;\nfn void connect() {}", 1);
+
+	String content = "import myproj;\nfn void main() { myproj::";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	docs.close("file:///io.c3");
+	docs.close("file:///net.c3");
+
+	assert(result.contains(`"label":"io"`), "expected submodule io, got: %s", result);
+	assert(result.contains(`"label":"net"`), "expected submodule net, got: %s", result);
+	assert(result.contains(`"kind":9`), "expected Module kind 9, got: %s", result);
+}
+
+// A dot on a TYPE name suppresses instance fields/methods, but an enum type still
+// offers its members.
+fn void test_completion_dot_on_type_name() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	String mod_content = "module mymod;\nstruct Config { int val; }\nfn void Config.my_method(&self) {}\nenum Color { RED, GREEN }";
+	docs.open("file:///mymod.c3", mod_content, 1);
+
+	// Config. (a type name) — no instance field/method.
+	String content1 = "module lsp;\nimport mymod;\nfn void main() { Config.";
+	encode_completions("file:///main.c3", content1, content1.len, docs, "", &out);
+	String result1 = out.str_view();
+	assert(!result1.contains(`"label":"val"`), "field should not show on type receiver, got: %s", result1);
+	assert(!result1.contains(`"label":"my_method"`), "method should not show on type receiver, got: %s", result1);
+
+	// Color. (an enum type) — members are valid.
+	out.clear();
+	String content2 = "module lsp;\nimport mymod;\nfn void main() { Color.";
+	encode_completions("file:///main.c3", content2, content2.len, docs, "", &out);
+	String result2 = out.str_view();
+	assert(result2.contains(`"label":"RED"`), "expected enum member RED on type receiver, got: %s", result2);
+
+	docs.close("file:///mymod.c3");
+}

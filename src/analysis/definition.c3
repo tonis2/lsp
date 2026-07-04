@@ -348,35 +348,44 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 	loc.encode(out);
 }
 
-// Find the type name of a variable by scanning for TYPE_IDENT var_name or TYPE_IDENT* var_name patterns.
+// Find the type name of a variable by scanning for `TYPE_IDENT var`, `TYPE_IDENT* var`,
+// or the generic forms `TYPE_IDENT{...} var` / `TYPE_IDENT{...}* var`.
 fn String TokenList.find_variable_type(&self, String var_name)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
-		if (self.get(i).type == TYPE_IDENT)
+		if (self.get(i).type != TYPE_IDENT) continue;
+
+		// Skip an optional generic instantiation block: TYPE_IDENT{...}
+		sz after = i + 1;
+		if (self.entries[after].type == LBRACE)
 		{
-			// Direct: TYPE_IDENT var_name
-			if (is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == var_name)
+			after = self.match_rbrace(after);
+			if (after >= self.size) continue;
+			after++; // position just past the closing '}'
+		}
+
+		// Direct: TYPE_IDENT{...} var
+		if (after < self.size && is_ident(self.entries[after].type) && self.entries[after].text == var_name)
+		{
+			if (after + 1 < self.size)
 			{
-				if (i + 2 < self.size)
+				TokenType next = self.entries[after + 1].type;
+				if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
 				{
-					TokenType next = self.entries[i + 2].type;
-					if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
-					{
-						return self.get(i).text;
-					}
+					return self.get(i).text;
 				}
 			}
-			// Pointer: TYPE_IDENT* var_name
-			if (i + 2 < self.size && self.entries[i + 1].type == STAR && is_ident(self.entries[i + 2].type) && self.entries[i + 2].text == var_name)
+		}
+		// Pointer: TYPE_IDENT{...}* var
+		if (after + 1 < self.size && self.entries[after].type == STAR && is_ident(self.entries[after + 1].type) && self.entries[after + 1].text == var_name)
+		{
+			if (after + 2 < self.size)
 			{
-				if (i + 3 < self.size)
+				TokenType next = self.entries[after + 2].type;
+				if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
 				{
-					TokenType next = self.entries[i + 3].type;
-					if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
-					{
-						return self.get(i).text;
-					}
+					return self.get(i).text;
 				}
 			}
 		}
@@ -520,6 +529,14 @@ fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, Docu
 		{
 			if (lparen == 0) return "";
 			sz name_idx = lparen - 1;
+			// Generic function call `name{Args}(...)`: step back over the `{...}`
+			// block so the callee name (before `{`), not the closing brace, is used.
+			if (self.entries[name_idx].type == RBRACE)
+			{
+				sz lbrace = self.match_lbrace_back(name_idx);
+				if (lbrace >= self.size || lbrace == 0) return "";
+				name_idx = lbrace - 1;
+			}
 			Token callee = self.entries[name_idx];
 			if (!is_ident(callee.type)) return "";
 			if (name_idx >= 1 && self.entries[name_idx - 1].type == DOT)
@@ -604,7 +621,13 @@ fn String TokenList.find_enclosing_method_type(&self, sz offset)
 				}
 				break;
 			}
-			if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
+			if (self.entries[j].type == LBRACE)
+			{
+				j = self.match_rbrace(j);
+				if (j >= self.size) break;
+				continue;
+			}
+			if (self.entries[j].type == EOS) break;
 		}
 		break;
 	}
@@ -771,7 +794,14 @@ fn String TokenList.find_function_return_type(&self, String name)
 				}
 				break;
 			}
-			if (jt == LBRACE || jt == EOS) break;
+			// Skip a generic type block `{...}` (e.g. generic return type) — not the body.
+			if (jt == LBRACE)
+			{
+				j = self.match_rbrace(j);
+				if (j >= self.size) break;
+				continue;
+			}
+			if (jt == EOS) break;
 		}
 	}
 	return "";
@@ -798,7 +828,14 @@ fn String TokenList.find_method_return_type(&self, String type_name, String meth
 				}
 				break;
 			}
-			if (jt == LBRACE || jt == EOS) break;
+			// Skip a generic type block `{...}` (e.g. generic return type) — not the body.
+			if (jt == LBRACE)
+			{
+				j = self.match_rbrace(j);
+				if (j >= self.size) break;
+				continue;
+			}
+			if (jt == EOS) break;
 		}
 	}
 	return "";
@@ -948,15 +985,20 @@ fn String TokenList.find_struct_field_type(&self, String type_name, String field
 			}
 			if (depth == 1 && is_ident(self.entries[j].type) && self.entries[j].text == field_name)
 			{
-				// The type is the TYPE_IDENT before the field name
-				if (j > 0 && self.entries[j - 1].type == TYPE_IDENT)
+				if (j == 0) continue;
+				// The type sits just before the field name; step over an optional
+				// pointer `*` and an optional generic block `{...}` (e.g. List{int} lst).
+				sz prev = j - 1;
+				if (prev > 0 && self.entries[prev].type == STAR) prev--;
+				if (prev > 0 && self.entries[prev].type == RBRACE)
 				{
-					return self.entries[j - 1].text;
+					sz lbrace = self.match_lbrace_back(prev);
+					if (lbrace >= self.size || lbrace == 0) continue;
+					prev = lbrace - 1;
 				}
-				// Could also be TYPE_IDENT* field (pointer)
-				if (j > 1 && self.entries[j - 1].type == STAR && self.entries[j - 2].type == TYPE_IDENT)
+				if (self.entries[prev].type == TYPE_IDENT)
 				{
-					return self.entries[j - 2].text;
+					return self.entries[prev].text;
 				}
 			}
 		}
@@ -1130,12 +1172,50 @@ fn bool scan_dir_struct_field(String dir_path, String type_name, String field_na
 	return false;
 }
 
+// If the token at cursor_idx is preceded by a `::`, returns the module path written
+// in front of it (e.g. cursor on `bar` in `foo::baz::bar` yields "foo::baz").
+// Returns "" when the identifier is not module-qualified.
+fn String TokenList.resolve_module_prefix(&self, sz cursor_idx)
+{
+	if (cursor_idx < 2) return "";
+	if (self.entries[cursor_idx - 1].type != SCOPE) return "";
+
+	// Walk back over the qualifier chain (idents and `::`) to its start.
+	sz start_idx = cursor_idx - 1;
+	while (start_idx > 0)
+	{
+		TokenType prev_t = self.entries[start_idx - 1].type;
+		if (prev_t == IDENT || prev_t == TYPE_IDENT || prev_t == SCOPE)
+		{
+			start_idx--;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	DString mod_path = dstring::temp();
+	bool first = true;
+	for (sz i = start_idx; i < cursor_idx - 1; i++)
+	{
+		TokenType t = self.entries[i].type;
+		if (t == IDENT || t == TYPE_IDENT)
+		{
+			if (!first) mod_path.append("::");
+			mod_path.append(self.entries[i].text);
+			first = false;
+		}
+	}
+	return mod_path.str_view();
+}
+
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
 // Returns true if a definition was found and emitted.
-fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, String uri, String content, DocumentList* docs, String stdlib_path, DString* out, String method_type = "")
+fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, String uri, String content, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "")
 {
 	// 1. Search current file
-	if (try decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type))
+	if (try decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type, module_filter))
 	{
 		if (decl_idx != cursor_idx)
 		{
@@ -1151,7 +1231,7 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 
 		TokenStream* other_stream = docs.entries[d].get_tokens();
 
-		if (try found = other_stream.tokens.find_declaration_in(cursor_tok, method_type))
+		if (try found = other_stream.tokens.find_declaration_in(cursor_tok, method_type, module_filter))
 		{
 			emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
 			return true;
@@ -1162,7 +1242,7 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 	String file_path = uri_to_path(uri);
 	if (file_path.len > 0)
 	{
-		if (try found = scan_project_files(file_path, cursor_tok, out, method_type))
+		if (try found = scan_project_files(file_path, cursor_tok, out, method_type, module_filter))
 		{
 			if (found) return true;
 		}
@@ -1171,7 +1251,7 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 	// 4. Scan stdlib path
 	if (stdlib_path.len > 0)
 	{
-		if (scan_dir_recursive(stdlib_path, cursor_tok, out, 0, method_type))
+		if (scan_dir_recursive(stdlib_path, cursor_tok, out, 0, method_type, module_filter))
 		{
 			return true;
 		}
@@ -1264,8 +1344,17 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 		}
 	}
 
-	// Regular search (non-method)
-	stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out);
+	// Regular search (non-method). If the identifier was written module-qualified
+	// (e.g. `foo::bar`), restrict the search to that module to disambiguate same-named
+	// symbols. The prefix is resolved to a full import path when possible.
+	String module_filter = "";
+	String mod_prefix = stream.tokens.resolve_module_prefix(cursor_idx);
+	if (mod_prefix.len > 0)
+	{
+		module_filter = resolve_module_name(content, mod_prefix);
+		if (module_filter.len == 0) module_filter = mod_prefix;
+	}
+	stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, "", module_filter);
 }
 
 // Find an enum/faultdef/constdef member named `name`. Handles both the block form
@@ -1314,14 +1403,25 @@ fn sz? TokenList.find_enum_or_constdef_member(&self, String name)
 }
 
 // Search for a declaration in a token stream (not tied to a cursor position).
-fn sz? TokenList.find_declaration_in(&self, Token target, String method_type = "")
+fn sz? TokenList.find_declaration_in(&self, Token target, String method_type = "", String module_filter = "")
 {
-	return self.find_declaration(target, self.size, method_type);
+	return self.find_declaration(target, self.size, method_type, module_filter);
+}
+
+// True when the declaration at decl_idx satisfies the module-qualification filter.
+// An empty filter always matches; otherwise the declaration's enclosing module
+// (nearest preceding `module` keyword) must match. Used to disambiguate same-named
+// symbols across modules when a call was written qualified (e.g. `foo::get`).
+fn bool TokenList.decl_in_filter(&self, sz decl_idx, String module_filter)
+{
+	if (module_filter.len == 0) return true;
+	return module_matches_filter(self.module_of_decl(decl_idx), module_filter);
 }
 
 // Searches for the declaration of a token in the token stream.
 // When method_type is non-empty, searches for fn Type.name( pattern only.
-fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String method_type = "")
+// When module_filter is non-empty, only declarations in the matching module match.
+fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String method_type = "", String module_filter = "")
 {
 	String name = target.text;
 
@@ -1333,7 +1433,8 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 				TokenType kw = self.get(i).type;
 				if (is_type_declaration_keyword(kw))
 				{
-					if (self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == name)
+					if (self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == name
+						&& self.decl_in_filter(i + 1, module_filter))
 					{
 						return i + 1;
 					}
@@ -1343,7 +1444,8 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 			// constdef NAME
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (self.get(i).type == CONSTDEF && self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name)
+				if (self.get(i).type == CONSTDEF && self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name
+					&& self.decl_in_filter(i + 1, module_filter))
 				{
 					return i + 1;
 				}
@@ -1353,12 +1455,14 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 			{
 				if (self.get(i).type != CONST) continue;
 				// const NAME = ... (no type)
-				if (self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name)
+				if (self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name
+					&& self.decl_in_filter(i + 1, module_filter))
 				{
 					return i + 1;
 				}
 				// const Type NAME = ... (with type)
-				if (i + 2 < self.size && is_type_token(self.entries[i + 1].type) && self.entries[i + 2].type == CONST_IDENT && self.entries[i + 2].text == name)
+				if (i + 2 < self.size && is_type_token(self.entries[i + 1].type) && self.entries[i + 2].type == CONST_IDENT && self.entries[i + 2].text == name
+					&& self.decl_in_filter(i + 2, module_filter))
 				{
 					return i + 2;
 				}
@@ -1384,7 +1488,14 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 							}
 							break;
 						}
-						if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
+						// Skip a generic type block `{...}` before the `(` — not the body.
+						if (self.entries[j].type == LBRACE)
+						{
+							j = self.match_rbrace(j);
+							if (j >= self.size) break;
+							continue;
+						}
+						if (self.entries[j].type == EOS) break;
 					}
 				}
 				return TOKEN_NOT_FOUND~;
@@ -1397,19 +1508,28 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 				{
 					if (self.entries[j].type == LPAREN)
 					{
-						if (j > 0 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name)
+						if (j > 0 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
+							&& self.decl_in_filter(j - 1, module_filter))
 						{
 							return j - 1;
 						}
 						break;
 					}
-					if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
+					// Skip a generic type block `{...}` before the `(` — not the body.
+					if (self.entries[j].type == LBRACE)
+					{
+						j = self.match_rbrace(j);
+						if (j >= self.size) break;
+						continue;
+					}
+					if (self.entries[j].type == EOS) break;
 				}
 			}
 			// macro name (no parens)
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (self.get(i).type == MACRO && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name)
+				if (self.get(i).type == MACRO && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name
+					&& self.decl_in_filter(i + 1, module_filter))
 				{
 					return i + 1;
 				}
@@ -1422,7 +1542,7 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 					if (i + 2 < self.size)
 					{
 						TokenType next = self.entries[i + 2].type;
-						if (next == EQ || next == EOS || next == COMMA)
+						if ((next == EQ || next == EOS || next == COMMA) && self.decl_in_filter(i + 1, module_filter))
 						{
 							return i + 1;
 						}
@@ -1437,7 +1557,7 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 }
 
 // Scan project directories for a declaration on disk.
-fn bool? scan_project_files(String file_path, Token target, DString* out, String method_type = "") @private
+fn bool? scan_project_files(String file_path, Token target, DString* out, String method_type = "", String module_filter = "") @private
 {
 	ProjectDirs pdirs;
 	pdirs.get_search_dirs(file_path);
@@ -1447,7 +1567,7 @@ fn bool? scan_project_files(String file_path, Token target, DString* out, String
 	{
 		DString search_path = dstring::temp();
 		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		if (scan_dir_recursive(search_path.str_view(), target, out, 0, method_type))
+		if (scan_dir_recursive(search_path.str_view(), target, out, 0, method_type, module_filter))
 		{
 			return true;
 		}
@@ -1457,7 +1577,7 @@ fn bool? scan_project_files(String file_path, Token target, DString* out, String
 
 const int MAX_SCAN_DEPTH = 5;
 
-fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int depth, String method_type = "") @private
+fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int depth, String method_type = "", String module_filter = "") @private
 {
 	if (depth > MAX_SCAN_DEPTH) return false;
 
@@ -1506,7 +1626,7 @@ fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int dept
 			TokenStream* stream = file_token_stream(full_path, &owned, &content, &owns);
 			if (stream != null)
 			{
-				if (try found = stream.tokens.find_declaration_in(target, method_type))
+				if (try found = stream.tokens.find_declaration_in(target, method_type, module_filter))
 				{
 					// Build file:// URI from path
 					DString uri = dstring::temp();
@@ -1521,7 +1641,7 @@ fn bool scan_dir_recursive(String dir_path, Token target, DString* out, int dept
 		else
 		{
 			// Try to recurse into subdirectories
-			if (scan_dir_recursive(full_path, target, out, depth + 1, method_type))
+			if (scan_dir_recursive(full_path, target, out, depth + 1, method_type, module_filter))
 			{
 				return true;
 			}

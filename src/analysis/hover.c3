@@ -91,10 +91,22 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 							}
 						}
 
-						// Regular (non-method) hover if method resolution didn't find anything
+						// Regular (non-method) hover if method resolution didn't find anything.
+						// If the token was written module-qualified (`foo::bar`), restrict the
+						// doc search to that module to disambiguate same-named symbols.
 						if (doc.str_view().len == 0)
 						{
-							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc);
+							String module_filter = "";
+							if (have_idx)
+							{
+								String mod_prefix = hover_stream.tokens.resolve_module_prefix(hover_idx);
+								if (mod_prefix.len > 0)
+								{
+									module_filter = resolve_module_name(content, mod_prefix);
+									if (module_filter.len == 0) module_filter = mod_prefix;
+								}
+							}
+							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, "", module_filter);
 						}
 					}
 					if (hover_owns) hover_owned.free();
@@ -144,7 +156,7 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 
 // Search for the declaration of a token and extract its doc comment + signature.
 // Searches: current file -> open documents -> project files -> stdlib.
-fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out, String method_type = "") @private
+fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "") @private
 {
 	// Cached token stream for the current document (reused across the searches below).
 	TokenStream cur_owned;
@@ -155,45 +167,45 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 	// If method type specified, try method-specific search first with each type candidate
 	if (method_type.len > 0)
 	{
-		if (try_extract_docs_from(content, cursor_tok, out, method_type, cur_stream)) return;
+		if (try_extract_docs_from(content, cursor_tok, out, method_type, cur_stream, module_filter)) return;
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
-			if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, method_type, docs.entries[d].get_tokens())) return;
+			if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, method_type, docs.entries[d].get_tokens(), module_filter)) return;
 		}
 		String file_path = uri_to_path(uri);
 		if (file_path.len > 0)
 		{
-			if (scan_project_docs(file_path, cursor_tok, out, method_type)) return;
+			if (scan_project_docs(file_path, cursor_tok, out, method_type, module_filter)) return;
 		}
 		if (stdlib_path.len > 0)
 		{
-			if (scan_dir_docs(stdlib_path, cursor_tok, out, 0, method_type)) return;
+			if (scan_dir_docs(stdlib_path, cursor_tok, out, 0, method_type, module_filter)) return;
 		}
 		return;
 	}
 
 	// 1. Current file
-	if (try_extract_docs_from(content, cursor_tok, out, "", cur_stream)) return;
+	if (try_extract_docs_from(content, cursor_tok, out, "", cur_stream, module_filter)) return;
 
 	// 2. Open documents
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, "", docs.entries[d].get_tokens())) return;
+		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, "", docs.entries[d].get_tokens(), module_filter)) return;
 	}
 
 	// 3. Project files on disk
 	String file_path = uri_to_path(uri);
 	if (file_path.len > 0)
 	{
-		if (scan_project_docs(file_path, cursor_tok, out)) return;
+		if (scan_project_docs(file_path, cursor_tok, out, "", module_filter)) return;
 	}
 
 	// 4. Stdlib
 	if (stdlib_path.len > 0)
 	{
-		if (scan_dir_docs(stdlib_path, cursor_tok, out, 0)) return;
+		if (scan_dir_docs(stdlib_path, cursor_tok, out, 0, "", module_filter)) return;
 	}
 }
 
@@ -249,7 +261,7 @@ fn bool try_extract_field_docs_from(String content, String type_name, String fie
 }
 
 // Tokenize content, find the declaration of target, and extract doc comment + signature.
-fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "", TokenStream* cached = null) @private
+fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "", TokenStream* cached = null, String module_filter = "") @private
 {
 	TokenStream owned;
 	TokenStream* stream;
@@ -257,7 +269,7 @@ fn bool try_extract_docs_from(String content, Token target, DString* out, String
 	else { owned = token_stream_tokenize(content); stream = &owned; }
 	defer { if (cached == null) owned.free(); }
 
-	if (try decl_idx = stream.tokens.find_declaration_in(target, method_type))
+	if (try decl_idx = stream.tokens.find_declaration_in(target, method_type, module_filter))
 	{
 		stream.tokens.extract_docs_at(content, decl_idx, out);
 		return out.str_view().len > 0;
@@ -410,7 +422,7 @@ fn String strip_comment_markers(String text) @private
 }
 
 // Scan project dirs for hover docs (mirrors scan_project_files pattern).
-fn bool scan_project_docs(String file_path, Token target, DString* out, String method_type = "") @private
+fn bool scan_project_docs(String file_path, Token target, DString* out, String method_type = "", String module_filter = "") @private
 {
 	ProjectDirs pdirs;
 	pdirs.get_search_dirs(file_path);
@@ -420,12 +432,12 @@ fn bool scan_project_docs(String file_path, Token target, DString* out, String m
 	{
 		DString search_path = dstring::temp();
 		search_path.appendf("%s/%s", pdirs.project_root, pdirs.dirs[i]);
-		if (scan_dir_docs(search_path.str_view(), target, out, 0, method_type)) return true;
+		if (scan_dir_docs(search_path.str_view(), target, out, 0, method_type, module_filter)) return true;
 	}
 	return false;
 }
 
-fn bool scan_dir_docs(String dir_path, Token target, DString* out, int depth, String method_type = "") @private
+fn bool scan_dir_docs(String dir_path, Token target, DString* out, int depth, String method_type = "", String module_filter = "") @private
 {
 	if (depth > MAX_SCAN_DEPTH) return false;
 
@@ -471,14 +483,14 @@ fn bool scan_dir_docs(String dir_path, Token target, DString* out, int depth, St
 			TokenStream* stream = file_token_stream(full_path, &owned, &fc, &owns);
 			if (stream != null)
 			{
-				bool found = try_extract_docs_from(fc, target, out, method_type, stream);
+				bool found = try_extract_docs_from(fc, target, out, method_type, stream, module_filter);
 				if (owns) { owned.free(); mem::free((char*)fc.ptr); }
 				if (found) return true;
 			}
 		}
 		else
 		{
-			if (scan_dir_docs(full_path, target, out, depth + 1, method_type)) return true;
+			if (scan_dir_docs(full_path, target, out, depth + 1, method_type, module_filter)) return true;
 		}
 	}
 	return false;

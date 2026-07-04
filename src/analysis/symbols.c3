@@ -6,12 +6,12 @@ import std::collections::list;
 import c3::lexer;
 
 const sz MAX_LOOKAHEAD = 64;
-const sz MAX_SYMBOLS = 512;
+const sz MAX_SYMBOLS   = 512;
 
 struct SymbolEntry
 {
 	DocumentSymbol sym;
-	String parent_type;  // For "Type.method", this is "Type"; empty otherwise
+	String parent_type; // For "Type.method", this is "Type"; empty otherwise
 	bool is_child;
 }
 
@@ -19,9 +19,19 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 {
 	TokenStream owned;
 	TokenStream* stream;
-	if (cached != null) { stream = cached; }
-	else { owned = token_stream_tokenize(content); stream = &owned; }
-	defer { if (cached == null) owned.free(); }
+	if (cached != null)
+	{
+		stream = cached;
+	}
+	else
+	{
+		owned = token_stream_tokenize(content);
+		stream = &owned;
+	}
+	defer
+	{
+		if (cached == null) owned.free();
+	}
 	LineOffsets* lo = stream.get_line_offsets();
 
 	// Collect all symbols first. Heap-backed lists (not fixed stack arrays) so large
@@ -32,15 +42,15 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
-		Token tok = stream.tokens.entries[i];
-		String name = "";
+		Token tok          = stream.tokens.entries[i];
+		String name        = "";
 		String parent_type = "";
-		int kind = 0;
-		sz name_offset = 0;
-		sz name_len = 0;
-		sz decl_offset = tok.offset;
-		sz end_offset = 0;
-		bool has_braces = false;
+		int kind           = 0;
+		sz name_offset     = 0;
+		sz name_len        = 0;
+		sz decl_offset     = tok.offset;
+		sz end_offset      = 0;
+		bool has_braces    = false;
 
 		switch (tok.type)
 		{
@@ -50,9 +60,15 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 				{
 					Token first = stream.tokens.entries[i + 1];
 					sz path_end = stream.tokens.scope_path_end(i + 1);
-					push_module_symbol(&syms, lo, content,
-						first.offset, path_end - first.offset, tok.offset,
-						stream.tokens.find_eos_end(i + 2));
+					push_module_symbol(
+						&syms,
+						lo,
+						content,
+						first.offset,
+						path_end - first.offset,
+						tok.offset,
+						stream.tokens.find_eos_end(i + 2)
+					);
 				}
 				continue;
 			case IMPORT:
@@ -64,16 +80,20 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 				{
 					Token first = stream.tokens.entries[j];
 					sz path_end = stream.tokens.scope_path_end(j);
-					push_module_symbol(&syms, lo, content,
-						first.offset, path_end - first.offset, tok.offset, eos_end);
+					push_module_symbol(&syms, lo, content, first.offset, path_end - first.offset, tok.offset, eos_end);
 					// advance past this path
 					sz k = j + 1;
-					while (k + 1 < stream.tokens.size
-						&& stream.tokens.entries[k].type == SCOPE
+					while (k + 1 < stream.tokens.size && stream.tokens.entries[k].type == SCOPE
 						&& stream.tokens.entries[k + 1].type == IDENT) k += 2;
 					// skip a separating comma, else stop
-					if (k < stream.tokens.size && stream.tokens.entries[k].type == COMMA) { j = k + 1; }
-					else { break; }
+					if (k < stream.tokens.size && stream.tokens.entries[k].type == COMMA)
+					{
+						j = k + 1;
+					}
+					else
+					{
+						break;
+					}
 				}
 				continue;
 			case FUNC:
@@ -87,8 +107,15 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 						lparen_idx = j;
 						break;
 					}
-					// Stop on LBRACE/EOS (malformed)
-					if (stream.tokens.entries[j].type == LBRACE || stream.tokens.entries[j].type == EOS) break;
+					// A `{...}` here is a generic type block (e.g. return type `List{int}`),
+					// not the body — skip it and keep scanning for the name's `(`.
+					if (stream.tokens.entries[j].type == LBRACE)
+					{
+						j = stream.tokens.match_rbrace(j);
+						if (j >= stream.tokens.size) break;
+						continue;
+					}
+					if (stream.tokens.entries[j].type == EOS) break;
 				}
 				if (lparen_idx > 0 && lparen_idx > i + 1)
 				{
@@ -96,7 +123,8 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 					if (is_ident(fn_name.type))
 					{
 						// Check for Type.method pattern
-						if (lparen_idx >= 3 + i && stream.tokens.entries[lparen_idx - 2].type == DOT && stream.tokens.entries[lparen_idx - 3].type == TYPE_IDENT)
+						if (lparen_idx >= 3 + i && stream.tokens.entries[lparen_idx - 2].type == DOT
+							&& stream.tokens.entries[lparen_idx - 3].type == TYPE_IDENT)
 						{
 							parent_type = stream.tokens.entries[lparen_idx - 3].text;
 							name = fn_name.text;
@@ -208,29 +236,31 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 		// Build range and selectionRange using line offsets
 		sz decl_line = lo.find_line(decl_offset);
 		sz decl_char = decl_offset - lo.entries[decl_line];
-		sz end_line = lo.find_line(end_offset > 0 ? end_offset - 1 : 0);
-		sz end_char = (end_offset > 0 ? end_offset : 1) - lo.entries[end_line];
+		sz end_line  = lo.find_line(end_offset > 0 ? end_offset - 1 : 0);
+		sz end_char  = (end_offset > 0 ? end_offset : 1) - lo.entries[end_line];
 
-		sz sel_line = lo.find_line(name_offset);
-		sz sel_char = name_offset - lo.entries[sel_line];
+		sz sel_line     = lo.find_line(name_offset);
+		sz sel_char     = name_offset - lo.entries[sel_line];
 		sz sel_end_line = sel_line;
 		sz sel_end_char = sel_char + name_len;
 
-		syms.push({
-			.sym = {
-				.name = name,
-				.kind = kind,
-				.range = {
-					.start = {.line = decl_line, .character = decl_char},
-					.end = {.line = end_line, .character = end_char},
+		syms.push(
+			{
+				.sym = {
+					.name = name,
+					.kind = kind,
+					.range = {
+						.start = { .line = decl_line, .character = decl_char },
+						.end = { .line = end_line, .character = end_char },
+					},
+					.selection_range = {
+						.start = { .line = sel_line, .character = sel_char },
+						.end = { .line = sel_end_line, .character = sel_end_char },
+					},
 				},
-				.selection_range = {
-					.start = {.line = sel_line, .character = sel_char},
-					.end = {.line = sel_end_line, .character = sel_end_char},
-				},
-			},
-			.parent_type = parent_type,
-		});
+				.parent_type = parent_type,
+			}
+		);
 	}
 
 	// Second pass: nest methods under their parent type symbols.
@@ -292,8 +322,15 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 
 // Emit a Module (kind 2) symbol whose name is the full scoped path
 // content[name_offset:name_len]. Mirrors the inline entry-build for other kinds.
-fn void push_module_symbol(List{SymbolEntry}* syms, LineOffsets* lo, String content,
-                           sz name_offset, sz name_len, sz decl_offset, sz end_offset)
+fn void push_module_symbol(
+	List{SymbolEntry}* syms,
+	LineOffsets* lo,
+	String content,
+	sz name_offset,
+	sz name_len,
+	sz decl_offset,
+	sz end_offset
+)
 {
 	if (end_offset == 0) end_offset = name_offset + name_len;
 
@@ -304,20 +341,22 @@ fn void push_module_symbol(List{SymbolEntry}* syms, LineOffsets* lo, String cont
 	sz sel_line  = lo.find_line(name_offset);
 	sz sel_char  = name_offset - lo.entries[sel_line];
 
-	syms.push({
-		.sym = {
-			.name = content[name_offset : name_len],
-			.kind = 2, // Module
-			.range = {
-				.start = {.line = decl_line, .character = decl_char},
-				.end   = {.line = end_line,  .character = end_char},
+	syms.push(
+		{
+			.sym = {
+				.name = content[name_offset:name_len],
+				.kind = 2, // Module
+				.range = {
+					.start = { .line = decl_line, .character = decl_char },
+					.end = { .line = end_line, .character = end_char },
+				},
+				.selection_range = {
+					.start = { .line = sel_line, .character = sel_char },
+					.end = { .line = sel_line, .character = sel_char + name_len },
+				},
 			},
-			.selection_range = {
-				.start = {.line = sel_line, .character = sel_char},
-				.end   = {.line = sel_line, .character = sel_char + name_len},
-			},
-		},
-	});
+		}
+	);
 }
 
 // Given the index of the first IDENT of a module path, walk (IDENT (SCOPE IDENT)*)
@@ -325,10 +364,8 @@ fn void push_module_symbol(List{SymbolEntry}* syms, LineOffsets* lo, String cont
 fn sz TokenList.scope_path_end(&self, sz first_ident_idx)
 {
 	sz last = first_ident_idx;
-	sz j = first_ident_idx + 1;
-	while (j + 1 < self.size
-		&& self.entries[j].type == SCOPE
-		&& self.entries[j + 1].type == IDENT)
+	sz j    = first_ident_idx + 1;
+	while (j + 1 < self.size && self.entries[j].type == SCOPE && self.entries[j + 1].type == IDENT)
 	{
 		last = j + 1;
 		j += 2;
@@ -350,7 +387,7 @@ fn sz TokenList.find_eos_end(&self, sz start)
 
 fn sz TokenList.find_brace_end(&self, sz start)
 {
-	sz depth = 0;
+	sz depth         = 0;
 	bool found_brace = false;
 	for (sz j = start; j < self.size; j++)
 	{

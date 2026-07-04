@@ -1,6 +1,7 @@
 module lsp;
 
 import std::core::dstring;
+import std::core::mem;
 
 fn void test_signature_basic() @test {
 	DString out = dstring::temp();
@@ -103,4 +104,47 @@ fn void test_signature_macro() @test {
 	String result = out.str_view();
 	assert(result.contains("swap"), "got: %s", result);
 	assert(result.contains(`"parameters"`), "got: %s", result);
+}
+
+// Cursor in the VALUE-arg list of a generic call `foo{Bar}(...)` → show value params.
+fn void test_signature_generic_function_param() @test {
+	DString out = dstring::temp();
+	String content = "fn void foo(int a, double b)<T> {}\nfoo{Bar}(1, ";
+	encode_signature_help(content, content.len, &out);
+	String result = out.str_view();
+	assert(result.contains("foo"), "got: %s", result);
+	assert(result.contains("double b"), "got: %s", result);
+	assert(result.contains(`"activeParameter":1`), "got: %s", result);
+}
+
+// Cursor in the GENERIC type-arg list `foo{...}` → show type params, not value params.
+fn void test_signature_generic_function_generic() @test {
+	DString out = dstring::temp();
+	String content = "fn void foo(int a, double b)<T, U> {}\nfoo{Bar, ";
+	encode_signature_help(content, content.len, &out);
+	String result = out.str_view();
+	assert(result.contains("foo"), "got: %s", result);
+	assert(result.contains(`"label":"U"`), "got: %s", result);
+	assert(result.contains(`"activeParameter":1`), "got: %s", result);
+}
+
+// A module-qualified generic call resolves to the right module's overload.
+fn void test_signature_module_qualification() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+
+	ds.open("file:///bar.c3", "module bar;\nfn void get(double x) {}", 1);
+	String content = "import foo;\nimport bar;\nfn void test() {\n\tfoo::get{int}(\n}";
+	ds.open("file:///test.c3", content, 1);
+	ds.open("file:///foo.c3", "module foo;\nfn void get(int x) {}", 1);
+
+	encode_signature_help(content, 56, &out, uri: "file:///test.c3", docs: ds);
+	String result = out.str_view();
+	assert(result.contains("int x"), "got: %s", result);
+	assert(!result.contains("double x"), "got: %s", result);
+
+	ds.close("file:///bar.c3");
+	ds.close("file:///foo.c3");
+	ds.close("file:///test.c3");
 }

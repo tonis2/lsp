@@ -176,6 +176,18 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 		}
 	}
 
+	// ':' is registered as a trigger character only so module-path completion can fire on
+	// the second ':' of '::'. A lone ':' (case labels, ternaries, bitstruct member types)
+	// must not spew a full completion list — return an empty (but valid) completion list
+	// when the cursor follows a single colon that is not a module scope. Emitting the empty
+	// list rather than nothing is important: the completion handler forwards this buffer
+	// verbatim as the JSON-RPC `result`, so an empty buffer would produce invalid JSON.
+	if (!is_dot_context && !is_scope_context && prefix.len == 0 && prefix_start > 0 && content[prefix_start - 1] == ':')
+	{
+		out.append(`{"isIncomplete":false,"items":[]}`);
+		return;
+	}
+
 	// Emit an explicit replacement range covering the typed prefix so the client
 	// overwrites it instead of inserting after it. Without this, VS Code's default
 	// "current word" range excludes leading $/@/# (e.g. "$str" + "$stringify" → "$$stringify").
@@ -388,27 +400,19 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 				// Track the current module section so later declarations are gated by it.
 				if (filter_module)
 				{
-					DString mod_path = dstring::temp();
-					bool first_part = true;
-					for (sz j = i + 1; j < stream.tokens.size; j++)
+					String declared_mod = stream.tokens.module_path_at(i);
+					in_target = module_path_matches(declared_mod, short_name, full_name);
+
+					// If the declared module is a *child* of the requested scope
+					// (e.g. scope "std", declared "std::io"), suggest the next path
+					// segment ("io") as a Module completion item (kind 9). This is
+					// what makes `import std::` / `std::io::` offer submodules.
+					String sub = next_submodule_segment(declared_mod, short_name);
+					if (sub.len == 0 && full_name.len > 0) sub = next_submodule_segment(declared_mod, full_name);
+					if (sub.len > 0 && sub != prefix && (prefix.len == 0 || starts_with_ci(sub, prefix)))
 					{
-						TokenType jt = stream.tokens.entries[j].type;
-						if (is_ident(jt) || jt == TYPE_IDENT || jt == CONST_IDENT)
-						{
-							if (!first_part) mod_path.append("::");
-							mod_path.append(stream.tokens.entries[j].text);
-							first_part = false;
-						}
-						else if (jt == SCOPE)
-						{
-							continue;
-						}
-						else
-						{
-							break;
-						}
+						emit_unique_completion(out, sub, 9, first, seen, seen_count);
 					}
-					in_target = module_path_matches(mod_path.str_view(), short_name, full_name);
 				}
 				continue;
 			case FUNC:
@@ -428,7 +432,15 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 						}
 						break;
 					}
-					if (stream.tokens.entries[j].type == LBRACE || stream.tokens.entries[j].type == EOS) break;
+					// A `{...}` here is a generic type block (e.g. return type
+					// `List{int}`), not the function body — skip it and keep scanning.
+					if (stream.tokens.entries[j].type == LBRACE)
+					{
+						j = stream.tokens.match_rbrace(j);
+						if (j >= stream.tokens.size) break;
+						continue;
+					}
+					if (stream.tokens.entries[j].type == EOS) break;
 				}
 				// macro name (no parens)
 				if (name.len == 0 && tt == MACRO && i + 1 < stream.tokens.size && is_ident(stream.tokens.entries[i + 1].type))
@@ -445,6 +457,9 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 					name = stream.tokens.entries[i + 1].text;
 					kind = 22; // Struct
 				}
+				// Skip the body so members (e.g. interface method decls) are not
+				// scanned as module-level declarations.
+				i = stream.tokens.skip_type_body(i + 1);
 			case ENUM:
 			case FAULTDEF:
 				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
@@ -452,6 +467,7 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 					name = stream.tokens.entries[i + 1].text;
 					kind = 13; // Enum
 				}
+				i = stream.tokens.skip_type_body(i + 1);
 			case ALIAS:
 				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
 				{
@@ -488,21 +504,67 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 		if (prefix.len > 0 && !starts_with_ci(name, prefix)) continue;
 		if (name == prefix) continue;
 
-		// Dedup
-		bool dup = false;
-		for (sz k = 0; k < *seen_count; k++)
-		{
-			if ((*seen)[k] == name) { dup = true; break; }
-		}
-		if (dup) continue;
-		if (*seen_count < MAX_DOC_IDENTS)
-		{
-			(*seen)[*seen_count] = name;
-			(*seen_count)++;
-		}
-
-		emit_completion_item(out, name, kind, first);
+		emit_unique_completion(out, name, kind, first, seen, seen_count);
 	}
+}
+
+// Emit a completion item for `name` unless it was already emitted; records it in
+// `seen` so repeated declarations (across files/modules) are shown only once.
+fn void emit_unique_completion(DString* out, String name, int kind, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+{
+	for (sz k = 0; k < *seen_count; k++)
+	{
+		if ((*seen)[k] == name) return;
+	}
+	if (*seen_count < MAX_DOC_IDENTS)
+	{
+		(*seen)[*seen_count] = name;
+		(*seen_count)++;
+	}
+	emit_completion_item(out, name, kind, first);
+}
+
+// If `declared` is a submodule of `target` (target is a proper segment-prefix, or a
+// middle span, of declared), returns the single path segment that follows target.
+// e.g. next_submodule_segment("std::io::file", "std") == "io"
+//      next_submodule_segment("std::io::file", "std::io") == "file"
+//      next_submodule_segment("std::io::file", "io") == "file"  (middle match)
+// Returns "" when declared is not a strict child of target.
+fn String next_submodule_segment(String declared, String target) @private
+{
+	if (target.len == 0 || declared.len <= target.len + 2) return "";
+
+	// Case 1: declared == "target::rest"
+	if (declared.starts_with(target) && declared[target.len] == ':' && declared[target.len + 1] == ':')
+	{
+		return first_path_segment(declared[target.len + 2..]);
+	}
+
+	// Case 2: declared == "...::target::rest"
+	DString needle = dstring::temp();
+	needle.appendf("::%s::", target);
+	String pat = needle.str_view();
+	if (try idx = declared.index_of(pat))
+	{
+		return first_path_segment(declared[idx + pat.len..]);
+	}
+	return "";
+}
+
+// Returns the first "::"-delimited segment of a module path ("io::file" → "io").
+fn String first_path_segment(String s) @private
+{
+	if (try idx = s.index_of("::")) return s[..idx - 1];
+	return s;
+}
+
+// True when `declared` satisfies an (optional) module-qualification filter: either
+// no filter is set, or `declared` matches the filter by full path / short name / last
+// segment. Wraps the module_path_matches predicate used across resolution searches.
+fn bool module_matches_filter(String declared, String filter) @private
+{
+	if (filter.len == 0) return true;
+	return module_path_matches(declared, last_module_segment(filter), filter);
 }
 
 // Resolve a short module name to its full path using imports.
@@ -769,6 +831,13 @@ fn void collect_callable_names(TokenStream* stream, String[MAX_DOC_IDENTS]* name
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
 		TokenType tt = stream.tokens.entries[i].type;
+		// Skip type bodies so an interface's method declarations aren't treated as
+		// free callable names.
+		if (tt == STRUCT || tt == BITSTRUCT || tt == UNION || tt == INTERFACE || tt == ENUM || tt == FAULTDEF)
+		{
+			i = stream.tokens.skip_type_body(i + 1);
+			continue;
+		}
 		if (tt != FUNC && tt != MACRO) continue;
 
 		String name = "";
@@ -783,7 +852,14 @@ fn void collect_callable_names(TokenStream* stream, String[MAX_DOC_IDENTS]* name
 				}
 				break;
 			}
-			if (stream.tokens.entries[j].type == LBRACE || stream.tokens.entries[j].type == EOS) break;
+			// Skip a generic type block `{...}` (e.g. a generic return type) — not the body.
+			if (stream.tokens.entries[j].type == LBRACE)
+			{
+				j = stream.tokens.match_rbrace(j);
+				if (j >= stream.tokens.size) break;
+				continue;
+			}
+			if (stream.tokens.entries[j].type == EOS) break;
 		}
 		// macro name (no parens)
 		if (name.len == 0 && tt == MACRO && i + 1 < stream.tokens.size && is_ident(stream.tokens.entries[i + 1].type))
@@ -934,29 +1010,38 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 
 	String struct_type = resolved_type.len > 0 ? resolved_type : recv_type;
 
+	// Is the receiver a *type name* (`Config.`) rather than an instance (`value.`)?
+	// On a type receiver, instance fields and methods are not accessible — only
+	// enum/faultdef members (e.g. `Color.RED`) are. The receiver token sits two
+	// positions before the cursor (…receiver `.` cursor).
+	bool type_receiver = cursor_idx >= 2 && stream.tokens.entries[cursor_idx - 2].type == TYPE_IDENT;
+
 	String[MAX_DOC_IDENTS] seen;
 	sz seen_count = 0;
 
-	// Collect struct fields (use resolved alias for struct lookup)
-	collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-	// Also try unresolved name for struct fields
-	if (struct_type != recv_type)
+	if (!type_receiver)
 	{
-		collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		// Collect struct fields (use resolved alias for struct lookup)
+		collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		// Also try unresolved name for struct fields
+		if (struct_type != recv_type)
+		{
+			collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		}
+
+		// Collect methods (try original alias name first, then resolved)
+		collect_type_methods(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		if (resolved_type.len > 0 && resolved_type != recv_type)
+		{
+			collect_type_methods(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		}
 	}
 
-	// Collect methods (try original alias name first, then resolved)
-	collect_type_methods(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+	// Collect enum members (Type.MEMBER) — valid for both type and instance receivers.
+	collect_enum_members(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
 	if (resolved_type.len > 0 && resolved_type != recv_type)
 	{
-		collect_type_methods(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-	}
-
-	// Collect enum members (Type.MEMBER) — for an enum/faultdef receiver
-	collect_enum_members(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-	if (resolved_type.len > 0 && resolved_type != recv_type)
-	{
-		collect_enum_members(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		collect_enum_members(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
 	}
 }
 
@@ -1053,7 +1138,14 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 				}
 				break;
 			}
-			if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
+			// Skip a generic type block `{...}` before the method's `(` — not the body.
+			if (self.entries[j].type == LBRACE)
+			{
+				j = self.match_rbrace(j);
+				if (j >= self.size) break;
+				continue;
+			}
+			if (self.entries[j].type == EOS) break;
 		}
 	}
 }

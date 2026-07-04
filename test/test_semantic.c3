@@ -356,3 +356,13 @@ fn void test_encode_variable_semicolon() @test {
 	encode_semantic_tokens("x;", &out);
 	assert(out.str_view() == "0,0,1,4,0", "Ident before semicolon should be variable, got: %s", out.str_view());
 }
+
+fn void test_encode_generic_function_call() @test {
+	DString out = dstring::temp();
+	// "foo{Bar}(1)" — foo IDENT followed by '{' is a generic call → FUNCTION (5);
+	// Bar → TYPE (1).
+	encode_semantic_tokens("foo{Bar}(1)", &out);
+	String result = out.str_view();
+	assert(result.contains("0,0,3,5,0"), "expected foo as FUNCTION, got: %s", result);
+	assert(result.contains("0,4,3,1,0"), "expected Bar as TYPE, got: %s", result);
+}
