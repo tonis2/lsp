@@ -5,7 +5,7 @@ import std::core::dstring;
 // Small files publish lexer diagnostics immediately — never deferred.
 fn void test_lex_diag_small_file_immediate() @test {
 	LspServer s;
-	s.init("", "c3c", 2000, "");
+	s.init("", "c3c", 2000);
 	defer s.handle_exit();
 
 	s.maybe_publish_lex_diagnostics("file:///small.c3", "fn void foo() {}");
@@ -16,7 +16,7 @@ fn void test_lex_diag_small_file_immediate() @test {
 // change within the window is deferred (to be flushed later).
 fn void test_lex_diag_large_file_debounced() @test {
 	LspServer s;
-	s.init("", "c3c", 2000, "");
+	s.init("", "c3c", 2000);
 	defer s.handle_exit();
 
 	// Build > LARGE_FILE_BYTES of valid C3 (no invalid chars → no notification sent).

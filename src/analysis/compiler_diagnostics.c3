@@ -76,12 +76,10 @@ fn void LspServer.publish_compiler_diagnostics(&self, String uri)
 		json_escape_into(&errmsg, self.compiler_path);
 		errmsg.append(`'. Make sure c3c is in your PATH or set compiler-path."}`);
 		send_notification("window/showMessage", errmsg.str_view());
-		self.sentry.capture_error("Failed to spawn compiler process", "textDocument/publishDiagnostics");
 		return;
 	}
 	if (catch proc.join())
 	{
-		self.sentry.capture_error("Compiler process join failed", "textDocument/publishDiagnostics");
 		proc.destroy();
 		return;
 	}

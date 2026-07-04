@@ -43,13 +43,6 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 		{
 			self.diag_delay_ms = (long)delay;
 		}
-		String sentry = opts.get_string("sentryDsn") ?? "";
-		if (sentry.len > 0 && !self.sentry.enabled)
-		{
-			char[] copy = mem::new_array(char, sentry.len);
-			copy[..] = sentry[..];
-			self.sentry = parse_sentry_dsn((String)copy);
-		}
 	}
 
 	// If no stdlib path was supplied (via CLI or client settings), ask the resolved

@@ -21,7 +21,6 @@ struct LspServer
 	String compiler_path;
 	long diag_delay_ms;
 	Time last_diag_time;
-	SentryConfig sentry;
 	PublishedFiles diag_files;
 	bool diag_pending;
 	String diag_pending_uri;
@@ -33,9 +32,9 @@ struct LspServer
 	FileCache fcache;
 }
 
-fn void LspServer.init(&self, String stdlib_path, String compiler_path, long diag_delay_ms, String sentry_dsn)
+fn void LspServer.init(&self, String stdlib_path, String compiler_path, long diag_delay_ms)
 {
-	*self = { .running = true, .stdlib_path = stdlib_path, .compiler_path = compiler_path, .diag_delay_ms = diag_delay_ms, .sentry = parse_sentry_dsn(sentry_dsn), };
+	*self = { .running = true, .stdlib_path = stdlib_path, .compiler_path = compiler_path, .diag_delay_ms = diag_delay_ms, };
 	self.documents.init(mem);
 	self.diag_files.init(mem);
 	self.fcache.init(mem);
@@ -49,7 +48,6 @@ fn void LspServer.handle_message(&self, String message)
 	Object* msg = json::tparse(message) ?? null;
 	if (msg == null)
 	{
-		self.sentry.capture_error("Failed to parse JSON message", "unknown");
 		return;
 	}
 

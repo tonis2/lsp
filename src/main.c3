@@ -16,12 +16,11 @@ fn int main(String[] args_in)
 		_setmode(1, 0x8000); // stdout -> O_BINARY
 	$endif
 	
-	args::Option[5] options = {
+	args::Option[4] options = {
 		{ .long_name = "version", .short_name = "v", .description = "Print version and exit" },
 		{ .long_name = "stdlib-path", .description = "Path to C3 standard library", .is_value_required = true },
 		{ .long_name = "compiler-path", .description = "Path to c3c compiler", .is_value_required = true },
 		{ .long_name = "diagnostics-delay", .description = "Delay in ms between diagnostic runs", .is_value_required = true },
-		{ .long_name = "sentry-dsn", .description = "Sentry DSN URL for error reporting", .is_value_required = true },
 	};
 
 	if (catch args::parse(args_in, arg_sep: "=", options: &options)) return 1;
@@ -37,10 +36,9 @@ fn int main(String[] args_in)
 	if (compiler_path.len == 0) compiler_path = "c3c";
 	String delay_str = args::arg_value(&options, "diagnostics-delay") ?? "";
 	long diag_delay_ms = delay_str.len > 0 ? (long)(delay_str.to_uint() ?? 2000) : 2000;
-	String sentry_dsn = args::arg_value(&options, "sentry-dsn") ?? "";
 
 	LspServer server;
-	server.init(stdlib_path, compiler_path, diag_delay_ms, sentry_dsn);
+	server.init(stdlib_path, compiler_path, diag_delay_ms);
 
 	InStream stdin_stream = io::stdin();
 
