@@ -920,8 +920,23 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 		cursor_idx = cursor_idx + 1;
 	}
 
+	// Struct-initializer designator (`(Type){ .field`, `Type v = { .field`, `, .field`)?
+	// Only struct fields are valid there, so methods and enum members are not offered.
+	bool initializer_context = false;
+	sz init_lbrace;
+	String recv_type;
+	if (cursor_idx >= 2)
+	{
+		TokenType before_dot = stream.tokens.entries[cursor_idx - 2].type;
+		if (before_dot == LBRACE || before_dot == COMMA)
+		{
+			recv_type = stream.tokens.resolve_initializer_type(cursor_idx, uri, docs, &init_lbrace);
+			initializer_context = recv_type.len > 0;
+		}
+	}
+
 	// Resolve receiver type
-	String recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs);
+	if (!initializer_context) recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs);
 	if (recv_type.len == 0) return;
 
 	// Resolve alias (e.g. LineOffsets → List)
@@ -946,6 +961,18 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 	String[MAX_DOC_IDENTS] seen;
 	sz seen_count = 0;
 
+	if (initializer_context)
+	{
+		// Fields already assigned in this initializer are not offered again.
+		stream.tokens.seed_assigned_fields(init_lbrace, cursor_idx, &seen, &seen_count);
+		collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		if (struct_type != recv_type)
+		{
+			collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		}
+		return;
+	}
+
 	if (!type_receiver)
 	{
 		// Collect struct fields (use resolved alias for struct lookup)
@@ -969,6 +996,28 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 	if (resolved_type.len > 0 && resolved_type != recv_type)
 	{
 		collect_enum_members(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+	}
+}
+
+// Record field names already assigned in the initializer opened at lbrace_idx
+// (`.name =` designators at brace depth 1) so they are not offered again.
+// The designator currently being typed at cursor_idx is not counted.
+fn void TokenList.seed_assigned_fields(&self, sz lbrace_idx, sz cursor_idx, String[MAX_DOC_IDENTS]* seen, sz* seen_count)
+{
+	sz depth = 1;
+	for (sz j = lbrace_idx + 1; j < self.size && depth > 0; j++)
+	{
+		TokenType tt = self.entries[j].type;
+		if (tt == LBRACE) { depth++; continue; }
+		if (tt == RBRACE) { depth--; continue; }
+		if (depth != 1) continue;
+		if (tt != DOT || j + 2 >= self.size) continue;
+		if (j + 1 == cursor_idx) continue; // the designator being completed
+		if (!is_ident(self.entries[j + 1].type)) continue;
+		if (self.entries[j + 2].type != EQ) continue;
+		if (*seen_count >= MAX_DOC_IDENTS) return;
+		(*seen)[*seen_count] = self.entries[j + 1].text;
+		(*seen_count)++;
 	}
 }
 

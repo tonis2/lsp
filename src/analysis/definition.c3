@@ -540,6 +540,120 @@ fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, Docu
 	return type_name;
 }
 
+// Resolve the struct type of the initializer list enclosing a designated-initializer
+// field designator: `(Type){ .field`, `Type v = { .field`, `v = { .field`, and the
+// nested form `.outer = { .inner`. cursor_idx is the token AFTER the DOT of the
+// designator (same convention as resolve_receiver_type). On success, *lbrace_out (if
+// given) receives the index of the initializer's opening brace. Returns "" when the
+// dot is not a designator in a brace initializer (e.g. call arguments) or the type
+// cannot be determined.
+fn String TokenList.resolve_initializer_type(&self, sz cursor_idx, String uri, DocumentList* docs, sz* lbrace_out = null, int depth = 0)
+{
+	if (cursor_idx < 2) return "";
+	if (depth > 8) return ""; // bound nested-initializer recursion
+	if (self.entries[cursor_idx - 1].type != DOT) return "";
+
+	// Walk backward to the '{' that opens the enclosing initializer, jumping over
+	// balanced groups. Hitting '(' , '[' or ';' first means the dot is not a
+	// struct-initializer designator (call arguments, index expression, new statement).
+	sz lb = self.size;
+	sz bracket_depth = 0;
+	for (sz k = cursor_idx - 1; k > 1; k--)
+	{
+		sz i = k - 1;
+		TokenType t = self.entries[i].type;
+		if (t == RBRACKET) { bracket_depth++; continue; }
+		if (t == LBRACKET)
+		{
+			if (bracket_depth == 0) return "";
+			bracket_depth--;
+			continue;
+		}
+		if (bracket_depth > 0) continue; // inside [...] — its contents are balanced
+		if (t == RBRACE)
+		{
+			sz open = self.match_lbrace_back(i);
+			if (open >= self.size || open == 0) return "";
+			k = open + 1; // next iteration examines the token before the '{'
+			continue;
+		}
+		if (t == RPAREN)
+		{
+			if (try open = self.match_paren_backward(i))
+			{
+				if (open == 0) return "";
+				k = open + 1;
+				continue;
+			}
+			return "";
+		}
+		if (t == LBRACE)
+		{
+			lb = i;
+			break;
+		}
+		if (t == LPAREN || t == EOS) return "";
+	}
+	if (lb >= self.size) return "";
+
+	Token before = self.entries[lb - 1];
+	String type_name;
+
+	if (before.type == RPAREN)
+	{
+		// Compound literal `(Type){ .field`. Require exactly `(TYPE_IDENT)` so a
+		// function-body brace after a parameter list (`fn void f(Foo x) { .`) never matches.
+		if (try lparen = self.match_paren_backward(lb - 1))
+		{
+			if (lparen + 2 == lb - 1 && self.entries[lparen + 1].type == TYPE_IDENT)
+			{
+				type_name = self.entries[lparen + 1].text;
+			}
+		}
+	}
+	else if (before.type == TYPE_IDENT)
+	{
+		// `Type { .field }` compound-literal form.
+		type_name = before.text;
+	}
+	else if (before.type == EQ && lb >= 2)
+	{
+		// `= { .field` — variable initializer, assignment, or nested designator.
+		Token target = self.entries[lb - 2];
+		if (!is_ident(target.type) && target.type != CONST_IDENT) return "";
+
+		if (lb >= 3 && self.entries[lb - 3].type == DOT)
+		{
+			// Nested designator `.outer = { .inner` — resolve the enclosing
+			// initializer's type, then the designated field's type within it.
+			String outer = self.resolve_initializer_type(lb - 2, uri, docs, null, depth + 1);
+			if (outer.len == 0) return "";
+			String resolved = self.resolve_type_alias_across(outer, docs);
+			if (resolved.len == 0)
+			{
+				String file_path = uri_to_path(uri);
+				if (file_path.len > 0) resolved = resolve_alias_in_project(file_path, outer);
+			}
+			String lookup = resolved.len > 0 ? resolved : outer;
+			type_name = self.resolve_field_type_across(lookup, target.text, uri, docs);
+		}
+		else
+		{
+			// `Type var = { .field` / `var = { .field` — find the declared type.
+			type_name = self.find_variable_type(target.text);
+			// Declarations find_variable_type misses (e.g. `const Foo BAR = {`).
+			if (type_name.len == 0 && lb >= 3 && self.entries[lb - 3].type == TYPE_IDENT)
+			{
+				type_name = self.entries[lb - 3].text;
+			}
+		}
+	}
+
+	if (type_name.len == 0) return "";
+	if (lbrace_out) *lbrace_out = lb;
+	return type_name;
+}
+
 // Find the type of the enclosing method for "self" resolution.
 // Scans backwards from offset to find fn Type.method(&self, ...) and returns "Type".
 fn String TokenList.find_enclosing_method_type(&self, sz offset)

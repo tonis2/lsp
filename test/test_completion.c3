@@ -749,3 +749,93 @@ fn void test_completion_dot_on_type_name() @test {
 
 	docs.close("file:///mymod.c3");
 }
+
+// --- Struct-initializer field completion tests ---
+
+// The compound-literal form from the bug report: LspServer server2 = (LspServer){ .init
+fn void test_completion_initializer_compound_literal() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct LspServer { int initialize; int shutdown; }\nfn void t() { LspServer server2 = (LspServer){ .init";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"initialize"`), "expected field initialize, got: %s", result);
+	assert(result.contains(`"kind":5`), "expected Field kind=5, got: %s", result);
+	assert(!result.contains(`"label":"shutdown"`), "shutdown filtered out by prefix, got: %s", result);
+	assert(!result.contains(`"label":"while"`), "no keywords in initializer context, got: %s", result);
+}
+
+// Plain `Type var = { .` initializer — fields only, no methods.
+fn void test_completion_initializer_decl_fields_only() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct Rectangle { int width; int height; }\nfn void Rectangle.draw(&self) {}\nfn void t() { Rectangle r = { .";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"width"`), "expected field width, got: %s", result);
+	assert(result.contains(`"label":"height"`), "expected field height, got: %s", result);
+	assert(!result.contains(`"label":"draw"`), "methods are not valid in initializers, got: %s", result);
+}
+
+// After a comma, the next designator completes — and already-assigned fields are not re-offered.
+fn void test_completion_initializer_after_comma() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct Rectangle { int width; int height; }\nfn void t() { Rectangle r = (Rectangle){ .width = 1, .";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"height"`), "expected field height, got: %s", result);
+	assert(!result.contains(`"label":"width"`), "width already assigned, got: %s", result);
+}
+
+// Nested designated initializer: the inner braces complete the field's own struct type.
+fn void test_completion_initializer_nested() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct Inner { int deep_val; }\nstruct Outer { Inner inner; int flag; }\nfn void t() { Outer o = { .inner = { .de";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"deep_val"`), "expected nested field deep_val, got: %s", result);
+	assert(!result.contains(`"label":"flag"`), "outer field must not leak into nested initializer, got: %s", result);
+}
+
+// Struct defined in another open document is still found.
+fn void test_completion_initializer_cross_file() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///other.c3", "module other;\nstruct Point { int px; int py; }", 1);
+	String content = "module lsp;\nimport other;\nfn void t() { Point p = (Point){ .p";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"px"`), "expected cross-file field px, got: %s", result);
+	assert(result.contains(`"label":"py"`), "expected cross-file field py, got: %s", result);
+	docs.close("file:///other.c3");
+}
+
+// A dot after a comma in call arguments is not an initializer designator.
+fn void test_completion_initializer_not_in_call_args() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct Foo { int x; }\nfn void call_me(int a, int b) {}\nfn void t() { call_me(1, .";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(!result.contains(`"label":"x"`), "call args are not an initializer, got: %s", result);
+}
+
+// A dot at the start of a function body is not an initializer designator, even when
+// the parameter list ends in a struct-typed parameter (`(Rectangle r) {` vs `(Rectangle){`).
+fn void test_completion_initializer_not_function_body() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct Rectangle { int width; int height; }\nfn void handle(Rectangle r) { .";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(!result.contains(`"label":"width"`), "function body brace is not an initializer, got: %s", result);
+}
