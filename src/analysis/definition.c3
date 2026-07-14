@@ -350,7 +350,10 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 
 // Find the type name of a variable by scanning for `TYPE_IDENT var`, `TYPE_IDENT* var`,
 // or the generic forms `TYPE_IDENT{...} var` / `TYPE_IDENT{...}* var`.
-fn String TokenList.find_variable_type(&self, String var_name)
+// Array declarations (`TYPE_IDENT[4] var`, `TYPE_IDENT[] var`, vectors `TYPE_IDENT[<4>] var`)
+// only match when the caller passes is_array to receive the flag — the element type is
+// not the variable's type, so callers that cannot handle arrays must not see it.
+fn String TokenList.find_variable_type(&self, String var_name, bool* is_array = null)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
@@ -365,17 +368,36 @@ fn String TokenList.find_variable_type(&self, String var_name)
 			after++; // position just past the closing '}'
 		}
 
-		// Optional pointer/optional suffixes: TYPE_IDENT{...}[*][?] var
-		if (after < self.size && self.entries[after].type == STAR) after++;
-		if (after < self.size && self.entries[after].type == QUESTION) after++;
+		// Pointer/optional/array suffixes in any combination: TYPE_IDENT{...}[*][?][[N]] var
+		bool arr = false;
+		while (after < self.size)
+		{
+			TokenType at = self.entries[after].type;
+			if (at == STAR || at == QUESTION)
+			{
+				after++;
+				continue;
+			}
+			if (at == LBRACKET)
+			{
+				sz close = self.match_rbracket(after);
+				if (close >= self.size) break;
+				arr = true;
+				after = close + 1;
+				continue;
+			}
+			break;
+		}
 
 		if (after < self.size && is_ident(self.entries[after].type) && self.entries[after].text == var_name)
 		{
+			if (arr && is_array == null) continue;
 			if (after + 1 < self.size)
 			{
 				TokenType next = self.entries[after + 1].type;
 				if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
 				{
+					if (is_array) *is_array = arr;
 					return self.get(i).text;
 				}
 			}
@@ -540,32 +562,21 @@ fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, Docu
 	return type_name;
 }
 
-// Resolve the struct type of the initializer list enclosing a designated-initializer
-// field designator: `(Type){ .field`, `Type v = { .field`, `v = { .field`, and the
-// nested form `.outer = { .inner`. cursor_idx is the token AFTER the DOT of the
-// designator (same convention as resolve_receiver_type). On success, *lbrace_out (if
-// given) receives the index of the initializer's opening brace. Returns "" when the
-// dot is not a designator in a brace initializer (e.g. call arguments) or the type
-// cannot be determined.
-fn String TokenList.resolve_initializer_type(&self, sz cursor_idx, String uri, DocumentList* docs, sz* lbrace_out = null, int depth = 0)
+// Walk backward from token index `start` (inclusive) to the '{' that opens the
+// enclosing initializer, jumping over balanced groups. Returns self.size when a
+// '(' , '[' or ';' is hit first — the position is not inside a brace initializer
+// (call arguments, index expression, new statement).
+fn sz TokenList.enclosing_lbrace_back(&self, sz start)
 {
-	if (cursor_idx < 2) return "";
-	if (depth > 8) return ""; // bound nested-initializer recursion
-	if (self.entries[cursor_idx - 1].type != DOT) return "";
-
-	// Walk backward to the '{' that opens the enclosing initializer, jumping over
-	// balanced groups. Hitting '(' , '[' or ';' first means the dot is not a
-	// struct-initializer designator (call arguments, index expression, new statement).
-	sz lb = self.size;
 	sz bracket_depth = 0;
-	for (sz k = cursor_idx - 1; k > 1; k--)
+	for (sz k = start + 1; k > 1; k--)
 	{
 		sz i = k - 1;
 		TokenType t = self.entries[i].type;
 		if (t == RBRACKET) { bracket_depth++; continue; }
 		if (t == LBRACKET)
 		{
-			if (bracket_depth == 0) return "";
+			if (bracket_depth == 0) return self.size;
 			bracket_depth--;
 			continue;
 		}
@@ -573,7 +584,7 @@ fn String TokenList.resolve_initializer_type(&self, sz cursor_idx, String uri, D
 		if (t == RBRACE)
 		{
 			sz open = self.match_lbrace_back(i);
-			if (open >= self.size || open == 0) return "";
+			if (open >= self.size || open == 0) return self.size;
 			k = open + 1; // next iteration examines the token before the '{'
 			continue;
 		}
@@ -581,42 +592,99 @@ fn String TokenList.resolve_initializer_type(&self, sz cursor_idx, String uri, D
 		{
 			if (try open = self.match_paren_backward(i))
 			{
-				if (open == 0) return "";
+				if (open == 0) return self.size;
 				k = open + 1;
 				continue;
 			}
-			return "";
+			return self.size;
 		}
-		if (t == LBRACE)
-		{
-			lb = i;
-			break;
-		}
-		if (t == LPAREN || t == EOS) return "";
+		if (t == LBRACE) return i;
+		if (t == LPAREN || t == EOS) return self.size;
 	}
+	return self.size;
+}
+
+// Resolve the struct type of the initializer list enclosing a designated-initializer
+// field designator: `(Type){ .field`, `Type v = { .field`, `v = { .field`, the nested
+// form `.outer = { .inner`, and array-element initializers `Type[4] v = { { .field`.
+// cursor_idx is the token AFTER the DOT of the designator (same convention as
+// resolve_receiver_type). On success, *lbrace_out (if given) receives the index of
+// the initializer's opening brace. Returns "" when the dot is not a designator in a
+// brace initializer (e.g. call arguments) or the type cannot be determined — including
+// when the initializer's type is an array, where designators are `[index] =`, not `.field`.
+fn String TokenList.resolve_initializer_type(&self, sz cursor_idx, String uri, DocumentList* docs, sz* lbrace_out = null, int depth = 0)
+{
+	if (cursor_idx < 2) return "";
+	if (depth > 8) return ""; // bound nested-initializer recursion
+	if (self.entries[cursor_idx - 1].type != DOT) return "";
+
+	sz lb = self.enclosing_lbrace_back(cursor_idx - 2);
 	if (lb >= self.size) return "";
 
+	bool is_array;
+	String type_name = self.initializer_type_at(lb, uri, docs, &is_array, depth);
+	if (type_name.len == 0 || is_array) return "";
+	if (lbrace_out) *lbrace_out = lb;
+	return type_name;
+}
+
+// Determine the type of the initializer list whose opening '{' is at index lb, from
+// what precedes the brace. *is_array is set when that type is an array (`Opt[4] v = {`),
+// whose elements — not fields — the braces initialize.
+fn String TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList* docs, bool* is_array, int depth)
+{
+	*is_array = false;
+	if (depth > 8 || lb < 1) return "";
 	Token before = self.entries[lb - 1];
-	String type_name;
 
 	if (before.type == RPAREN)
 	{
-		// Compound literal `(Type){ .field`. Require exactly `(TYPE_IDENT)` so a
+		// Compound literal `(Type){ .field`, optionally module-qualified and/or an
+		// array: `(mod::Type[4]){`. Nothing else may appear inside the parens, so a
 		// function-body brace after a parameter list (`fn void f(Foo x) { .`) never matches.
 		if (try lparen = self.match_paren_backward(lb - 1))
 		{
-			if (lparen + 2 == lb - 1 && self.entries[lparen + 1].type == TYPE_IDENT)
+			if (lparen == 0) return "";
+			sz last = lb - 2; // last token inside the parens
+			if (last <= lparen) return "";
+			bool arr = false;
+			if (self.entries[last].type == RBRACKET)
 			{
-				type_name = self.entries[lparen + 1].text;
+				sz lbk = self.match_lbracket_back(last);
+				if (lbk >= self.size || lbk <= lparen + 1) return "";
+				arr = true;
+				last = lbk - 1;
 			}
+			if (self.entries[last].type != TYPE_IDENT) return "";
+			// Only `mod::` qualifier segments may precede the type name.
+			if ((last - (lparen + 1)) % 2 != 0) return "";
+			for (sz q = lparen + 1; q < last; q += 2)
+			{
+				if (self.entries[q].type != IDENT || self.entries[q + 1].type != SCOPE) return "";
+			}
+			*is_array = arr;
+			return self.entries[last].text;
 		}
+		return "";
 	}
-	else if (before.type == TYPE_IDENT)
+
+	if (before.type == TYPE_IDENT)
 	{
 		// `Type { .field }` compound-literal form.
-		type_name = before.text;
+		return before.text;
 	}
-	else if (before.type == EQ && lb >= 2)
+
+	if (before.type == RBRACKET)
+	{
+		// `Type[4] { ... }` — array compound-literal form.
+		sz lbk = self.match_lbracket_back(lb - 1);
+		if (lbk >= self.size || lbk == 0) return "";
+		if (self.entries[lbk - 1].type != TYPE_IDENT) return "";
+		*is_array = true;
+		return self.entries[lbk - 1].text;
+	}
+
+	if (before.type == EQ && lb >= 2)
 	{
 		// `= { .field` — variable initializer, assignment, or nested designator.
 		Token target = self.entries[lb - 2];
@@ -635,23 +703,35 @@ fn String TokenList.resolve_initializer_type(&self, sz cursor_idx, String uri, D
 				if (file_path.len > 0) resolved = resolve_alias_in_project(file_path, outer);
 			}
 			String lookup = resolved.len > 0 ? resolved : outer;
-			type_name = self.resolve_field_type_across(lookup, target.text, uri, docs);
+			return self.resolve_field_type_across(lookup, target.text, uri, docs, is_array);
 		}
-		else
+
+		// `Type var = { .field` / `var = { .field` — find the declared type.
+		String type_name = self.find_variable_type(target.text, is_array);
+		// Declarations find_variable_type misses (e.g. `const Foo BAR = {`).
+		if (type_name.len == 0 && lb >= 3 && self.entries[lb - 3].type == TYPE_IDENT)
 		{
-			// `Type var = { .field` / `var = { .field` — find the declared type.
-			type_name = self.find_variable_type(target.text);
-			// Declarations find_variable_type misses (e.g. `const Foo BAR = {`).
-			if (type_name.len == 0 && lb >= 3 && self.entries[lb - 3].type == TYPE_IDENT)
-			{
-				type_name = self.entries[lb - 3].text;
-			}
+			type_name = self.entries[lb - 3].text;
 		}
+		return type_name;
 	}
 
-	if (type_name.len == 0) return "";
-	if (lbrace_out) *lbrace_out = lb;
-	return type_name;
+	if (before.type == LBRACE || before.type == COMMA)
+	{
+		// Element of an enclosing initializer list: `Opt[4] v = { { .field` or
+		// `..., { .field`. When the enclosing initializer's type is an array, this
+		// brace initializes one element of it. A positional element of a struct
+		// initializer is not resolvable without field-ordinal tracking — skip it
+		// rather than offer the wrong struct's fields.
+		sz outer = self.enclosing_lbrace_back(lb - 1);
+		if (outer >= self.size) return "";
+		bool outer_is_array;
+		String outer_type = self.initializer_type_at(outer, uri, docs, &outer_is_array, depth + 1);
+		if (outer_type.len == 0 || !outer_is_array) return "";
+		return outer_type;
+	}
+
+	return "";
 }
 
 // Find the type of the enclosing method for "self" resolution.
@@ -691,17 +771,19 @@ fn String TokenList.find_enclosing_method_type(&self, sz offset)
 }
 
 // Resolve the type of a struct field across current file, open docs, and project files.
-fn String TokenList.resolve_field_type_across(&self, String struct_type, String field_name, String uri, DocumentList* docs)
+fn String TokenList.resolve_field_type_across(&self, String struct_type, String field_name, String uri, DocumentList* docs, bool* is_array = null)
 {
+	if (is_array) *is_array = false;
+
 	// 1. Current file
-	String result = self.find_struct_field_type(struct_type, field_name);
+	String result = self.find_struct_field_type(struct_type, field_name, is_array);
 	if (result.len > 0) return result;
 
 	// 2. Open documents
 	for (sz d = 0; d < docs.size; d++)
 	{
 		TokenStream* doc_stream = docs.entries[d].get_tokens();
-		result = doc_stream.tokens.find_struct_field_type(struct_type, field_name);
+		result = doc_stream.tokens.find_struct_field_type(struct_type, field_name, is_array);
 		if (result.len > 0) return result;
 	}
 
@@ -711,6 +793,18 @@ fn String TokenList.resolve_field_type_across(&self, String struct_type, String 
 	{
 		result = resolve_field_type_in_project(file_path, struct_type, field_name);
 		if (result.len > 0) return result;
+		// The scan query cannot carry the array flag, so array fields need a
+		// second, array-only pass.
+		if (is_array)
+		{
+			StringScan scan = { &query_field_type_array, struct_type, field_name, "" };
+			scan_project_dirs(file_path, &scan);
+			if (scan.result.len > 0)
+			{
+				*is_array = true;
+				return scan.result;
+			}
+		}
 	}
 
 	return "";
@@ -719,6 +813,14 @@ fn String TokenList.resolve_field_type_across(&self, String struct_type, String 
 fn String query_field_type(TokenList* tokens, String struct_type, String field_name) @private
 {
 	return tokens.find_struct_field_type(struct_type, field_name);
+}
+
+// Matches only array-typed fields — the non-array query skips them.
+fn String query_field_type_array(TokenList* tokens, String struct_type, String field_name) @private
+{
+	bool arr;
+	String result = tokens.find_struct_field_type(struct_type, field_name, &arr);
+	return arr ? result : "";
 }
 
 fn String resolve_field_type_in_project(String file_path, String struct_type, String field_name) @private
@@ -874,7 +976,10 @@ fn String resolve_return_type_in_project(String file_path, String type_name, Str
 
 // Find the type of a struct field: struct TypeName { FieldType field_name; }
 // Returns the type name (e.g. "TokenList"), or empty string if not found.
-fn String TokenList.find_struct_field_type(&self, String type_name, String field_name)
+// Array-typed fields (`Opt[4] options;`) only match when the caller passes is_array
+// to receive the flag — the element type alone would mislead callers that expect
+// the field's own type (e.g. dot-completion on the field).
+fn String TokenList.find_struct_field_type(&self, String type_name, String field_name, bool* is_array = null)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
@@ -903,9 +1008,20 @@ fn String TokenList.find_struct_field_type(&self, String type_name, String field
 			{
 				if (j == 0) continue;
 				// The type sits just before the field name; step over an optional
-				// pointer `*` and an optional generic block `{...}` (e.g. List{int} lst).
+				// pointer `*`, an optional array suffix `[4]`, and an optional
+				// generic block `{...}` (e.g. List{int} lst).
 				sz prev = j - 1;
+				bool arr = false;
 				if (prev > 0 && self.entries[prev].type == STAR) prev--;
+				if (prev > 0 && self.entries[prev].type == RBRACKET)
+				{
+					sz lbk = self.match_lbracket_back(prev);
+					if (lbk >= self.size || lbk == 0) continue;
+					arr = true;
+					prev = lbk - 1;
+				}
+				if (prev > 0 && self.entries[prev].type == STAR) prev--;
+				if (arr && is_array == null) continue; // caller cannot handle array fields
 				if (prev > 0 && self.entries[prev].type == RBRACE)
 				{
 					sz lbrace = self.match_lbrace_back(prev);
@@ -914,6 +1030,7 @@ fn String TokenList.find_struct_field_type(&self, String type_name, String field
 				}
 				if (self.entries[prev].type == TYPE_IDENT)
 				{
+					if (is_array) *is_array = arr;
 					return self.entries[prev].text;
 				}
 			}

@@ -840,6 +840,108 @@ fn void test_completion_initializer_not_function_body() @test {
 	assert(!result.contains(`"label":"width"`), "function body brace is not an initializer, got: %s", result);
 }
 
+// An element of an array initializer completes the element struct's fields.
+// Fields assigned in *previous* elements are not filtered — each element starts fresh.
+fn void test_completion_initializer_array_element() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = `struct Option { String long_name; String short_name; bool is_value_required; }
+fn void t() { Option[5] options = {
+	{ .long_name = "test" },
+	{ .`;
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"long_name"`), "previous element's assignment must not filter, got: %s", result);
+	assert(result.contains(`"label":"short_name"`), "expected field short_name, got: %s", result);
+	assert(result.contains(`"kind":5`), "expected Field kind=5, got: %s", result);
+}
+
+// The first element (`{` directly after the outer `{`) resolves too, and fields
+// already assigned in the *current* element are filtered.
+fn void test_completion_initializer_array_element_assigned() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = `struct Option { String long_name; String short_name; }
+fn void t() { Option[2] options = { { .long_name = "v", .`;
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"short_name"`), "expected field short_name, got: %s", result);
+	assert(!result.contains(`"label":"long_name"`), "long_name already assigned in this element, got: %s", result);
+}
+
+// Array compound literal: (Option[2]){ { .field
+fn void test_completion_initializer_array_compound_literal() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = `struct Option { String long_name; String short_name; }
+fn void t() { opts((Option[2]){ { .lo`;
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"long_name"`), "expected field long_name in array compound literal, got: %s", result);
+}
+
+// Module-qualified compound literal: (mod::Type){ .field
+fn void test_completion_initializer_qualified_compound_literal() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///cli.c3", "module cli;\nstruct Point { int px; int py; }", 1);
+	String content = "module myapp;\nimport cli;\nfn void t() { Point p = (cli::Point){ .p";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"px"`), "expected field px behind module-qualified literal, got: %s", result);
+	docs.close("file:///cli.c3");
+}
+
+// A nested designator to an array-typed field: .opts = { { .field
+fn void test_completion_initializer_array_field_nested() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = `struct Option { String long_name; String short_name; }
+struct Config { Option[4] opts; int flag; }
+fn void t() { Config c = { .opts = { { .`;
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"long_name"`), "expected element field long_name via array field, got: %s", result);
+	assert(!result.contains(`"label":"flag"`), "outer struct field must not leak into element, got: %s", result);
+}
+
+// At the array initializer's own level, `.field` designators are invalid
+// (array designators are `[index] =`) — no struct fields are offered.
+fn void test_completion_initializer_array_toplevel_no_fields() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = `struct Option { String long_name; }
+fn void t() { Option[2] options = { .`;
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(!result.contains(`"label":"long_name"`), "array level must not offer element fields, got: %s", result);
+}
+
+// The exact user scenario: a module-qualified array declaration whose element type
+// lives in another file, completing inside a later element.
+fn void test_completion_initializer_array_element_cross_file() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///cli.c3", "module cli;\nstruct Option { String long_name; String short_name; String description; bool is_value_required; }", 1);
+	String content = `module myapp;
+import cli;
+fn void t() { cli::Option[4] options = {
+	{ .long_name = "version", .short_name = "v" },
+	{ .`;
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"long_name"`), "expected cross-file element field long_name, got: %s", result);
+	assert(result.contains(`"label":"description"`), "expected cross-file element field description, got: %s", result);
+	docs.close("file:///cli.c3");
+}
+
 // --- Module-visibility tests for member completion ---
 
 // A same-named type in a module this file does not import must not merge its

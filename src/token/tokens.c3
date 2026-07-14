@@ -377,6 +377,49 @@ fn sz TokenList.match_lbrace_back(&self, sz rbrace_idx)
 	return self.size;
 }
 
+// Given the index of an LBRACKET token, returns the index of its matching RBRACKET.
+// Returns self.size if the brackets are unbalanced.
+fn sz TokenList.match_rbracket(&self, sz lbracket_idx)
+{
+	sz depth = 0;
+	for (sz j = lbracket_idx; j < self.size; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == LBRACKET)
+		{
+			depth++;
+		}
+		else if (t == RBRACKET)
+		{
+			depth--;
+			if (depth == 0) return j;
+		}
+	}
+	return self.size;
+}
+
+// Given the index of an RBRACKET token, returns the index of its matching LBRACKET
+// by scanning backward. Returns self.size if the brackets are unbalanced.
+fn sz TokenList.match_lbracket_back(&self, sz rbracket_idx)
+{
+	sz depth = 0;
+	for (sz j = rbracket_idx; ; j--)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == RBRACKET)
+		{
+			depth++;
+		}
+		else if (t == LBRACKET)
+		{
+			depth--;
+			if (depth == 0) return j;
+		}
+		if (j == 0) break;
+	}
+	return self.size;
+}
+
 // Builds the "a::b::c" module path from the tokens following a MODULE keyword at
 // mod_idx: accumulates ident/type/const segments, skips SCOPE (::), and stops at
 // the first other token (e.g. EOS, or `<` of a generic module declaration).
