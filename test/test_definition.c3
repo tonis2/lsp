@@ -426,3 +426,43 @@ fn void test_definition_import_not_import_context() @test {
 	encode_definition("file:///test.c3", content, 37, ds, "", &out);
 	assert(out.str_view() == "", "got: %s", out.str_view());
 }
+
+// --- Module-visibility tests ---
+
+// Two same-named functions in different modules: definition must prefer the one
+// in the imported module, not whichever file happens to be scanned first.
+fn void test_definition_prefers_imported_module() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Opened first, so the old first-wins order would pick it.
+	ds.open("file:///aaa.c3", "module aaa;\nfn void run() {}", 1);
+	ds.open("file:///bbb.c3", "module bbb;\nfn void run() {}", 1);
+
+	String content = "module myapp;\nimport bbb;\nfn void t() { run(); }";
+	sz offset = content.len - 7; // on `run`
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("file:///bbb.c3"), "must resolve into the imported module, got: %s", result);
+	assert(!result.contains("file:///aaa.c3"), "must not resolve into the unimported module, got: %s", result);
+
+	ds.close("file:///aaa.c3");
+	ds.close("file:///bbb.c3");
+}
+
+// When no visible declaration exists anywhere, fall back to the first
+// module-blind match instead of returning nothing.
+fn void test_definition_fallback_unimported_module() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///aaa.c3", "module aaa;\nfn void helper() {}", 1);
+
+	String content = "module myapp;\nfn void t() { helper(); }";
+	sz offset = content.len - 10; // on `helper`
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("file:///aaa.c3"), "unique match must still resolve without import, got: %s", result);
+
+	ds.close("file:///aaa.c3");
+}

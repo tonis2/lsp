@@ -54,7 +54,7 @@ fn void test_file_cache_used_by_scan() @test {
 	bool first = true;
 	String[MAX_DOC_IDENTS] seen;
 	sz seen_count = 0;
-	MemberScan scan = { &TokenList.collect_enum_members_into, "Color", "", &out, &first, &seen, &seen_count };
+	MemberScan scan = { &TokenList.collect_enum_members_into, "Color", "", &out, &first, &seen, &seen_count, null };
 	scan_dir(dir, &scan);
 
 	String r = out.str_view();

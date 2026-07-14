@@ -839,3 +839,62 @@ fn void test_completion_initializer_not_function_body() @test {
 	String result = out.str_view();
 	assert(!result.contains(`"label":"width"`), "function body brace is not an initializer, got: %s", result);
 }
+
+// --- Module-visibility tests for member completion ---
+
+// A same-named type in a module this file does not import must not merge its
+// members into the completion list (e.g. user Rectangle vs std::math Rectangle).
+fn void test_completion_dot_invisible_module_not_merged() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///geom.c3", "module other::geom;\nunion Rectangle { int v; }", 1);
+	String content = "module myapp;\nstruct Rectangle { int width; int height; }\nfn void t() { Rectangle r; r.";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"width"`), "expected own field width, got: %s", result);
+	assert(result.contains(`"label":"height"`), "expected own field height, got: %s", result);
+	assert(!result.contains(`"label":"v"`), "field from unimported module must not merge, got: %s", result);
+	docs.close("file:///geom.c3");
+}
+
+// The same collision inside a struct initializer.
+fn void test_completion_initializer_invisible_module_not_merged() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///geom.c3", "module other::geom;\nunion Rectangle { int v; }", 1);
+	String content = "module myapp;\nstruct Rectangle { int width; int height; }\nfn void t() { Rectangle r = (Rectangle){ .";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"width"`), "expected own field width, got: %s", result);
+	assert(!result.contains(`"label":"v"`), "initializer must not offer unimported module's field, got: %s", result);
+	docs.close("file:///geom.c3");
+}
+
+// An imported module's type completes normally.
+fn void test_completion_dot_imported_module_visible() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///geom.c3", "module other::geom;\nstruct Circle { int radius; }", 1);
+	String content = "module myapp;\nimport other::geom;\nfn void t() { Circle c; c.";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"radius"`), "imported module's fields must complete, got: %s", result);
+	docs.close("file:///geom.c3");
+}
+
+// Without the import, the members still complete via the module-blind fallback
+// pass — a missing import must degrade to the old behavior, not to nothing.
+fn void test_completion_dot_fallback_when_not_imported() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///geom.c3", "module other::geom;\nstruct Circle { int radius; }", 1);
+	String content = "module myapp;\nfn void t() { Circle c; c.";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"radius"`), "fallback pass must still find the only candidate, got: %s", result);
+	docs.close("file:///geom.c3");
+}

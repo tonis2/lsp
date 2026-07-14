@@ -125,18 +125,25 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 		// Member accesses (e.g. .tokens, .type) cannot be resolved without type
 		// information, so cross-file matches would be false positives.
 
+		// Occurrences in another file only count when that file can see the
+		// module declaring the symbol (same module tree, an import, or the
+		// implicit std::core) — a same-named symbol in an unrelated module is
+		// a different symbol. Unknown module ("") keeps the old name-only match.
+		String target_module = find_symbol_module(&stream.tokens, cursor_tok, uri, docs, stdlib_path);
+
 		// 2. Open documents (reuse their cached token streams)
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
 
 			TokenStream* other_stream = docs.entries[d].get_tokens();
+			if (!file_can_see(&other_stream.tokens, target_module)) continue;
 			other_stream.tokens.collect_refs(docs.entries[d].uri, docs.entries[d].content, cursor_tok, out, &first);
 		}
 
 		// 3 + 4. Scan project files on disk, then stdlib
 		String file_path = uri_to_path(uri);
-		RefsScan scan = { cursor_tok, out, &first };
+		RefsScan scan = { cursor_tok, out, &first, target_module };
 		scan_project_then_stdlib(file_path, stdlib_path, &scan);
 	}
 
@@ -275,12 +282,18 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 		// 1. Current file
 		stream.tokens.collect_rename_edits(uri, content, cursor_tok, new_name, out, &first_uri);
 
+		// Same visibility rule as find-references: only touch files that can see
+		// the symbol's module, so a same-named symbol in an unrelated module is
+		// not silently renamed along with it.
+		String target_module = find_symbol_module(&stream.tokens, cursor_tok, uri, docs, stdlib_path);
+
 		// 2. Open documents (reuse their cached token streams)
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
 
 			TokenStream* other_stream = docs.entries[d].get_tokens();
+			if (!file_can_see(&other_stream.tokens, target_module)) continue;
 			other_stream.tokens.collect_rename_edits(docs.entries[d].uri, docs.entries[d].content, cursor_tok, new_name, out, &first_uri);
 		}
 
@@ -288,7 +301,7 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 		String file_path = uri_to_path(uri);
 		if (file_path.len > 0)
 		{
-			RenameScan scan = { cursor_tok, new_name, out, &first_uri };
+			RenameScan scan = { cursor_tok, new_name, out, &first_uri, target_module };
 			scan_project_dirs(file_path, &scan);
 		}
 	}
@@ -408,10 +421,12 @@ struct RenameScan (FileVisitor) @private
 	String new_name;
 	DString* out;
 	bool* first_uri;
+	String target_module;
 }
 
 fn bool RenameScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
+	if (!file_can_see(&stream.tokens, self.target_module)) return false;
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);
 	stream.tokens.collect_rename_edits(uri.str_view(), content, self.target, self.new_name, self.out, self.first_uri);
@@ -424,10 +439,12 @@ struct RefsScan (FileVisitor) @private
 	Token target;
 	DString* out;
 	bool* first;
+	String target_module;
 }
 
 fn bool RefsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
+	if (!file_can_see(&stream.tokens, self.target_module)) return false;
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);
 	stream.tokens.collect_refs(uri.str_view(), content, self.target, self.out, self.first);

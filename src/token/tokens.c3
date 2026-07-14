@@ -387,7 +387,9 @@ fn String TokenList.module_path_at(&self, sz mod_idx)
 	for (sz j = mod_idx + 1; j < self.size; j++)
 	{
 		TokenType t = self.entries[j].type;
-		if (is_ident(t) || t == TYPE_IDENT || t == CONST_IDENT)
+		// Plain IDENT only (not AT_IDENT): a module attribute such as
+		// `module foo @private;` must terminate the path, not extend it.
+		if (t == IDENT || t == TYPE_IDENT || t == CONST_IDENT)
 		{
 			if (!first) path.append("::");
 			path.append(self.entries[j].text);

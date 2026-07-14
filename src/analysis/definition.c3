@@ -1096,9 +1096,9 @@ fn String TokenList.import_module_path_at(&self, sz cursor_idx)
 
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
 // Returns true if a definition was found and emitted.
-fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, String uri, String content, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "")
+fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, String uri, String content, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "", ModuleCtx* ctx = null)
 {
-	// 1. Search current file
+	// 1. Search current file (its declarations are always visible to itself)
 	if (try decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type, module_filter))
 	{
 		if (decl_idx != cursor_idx)
@@ -1107,6 +1107,13 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 			return true;
 		}
 	}
+
+	// With a ctx, declarations in modules this file cannot see don't win outright:
+	// the first such match is kept as a fallback and only used when nothing
+	// visible turns up anywhere, so a missing import degrades to the old
+	// first-match behavior instead of "no result".
+	DString fallback = dstring::temp();
+	bool have_fallback;
 
 	// 2. Search all other open documents (reuse their cached token streams)
 	for (sz d = 0; d < docs.size; d++)
@@ -1117,15 +1124,31 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 
 		if (try found = other_stream.tokens.find_declaration_in(cursor_tok, method_type, module_filter))
 		{
-			emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
-			return true;
+			if (ctx == null || ctx.can_see(other_stream.tokens.module_of_decl(found)))
+			{
+				emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
+				return true;
+			}
+			if (!have_fallback)
+			{
+				emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], &fallback);
+				have_fallback = true;
+			}
 		}
 	}
 
 	// 3 + 4. Scan project files on disk (src/ and lib/ relative to file), then stdlib
 	String file_path = uri_to_path(uri);
-	DeclScan scan = { cursor_tok, method_type, module_filter, out };
-	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
+	DeclScan scan = { cursor_tok, method_type, module_filter, out, ctx, &fallback, &have_fallback };
+	if (scan_project_then_stdlib(file_path, stdlib_path, &scan)) return true;
+
+	// Nothing visible anywhere — fall back to the first module-blind match.
+	if (have_fallback)
+	{
+		out.append(fallback.str_view());
+		return true;
+	}
+	return false;
 }
 
 // On-disk symbol-declaration lookup, driven through the shared scan engine.
@@ -1135,6 +1158,9 @@ struct DeclScan (FileVisitor) @private
 	String method_type;
 	String module_filter;
 	DString* out;
+	ModuleCtx* ctx;
+	DString* fallback;
+	bool* have_fallback;
 }
 
 fn bool DeclScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
@@ -1143,8 +1169,16 @@ fn bool DeclScan.visit(&self, String path, String content, TokenStream* stream) 
 	{
 		DString uri = dstring::temp();
 		append_file_uri(&uri, path);
-		emit_location(uri.str_view(), content, stream.tokens.entries[found], self.out);
-		return true;
+		if (self.ctx == null || self.ctx.can_see(stream.tokens.module_of_decl(found)))
+		{
+			emit_location(uri.str_view(), content, stream.tokens.entries[found], self.out);
+			return true;
+		}
+		if (!*self.have_fallback)
+		{
+			emit_location(uri.str_view(), content, stream.tokens.entries[found], self.fallback);
+			*self.have_fallback = true;
+		}
 	}
 	return false;
 }
@@ -1242,6 +1276,11 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
+	// Module visibility of the current file — used to prefer declarations this
+	// file can actually see over same-named ones in unrelated modules.
+	ModuleCtx visctx;
+	visctx.build(&stream.tokens);
+
 	// Import path: `import std::core::dstring;` — jump to the module declaration
 	// rather than searching for a same-named symbol (which never exists).
 	String import_path = stream.tokens.import_module_path_at(cursor_idx);
@@ -1274,13 +1313,13 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 			// then with resolved alias
 			if (is_ident(ct))
 			{
-				if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, recv_type))
+				if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, recv_type, "", &visctx))
 				{
 					return;
 				}
 				if (resolved_type.len > 0 && resolved_type != recv_type)
 				{
-					if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, resolved_type))
+					if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, resolved_type, "", &visctx))
 					{
 						return;
 					}
@@ -1309,7 +1348,7 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 		String method_type = stream.tokens.resolve_method_type(cursor_idx, uri, docs);
 		if (method_type.len > 0)
 		{
-			if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type))
+			if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type, "", &visctx))
 			{
 				return;
 			}
@@ -1326,7 +1365,8 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 		module_filter = resolve_module_name(content, mod_prefix);
 		if (module_filter.len == 0) module_filter = mod_prefix;
 	}
-	stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, "", module_filter);
+	// A written qualifier is authoritative — visibility ranking only applies to bare names.
+	stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, "", module_filter, module_filter.len == 0 ? &visctx : null);
 }
 
 // Find an enum/faultdef/constdef member named `name`. Handles both the block form

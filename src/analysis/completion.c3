@@ -965,37 +965,57 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 	{
 		// Fields already assigned in this initializer are not offered again.
 		stream.tokens.seed_assigned_fields(init_lbrace, cursor_idx, &seen, &seen_count);
-		collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-		if (struct_type != recv_type)
-		{
-			collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-		}
-		return;
 	}
 
-	if (!type_receiver)
+	// Two passes: first restricted to modules visible from this file (own module
+	// tree, imports, std::core), so a local `struct Rectangle` does not merge
+	// members with the stdlib's same-named `union Rectangle`. If the visible pass
+	// emitted nothing (e.g. the defining module was never imported), rerun
+	// module-blind so results never vanish outright.
+	ModuleCtx ctx;
+	ctx.build(&stream.tokens);
+	ModuleCtx*[2] passes = { &ctx, null };
+	foreach (pass_ctx : passes)
 	{
-		// Collect struct fields (use resolved alias for struct lookup)
-		collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-		// Also try unresolved name for struct fields
-		if (struct_type != recv_type)
+		if (initializer_context)
 		{
-			collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+			// Initializer designators are fields only — methods and enum members
+			// are not valid there.
+			collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+			if (struct_type != recv_type)
+			{
+				collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+			}
+		}
+		else
+		{
+			if (!type_receiver)
+			{
+				// Collect struct fields (use resolved alias for struct lookup)
+				collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				// Also try unresolved name for struct fields
+				if (struct_type != recv_type)
+				{
+					collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				}
+
+				// Collect methods (try original alias name first, then resolved)
+				collect_type_methods(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				if (resolved_type.len > 0 && resolved_type != recv_type)
+				{
+					collect_type_methods(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				}
+			}
+
+			// Collect enum members (Type.MEMBER) — valid for both type and instance receivers.
+			collect_enum_members(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+			if (resolved_type.len > 0 && resolved_type != recv_type)
+			{
+				collect_enum_members(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+			}
 		}
 
-		// Collect methods (try original alias name first, then resolved)
-		collect_type_methods(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-		if (resolved_type.len > 0 && resolved_type != recv_type)
-		{
-			collect_type_methods(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-		}
-	}
-
-	// Collect enum members (Type.MEMBER) — valid for both type and instance receivers.
-	collect_enum_members(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
-	if (resolved_type.len > 0 && resolved_type != recv_type)
-	{
-		collect_enum_members(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count);
+		if (!*first) break; // this pass emitted members — no fallback needed
 	}
 }
 
@@ -1021,14 +1041,16 @@ fn void TokenList.seed_assigned_fields(&self, sz lbrace_idx, sz cursor_idx, Stri
 	}
 }
 
-// Collect all struct fields matching prefix from a TokenList
-fn void TokenList.collect_struct_fields_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count)
+// Collect all struct fields matching prefix from a TokenList.
+// A non-null ctx skips declarations in modules not visible from the requesting file.
+fn void TokenList.collect_struct_fields_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
 		TokenType kw = self.entries[i].type;
 		if (kw != STRUCT && kw != BITSTRUCT && kw != UNION) continue;
 		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+		if (ctx != null && !ctx.can_see(self.module_of_decl(i))) continue;
 
 		sz brace = i + 2;
 		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
@@ -1075,8 +1097,9 @@ fn void TokenList.collect_struct_fields_into(&self, String type_name, String pre
 	}
 }
 
-// Collect all methods matching prefix from a TokenList (fn Type.method_name( patterns)
-fn void TokenList.collect_methods_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count)
+// Collect all methods matching prefix from a TokenList (fn Type.method_name( patterns).
+// A non-null ctx skips declarations in modules not visible from the requesting file.
+fn void TokenList.collect_methods_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx)
 {
 	for (sz i = 0; i < self.size; i++)
 	{
@@ -1093,6 +1116,7 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 					&& self.entries[j - 3].text == type_name
 					&& is_ident(self.entries[j - 1].type))
 				{
+					if (ctx != null && !ctx.can_see(self.module_of_decl(i))) break;
 					String method_name = self.entries[j - 1].text;
 					if (prefix.len > 0 && !starts_with_ci(method_name, prefix)) break;
 
@@ -1126,14 +1150,16 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 	}
 }
 
-// Collect enum/faultdef members matching prefix from a TokenList (enum Type { MEMBER, ... } patterns)
-fn void TokenList.collect_enum_members_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count)
+// Collect enum/faultdef members matching prefix from a TokenList (enum Type { MEMBER, ... } patterns).
+// A non-null ctx skips declarations in modules not visible from the requesting file.
+fn void TokenList.collect_enum_members_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
 		TokenType kw = self.entries[i].type;
 		if (kw != ENUM && kw != FAULTDEF) continue;
 		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+		if (ctx != null && !ctx.can_see(self.module_of_decl(i))) continue;
 
 		sz brace = i + 2;
 		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
@@ -1179,7 +1205,7 @@ fn void TokenList.collect_enum_members_into(&self, String type_name, String pref
 // Collect struct fields across current file, open docs, project files, and stdlib
 // One member-collection routine per member kind (fields / methods / enum members) —
 // all three share the same 4-step search, differing only in the TokenList collector.
-alias MemberCollectFn = fn void(TokenList*, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count);
+alias MemberCollectFn = fn void(TokenList*, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx);
 
 struct MemberScan (FileVisitor) @private
 {
@@ -1190,16 +1216,18 @@ struct MemberScan (FileVisitor) @private
 	bool* first;
 	String[MAX_DOC_IDENTS]* seen;
 	sz* seen_count;
+	ModuleCtx* ctx;
 }
 
 fn bool MemberScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	self.collect(&stream.tokens, self.type_name, self.prefix, self.out, self.first, self.seen, self.seen_count);
+	self.collect(&stream.tokens, self.type_name, self.prefix, self.out, self.first, self.seen, self.seen_count, self.ctx);
 	return false; // collect-all: never stop early
 }
 
 // Collect type members (per `collect`) across current file, open docs, project files, and stdlib.
-fn void collect_members_all(MemberCollectFn collect, String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+// A non-null ctx restricts matches to modules visible from the requesting file.
+fn void collect_members_all(MemberCollectFn collect, String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
 {
 	// 1. Current file
 	{
@@ -1207,7 +1235,7 @@ fn void collect_members_all(MemberCollectFn collect, String type_name, String ur
 		bool owns;
 		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
 		defer { if (owns) owned.free(); }
-		collect(&stream.tokens, type_name, prefix, out, first, seen, seen_count);
+		collect(&stream.tokens, type_name, prefix, out, first, seen, seen_count, ctx);
 	}
 
 	// 2. Open documents (reuse their cached token streams)
@@ -1215,25 +1243,25 @@ fn void collect_members_all(MemberCollectFn collect, String type_name, String ur
 	{
 		if (docs.entries[d].uri == uri) continue;
 		TokenStream* other_stream = docs.entries[d].get_tokens();
-		collect(&other_stream.tokens, type_name, prefix, out, first, seen, seen_count);
+		collect(&other_stream.tokens, type_name, prefix, out, first, seen, seen_count, ctx);
 	}
 
 	// 3 + 4. Project files on disk, then stdlib
-	MemberScan scan = { collect, type_name, prefix, out, first, seen, seen_count };
+	MemberScan scan = { collect, type_name, prefix, out, first, seen, seen_count, ctx };
 	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
 }
 
-fn void collect_struct_fields(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+fn void collect_struct_fields(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_struct_fields_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count);
+	collect_members_all(&TokenList.collect_struct_fields_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count, ctx);
 }
 
-fn void collect_type_methods(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+fn void collect_type_methods(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_methods_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count);
+	collect_members_all(&TokenList.collect_methods_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count, ctx);
 }
 
-fn void collect_enum_members(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+fn void collect_enum_members(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_enum_members_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count);
+	collect_members_all(&TokenList.collect_enum_members_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count, ctx);
 }

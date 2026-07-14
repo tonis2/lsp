@@ -317,3 +317,68 @@ fn void other() { String content = "x"; }`;
 		ds.close("file:///other.c3");
 	}
 }
+
+// --- Module-visibility tests ---
+
+// References to a type must not include same-named tokens in files whose module
+// neither is, imports, nor is imported by the type's module.
+fn void test_references_module_visibility() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Imports myapp — its Config occurrences are ours.
+	ds.open("file:///user.c3", "module consumer;\nimport myapp;\nfn void t() { Config c; }", 1);
+	// Unrelated module with its own Config — must be excluded.
+	ds.open("file:///other.c3", "module other;\nstruct Config { int y; }\nfn void u() { Config c; }", 1);
+
+	String content = "module myapp;\nstruct Config { int x; }";
+	sz offset = content.len - 12; // on `Config`
+	encode_references("file:///main.c3", content, offset, ds, "", true, &out);
+	String result = out.str_view();
+	assert(result.contains("file:///user.c3"), "importer's occurrences must be included, got: %s", result);
+	assert(!result.contains("file:///other.c3"), "unrelated module's Config is a different symbol, got: %s", result);
+
+	ds.close("file:///user.c3");
+	ds.close("file:///other.c3");
+}
+
+// Rename must respect the same visibility rule: the unrelated module keeps its name.
+fn void test_rename_module_visibility() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///user.c3", "module consumer;\nimport myapp;\nfn void t() { Config c; }", 1);
+	ds.open("file:///other.c3", "module other;\nstruct Config { int y; }", 1);
+
+	String content = "module myapp;\nstruct Config { int x; }";
+	sz offset = content.len - 12; // on `Config`
+	encode_rename("file:///main.c3", content, offset, ds, "", "Settings", &out);
+	String result = out.str_view();
+	assert(result.contains("file:///user.c3"), "importer must be renamed, got: %s", result);
+	assert(!result.contains("file:///other.c3"), "unrelated module must not be renamed, got: %s", result);
+
+	ds.close("file:///user.c3");
+	ds.close("file:///other.c3");
+}
+
+// From the *importer's* file, the symbol must resolve to the imported module's
+// declaration — not to a same-named declaration in an unrelated module that
+// happens to come first in scan order.
+fn void test_references_from_importer_resolves_visible_decl() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	// Opened first: would win under first-found module resolution.
+	ds.open("file:///other.c3", "module other;\nstruct Config { int y; }\nfn void u() { Config c; }", 1);
+	ds.open("file:///lib.c3", "module myapp;\nstruct Config { int x; }", 1);
+
+	String content = "module consumer;\nimport myapp;\nfn void t() { Config c; }";
+	sz offset = content.len - 10; // on `Config`
+	encode_references("file:///user.c3", content, offset, ds, "", true, &out);
+	String result = out.str_view();
+	assert(result.contains("file:///lib.c3"), "imported module's declaration site must be included, got: %s", result);
+	assert(!result.contains("file:///other.c3"), "unrelated module must be excluded even when scanned first, got: %s", result);
+
+	ds.close("file:///other.c3");
+	ds.close("file:///lib.c3");
+}
