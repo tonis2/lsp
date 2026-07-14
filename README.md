@@ -4,11 +4,11 @@ A Language Server Protocol implementation for the [C3 programming language](http
 
 ## Features
 
-- **Go to Definition / Declaration** — navigate to functions, macros, types, constants, enum members, and struct fields; resolves method calls, module-qualified paths (`std::io::printfn`), and individual segments of `import` statements; searches the current file, project sources, and the C3 standard library
-- **Find References** — find all occurrences of a symbol across the project and stdlib
-- **Rename Symbol** — rename identifiers, types, and constants across files
+- **Go to Definition / Declaration** — navigate to functions, macros, types, constants, enum members, and struct fields; resolves method calls, module-qualified paths (`std::io::printfn`), and individual segments of `import` statements; searches the current file, project sources, and the C3 standard library, preferring declarations in modules visible from the current file (its module tree and imports)
+- **Find References** — find all occurrences of a symbol across the project and stdlib, skipping files that cannot see the symbol's module
+- **Rename Symbol** — rename identifiers, types, and constants across files.
 - **Hover** — type signatures and doc comments (`<* ... *>`) for functions, macros, types, and struct fields
-- **Completion** — keywords, types, identifiers, compile-time builtins (`$if`, `@sizeof`, …), and attribute names; member completion after `.` for struct fields, methods, and enum values (with type inference through variables, parameters, and optionals)
+- **Completion** — keywords, types, identifiers, compile-time builtins (`$if`, `@sizeof`, …), and attribute names; member completion after `.` for struct fields, methods, and enum values.
 - **Signature Help** — parameter hints when calling functions and macros, with the active parameter highlighted
 - **Document Symbols** — outline of modules, functions, structs, enums, macros, and constants
 - **Document Highlights** — highlight all occurrences of a symbol in the current file
