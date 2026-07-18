@@ -12,7 +12,7 @@ A Language Server Protocol implementation for the [C3 programming language](http
 - **Signature Help** — parameter hints when calling functions and macros, with the active parameter highlighted
 - **Document Symbols** — outline of modules, functions, structs, enums, macros, and constants
 - **Document Highlights** — highlight all occurrences of a symbol in the current file
-- **Semantic Tokens** — enhanced syntax highlighting for identifiers, types, functions, macros, and attributes
+- **Semantic Tokens** — enhanced syntax highlighting for identifiers, types, functions, macros, and attributes, including inside contract blocks (directives like `@require` and their arguments are colored as code, prose as comment)
 - **Folding Ranges** — code folding for braces, imports, and block comments
 - **Diagnostics** — instant lexer errors while typing, plus errors and warnings from the C3 compiler on save (throttled, configurable)
 

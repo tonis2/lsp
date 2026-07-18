@@ -4,7 +4,7 @@
   "dependency-search-paths": [ "lib" ],
   "dependencies": ["lexer", "argparse"],
   "authors": [ "Tonis" ],
-  "version": "0.2.1",
+  "version": "0.2.2",
   "sources": [ "src/**" ],
   "test-sources": [ "test/**" ],
   "build-dir": "build",
