@@ -244,6 +244,140 @@ fn sz utf16_len(String content, sz start, sz end)
 	return count;
 }
 
+// Delta-encoding state shared by every emitted token segment: LSP semantic
+// tokens are relative to the previous token, so all emission must go through
+// one ordered stream of calls.
+struct SemanticEmitState
+{
+	sz prev_line;
+	sz prev_start_char;
+	bool first;
+}
+
+// Emit one colored byte range [seg_start, seg_end), split per line (the LSP
+// data format has no multi-line tokens) with positions in UTF-16 units.
+fn void SemanticEmitState.emit(&self, String content, LineOffsets* lo, DString* out,
+	SemanticCategory category, sz tok_start, sz tok_end)
+{
+	sz start_line = lo.find_line(tok_start);
+	sz end_line = lo.find_line(tok_end > 0 ? tok_end - 1 : 0);
+
+	for (sz ln = start_line; ln <= end_line; ln++)
+	{
+		sz seg_start;
+		sz seg_end;
+
+		if (ln == start_line)
+		{
+			seg_start = tok_start;
+		}
+		else
+		{
+			seg_start = lo.entries[ln];
+		}
+
+		if (ln == end_line)
+		{
+			seg_end = tok_end;
+		}
+		else
+		{
+			// End at the newline (or next line's offset)
+			seg_end = ln + 1 < lo.size ? lo.entries[ln + 1] : tok_end;
+			// Don't include the newline character itself
+			if (seg_end > seg_start && seg_end <= content.len && content[seg_end - 1] == '\n')
+			{
+				seg_end--;
+			}
+			if (seg_end > seg_start && seg_end <= content.len && content[seg_end - 1] == '\r')
+			{
+				seg_end--;
+			}
+		}
+
+		if (seg_end <= seg_start) continue;
+
+		sz seg_char = utf16_len(content, lo.entries[ln], seg_start);
+		sz seg_len = utf16_len(content, seg_start, seg_end);
+		sz delta_line = ln - self.prev_line;
+		sz delta_start_char = delta_line == 0 ? seg_char - self.prev_start_char : seg_char;
+
+		if (!self.first) out.append_char(',');
+		out.appendf("%d,%d,%d,%d,0", delta_line, delta_start_char, seg_len, category.index);
+		self.first = false;
+
+		self.prev_line = ln;
+		self.prev_start_char = seg_char;
+	}
+}
+
+// A contract block `<* ... *>` is a single lexer token, but coloring it all as
+// one comment paints over the directive lines that should read as code. Split
+// it instead: the `<*`/`*>` delimiters and the leading prose stay comment-
+// colored, while the directive section is re-lexed so `@require`-style names
+// get the decorator color and their arguments highlight like ordinary code.
+fn void SemanticEmitState.emit_contract(&self, String content, LineOffsets* lo, DString* out, Token tok)
+{
+	sz tok_end = tok.offset + tok.len;
+	if (tok.len < 5 || content[tok_end - 2 : 2] != "*>")
+	{
+		// Degenerate/unterminated contract — keep it a plain comment.
+		self.emit(content, lo, out, COMMENT, tok.offset, tok_end);
+		return;
+	}
+
+	ContractLexer cl;
+	cl.init(content[tok.offset : tok.len]);
+	TokenList ctoks;
+	ctoks.init(mem);
+	defer ctoks.free();
+	while (try t = cl.next())
+	{
+		if (t.type == EOL || t.type == EOF) continue;
+		ctoks.push(t);
+	}
+
+	// `<*` plus the prose intro (everything before the first @directive line).
+	// Token offsets are relative to the directive section, which starts after
+	// the 2-char `<*` delimiter and the intro.
+	sz code_base = ctoks.size > 0 ? tok.offset + 2 + cl.intro.len : tok_end - 2;
+	sz intro_end = code_base;
+	while (intro_end > tok.offset
+		&& (content[intro_end - 1] == '\n' || content[intro_end - 1] == '\r'))
+	{
+		intro_end--;
+	}
+	self.emit(content, lo, out, COMMENT, tok.offset, intro_end);
+
+	for (sz k = 0; k < ctoks.size; k++)
+	{
+		Token t = ctoks.entries[k];
+		SemanticCategory c = map_token_type(t.type);
+		// Same refinements as pass 1 of classify_roles.
+		if (c == VARIABLE && t.type == IDENT)
+		{
+			if (k + 1 < ctoks.size)
+			{
+				switch (ctoks.entries[k + 1].type)
+				{
+					case LPAREN: c = FUNCTION;
+					case SCOPE:  c = NAMESPACE;
+					default:     break;
+				}
+			}
+			if (c == VARIABLE && k > 0 && ctoks.entries[k - 1].type == DOT)
+			{
+				c = PROPERTY;
+			}
+		}
+		if (c == SKIP) continue;
+		self.emit(content, lo, out, c, code_base + t.offset, code_base + t.offset + t.len);
+	}
+
+	// Closing `*>`.
+	self.emit(content, lo, out, COMMENT, tok_end - 2, tok_end);
+}
+
 fn void encode_semantic_tokens(String content, DString* out, TokenStream* cached = null)
 {
 	TokenStream owned;
@@ -260,86 +394,18 @@ fn void encode_semantic_tokens(String content, DString* out, TokenStream* cached
 	defer mem::free(roles);
 	classify_roles(stream, roles);
 
-	sz prev_line = 0;
-	sz prev_start_char = 0;
-	bool first = true;
+	SemanticEmitState st = { .prev_line = 0, .prev_start_char = 0, .first = true };
 
 	for (sz i = 0; i < n; i++)
 	{
 		Token tok = stream.tokens.entries[i];
+		if (tok.type == CONTRACT)
+		{
+			st.emit_contract(content, lo, out, tok);
+			continue;
+		}
 		SemanticCategory category = roles[i];
 		if (category == SKIP) continue;
-
-		sz tok_start = tok.offset;
-		sz tok_end = tok.offset + tok.len;
-		sz start_line = lo.find_line(tok_start);
-		sz end_line = lo.find_line(tok_end > 0 ? tok_end - 1 : 0);
-
-		if (start_line == end_line)
-		{
-			// Single-line token — emit directly (positions in UTF-16 units)
-			sz start_char = utf16_len(content, lo.entries[start_line], tok_start);
-			sz tok_u16_len = utf16_len(content, tok_start, tok_end);
-			sz delta_line = start_line - prev_line;
-			sz delta_start_char = delta_line == 0 ? start_char - prev_start_char : start_char;
-
-			if (!first) out.append_char(',');
-			out.appendf("%d,%d,%d,%d,0", delta_line, delta_start_char, tok_u16_len, category.index);
-			first = false;
-
-			prev_line = start_line;
-			prev_start_char = start_char;
-		}
-		else
-		{
-			// Multi-line token — split into one entry per line
-			for (sz ln = start_line; ln <= end_line; ln++)
-			{
-				sz seg_start;
-				sz seg_end;
-
-				if (ln == start_line)
-				{
-					seg_start = tok_start;
-				}
-				else
-				{
-					seg_start = lo.entries[ln];
-				}
-
-				if (ln == end_line)
-				{
-					seg_end = tok_end;
-				}
-				else
-				{
-					// End at the newline (or next line's offset)
-					seg_end = ln + 1 < lo.size ? lo.entries[ln + 1] : tok_end;
-					// Don't include the newline character itself
-					if (seg_end > seg_start && seg_end <= content.len && content[seg_end - 1] == '\n')
-					{
-						seg_end--;
-					}
-					if (seg_end > seg_start && seg_end <= content.len && content[seg_end - 1] == '\r')
-					{
-						seg_end--;
-					}
-				}
-
-				if (seg_end <= seg_start) continue;
-
-				sz seg_char = utf16_len(content, lo.entries[ln], seg_start);
-				sz seg_len = utf16_len(content, seg_start, seg_end);
-				sz delta_line = ln - prev_line;
-				sz delta_start_char = delta_line == 0 ? seg_char - prev_start_char : seg_char;
-
-				if (!first) out.append_char(',');
-				out.appendf("%d,%d,%d,%d,0", delta_line, delta_start_char, seg_len, category.index);
-				first = false;
-
-				prev_line = ln;
-				prev_start_char = seg_char;
-			}
-		}
+		st.emit(content, lo, out, category, tok.offset, tok.offset + tok.len);
 	}
 }

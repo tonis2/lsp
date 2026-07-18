@@ -177,6 +177,30 @@ fn void test_encode_number() @test {
 	assert(out.str_view() == "0,0,2,11,0", "got: %s", out.str_view());
 }
 
+fn void test_encode_contract_directive() @test {
+	DString out = dstring::temp();
+	// Contract: `<*` + prose stay COMMENT (9); `@require` is DECORATOR (8);
+	// its arguments re-lex as code: `x` VARIABLE (4), `0` NUMBER (11);
+	// closing `*>` is COMMENT again.
+	encode_semantic_tokens("<*\n desc\n @require x > 0\n*>", &out);
+	assert(out.str_view() == "0,0,2,9,0,1,0,5,9,0,1,1,8,8,0,0,9,1,4,0,0,4,1,11,0,1,0,2,9,0",
+		"got: %s", out.str_view());
+}
+
+fn void test_encode_contract_no_directives() @test {
+	DString out = dstring::temp();
+	// A contract with only prose stays entirely comment-colored.
+	encode_semantic_tokens("<*\n hello\n*>", &out);
+	assert(out.str_view() == "0,0,2,9,0,1,0,6,9,0,1,0,2,9,0", "got: %s", out.str_view());
+}
+
+fn void test_encode_contract_single_line() @test {
+	DString out = dstring::temp();
+	// `<* @pure *>` — @pure gets the decorator color, delimiters stay comment.
+	encode_semantic_tokens("<* @pure *>", &out);
+	assert(out.str_view() == "0,0,2,9,0,0,3,5,8,0,0,6,2,9,0", "got: %s", out.str_view());
+}
+
 fn void test_encode_multiline_block_comment() @test {
 	DString out = dstring::temp();
 	// "/* a\nb */" → BLOCK_COMMENT → COMMENT (9), split per line
