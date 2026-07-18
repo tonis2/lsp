@@ -398,6 +398,27 @@ fn sz TokenList.match_rbracket(&self, sz lbracket_idx)
 	return self.size;
 }
 
+// Given the index of an LPAREN token, returns the index of its matching RPAREN.
+// Returns self.size if the parens are unbalanced.
+fn sz TokenList.match_rparen(&self, sz lparen_idx)
+{
+	sz depth = 0;
+	for (sz j = lparen_idx; j < self.size; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == LPAREN)
+		{
+			depth++;
+		}
+		else if (t == RPAREN)
+		{
+			depth--;
+			if (depth == 0) return j;
+		}
+	}
+	return self.size;
+}
+
 // Given the index of an RBRACKET token, returns the index of its matching LBRACKET
 // by scanning backward. Returns self.size if the brackets are unbalanced.
 fn sz TokenList.match_lbracket_back(&self, sz rbracket_idx)

@@ -149,6 +149,57 @@ fn void test_symbols_method_orphan() @test {
 	assert(result.contains(`"kind":12`), "got: %s", result); // Function
 }
 
+fn void test_symbols_generic_return_range() @test {
+	DString out = dstring::temp();
+	// `{int}` is a generic return type block, not the body. The range must reach
+	// the real body's `}` — VS Code rejects the whole outline if any symbol's
+	// selectionRange is not contained in its range.
+	encode_document_symbols("fn List{int} get_items() { return x; }", &out);
+	String result = out.str_view();
+	assert(result.contains(`"name":"get_items"`), "got: %s", result);
+	assert(result.contains(`"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":38}}`),
+		"range must span to the body brace, got: %s", result);
+	assert(result.contains(`"selectionRange":{"start":{"line":0,"character":13},"end":{"line":0,"character":22}}`),
+		"got: %s", result);
+}
+
+fn void test_symbols_macro_generic_return() @test {
+	DString out = dstring::temp();
+	// The macro's name is the ident before the parameter list, not its return type.
+	encode_document_symbols("macro List{int} make_list() { }", &out);
+	String result = out.str_view();
+	assert(result.contains(`"name":"make_list"`), "got: %s", result);
+	assert(!result.contains(`"name":"List"`), "return type is not the name, got: %s", result);
+}
+
+fn void test_symbols_bodyless_fn_ends_at_semicolon() @test {
+	DString out = dstring::temp();
+	// Interface members have no body — the range ends at `;`, not at a brace
+	// belonging to some later declaration.
+	encode_document_symbols("interface Reader { fn void read(); }\nstruct After { int x; }", &out);
+	String result = out.str_view();
+	assert(result.contains(`"name":"read","kind":12,"range":{"start":{"line":0,"character":19},"end":{"line":0,"character":34}}`),
+		"got: %s", result);
+}
+
+fn void test_symbols_short_body_fn() @test {
+	DString out = dstring::temp();
+	encode_document_symbols("fn int one() => 1;", &out);
+	String result = out.str_view();
+	assert(result.contains(`"name":"one"`), "got: %s", result);
+	assert(result.contains(`"end":{"line":0,"character":18}`), "range ends at `;`, got: %s", result);
+}
+
+fn void test_symbols_macro_method_nested() @test {
+	DString out = dstring::temp();
+	// Macro methods nest under their type just like fn methods.
+	encode_document_symbols("struct Vec { int x; }\nmacro void Vec.add(v) { }", &out);
+	String result = out.str_view();
+	assert(result.contains(`"children":`), "expected children array, got: %s", result);
+	assert(result.contains(`"name":"add"`), "got: %s", result);
+	assert(!result.contains(`"name":"Vec.add"`), "macro method should be nested, got: %s", result);
+}
+
 fn void test_symbols_no_truncation() @test {
 	// More declarations than the old fixed cap (512). All must be emitted — no silent
 	// truncation now that the symbol store is a heap-backed list.

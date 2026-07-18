@@ -97,7 +97,8 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 				}
 				continue;
 			case FUNC:
-				// fn ... IDENT LPAREN — the IDENT before LPAREN is the name
+			case MACRO:
+				// fn/macro ... IDENT LPAREN — the IDENT before LPAREN is the name
 				// If preceded by TYPE_IDENT DOT, it's a method
 				sz lparen_idx = 0;
 				for (sz j = i + 1; j < stream.tokens.size && j < i + MAX_LOOKAHEAD; j++)
@@ -120,7 +121,7 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 				if (lparen_idx > 0 && lparen_idx > i + 1)
 				{
 					Token fn_name = stream.tokens.entries[lparen_idx - 1];
-					if (is_ident(fn_name.type))
+					if (is_ident(fn_name.type) || (tok.type == MACRO && fn_name.type == TYPE_IDENT))
 					{
 						// Check for Type.method pattern
 						if (lparen_idx >= 3 + i && stream.tokens.entries[lparen_idx - 2].type == DOT
@@ -138,8 +139,11 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 							name_offset = fn_name.offset;
 							name_len = fn_name.len;
 						}
-						kind = 6; // Method for all functions, will be nested if has parent
-						has_braces = true;
+						kind = 6; // Method for all functions/macros, will be nested if has parent
+						// The body brace can only come after the parameter list; scanning
+						// from the keyword would stop at a generic return type's `{...}`
+						// (e.g. `fn List{int} foo()`) and end the range before the name.
+						end_offset = stream.tokens.find_callable_end(lparen_idx);
 					}
 				}
 			case STRUCT:
@@ -178,20 +182,6 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 					kind = 11; // Interface
 					has_braces = true;
 				}
-			case MACRO:
-				// macro IDENT or macro TYPE_IDENT
-				if (i + 1 < stream.tokens.size)
-				{
-					Token nt = stream.tokens.entries[i + 1];
-					if (is_ident(nt.type) || nt.type == TYPE_IDENT)
-					{
-						name = nt.text;
-						name_offset = nt.offset;
-						name_len = nt.len;
-						kind = 12; // Function
-						has_braces = true;
-					}
-				}
 			case CONSTDEF:
 			case TYPEDEF:
 			case ALIAS:
@@ -228,7 +218,9 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 		{
 			end_offset = stream.tokens.find_brace_end(i + 1);
 		}
-		if (end_offset == 0)
+		// LSP invariant (enforced by VS Code): selectionRange must be contained in
+		// range. Whatever the end detection produced, never end before the name.
+		if (end_offset < name_offset + name_len)
 		{
 			end_offset = name_offset + name_len;
 		}
@@ -332,7 +324,8 @@ fn void push_module_symbol(
 	sz end_offset
 )
 {
-	if (end_offset == 0) end_offset = name_offset + name_len;
+	// Keep selectionRange contained in range even if the EOS scan came up short.
+	if (end_offset < name_offset + name_len) end_offset = name_offset + name_len;
 
 	sz decl_line = lo.find_line(decl_offset);
 	sz decl_char = decl_offset - lo.entries[decl_line];
@@ -380,6 +373,31 @@ fn sz TokenList.find_eos_end(&self, sz start)
 		if (self.entries[j].type == EOS)
 		{
 			return self.entries[j].offset + self.entries[j].len;
+		}
+	}
+	return 0;
+}
+
+// End of a fn/macro declaration whose parameter list opens at lparen_idx: the
+// matching `}` of the body, or the terminating `;` for body-less declarations
+// (interface members, extern fns, `=> expr;` short bodies). Returns 0 when
+// neither is found, so the caller falls back to ending at the name.
+fn sz TokenList.find_callable_end(&self, sz lparen_idx)
+{
+	sz rparen = self.match_rparen(lparen_idx);
+	if (rparen >= self.size) return 0;
+	for (sz j = rparen + 1; j < self.size; j++)
+	{
+		switch (self.entries[j].type)
+		{
+			case LBRACE:
+				sz rb = self.match_rbrace(j);
+				if (rb >= self.size) return 0;
+				return self.entries[rb].offset + self.entries[rb].len;
+			case EOS:
+				return self.entries[j].offset + self.entries[j].len;
+			default:
+				break;
 		}
 	}
 	return 0;
