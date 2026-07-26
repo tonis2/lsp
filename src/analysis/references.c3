@@ -143,7 +143,7 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 
 		// 3 + 4. Scan project files on disk, then stdlib
 		String file_path = uri_to_path(uri);
-		RefsScan scan = { cursor_tok, out, &first, target_module };
+		RefsScan scan = { cursor_tok, out, &first, target_module, uri, docs };
 		scan_project_then_stdlib(file_path, stdlib_path, &scan);
 	}
 
@@ -301,7 +301,7 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 		String file_path = uri_to_path(uri);
 		if (file_path.len > 0)
 		{
-			RenameScan scan = { cursor_tok, new_name, out, &first_uri, target_module };
+			RenameScan scan = { cursor_tok, new_name, out, &first_uri, target_module, uri, docs };
 			scan_project_dirs(file_path, &scan);
 		}
 	}
@@ -414,6 +414,21 @@ fn void TokenList.collect_rename_edits_scoped(&self, String uri, String content,
 	}
 }
 
+// True when `path` was already collected from an in-memory buffer — either the
+// request's own document or another open document. The on-disk scan covers the
+// same project directories those files live in, so without this every hit in an
+// open file is emitted a second time (and from staler content).
+fn bool already_collected(String path, String origin_uri, DocumentList* docs) @private
+{
+	if (origin_uri.len > 0 && path_matches_uri(path, origin_uri)) return true;
+	if (docs == null) return false;
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (path_matches_uri(path, docs.entries[d].uri)) return true;
+	}
+	return false;
+}
+
 // On-disk rename-edit collection, driven through the shared scan engine.
 struct RenameScan (FileVisitor) @private
 {
@@ -422,10 +437,13 @@ struct RenameScan (FileVisitor) @private
 	DString* out;
 	bool* first_uri;
 	String target_module;
+	String origin_uri;
+	DocumentList* docs;
 }
 
 fn bool RenameScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
+	if (already_collected(path, self.origin_uri, self.docs)) return false;
 	if (!file_can_see(&stream.tokens, self.target_module)) return false;
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);
@@ -440,10 +458,13 @@ struct RefsScan (FileVisitor) @private
 	DString* out;
 	bool* first;
 	String target_module;
+	String origin_uri;
+	DocumentList* docs;
 }
 
 fn bool RefsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
+	if (already_collected(path, self.origin_uri, self.docs)) return false;
 	if (!file_can_see(&stream.tokens, self.target_module)) return false;
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);

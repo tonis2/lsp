@@ -226,6 +226,7 @@ fn void encode_server_capabilities(DString* out, String version)
 	out.append(`},`);
 	out.append(`"foldingRangeProvider":true,`);
 	out.append(`"documentSymbolProvider":true,`);
+	out.append(`"workspaceSymbolProvider":true,`);
 	out.append(`"hoverProvider":true,`);
 	// ':' is registered so module-path completion can trigger, but only the second ':'
 	// of '::' actually produces items (a lone ':' is neutralized in encode_completions).

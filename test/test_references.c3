@@ -134,6 +134,31 @@ fn void test_references_cross_file() @test {
 	ds.close("file:///other.c3");
 }
 
+// The on-disk project scan covers the same directories the open files live in.
+// Files already collected from an in-memory buffer must be skipped there, or every
+// hit in them is emitted twice (and the second time from staler, on-disk content).
+fn void test_already_collected_skips_origin_and_open_docs() @test {
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///proj/src/other.c3", "fn void greet() {}", 1);
+
+	assert(already_collected("/proj/src/main.c3", "file:///proj/src/main.c3", ds),
+		"the requesting document is already collected in step 1");
+	assert(already_collected("/proj/src/other.c3", "file:///proj/src/main.c3", ds),
+		"an open document is already collected in step 2");
+	assert(!already_collected("/proj/src/untouched.c3", "file:///proj/src/main.c3", ds),
+		"a file that is not open must still be scanned from disk");
+
+	ds.close("file:///proj/src/other.c3");
+}
+
+fn void test_already_collected_without_documents() @test {
+	assert(already_collected("/proj/src/main.c3", "file:///proj/src/main.c3", null),
+		"origin must match even with no document list");
+	assert(!already_collected("/proj/src/main.c3", "", null),
+		"no origin and no documents means nothing has been collected yet");
+}
+
 fn void test_references_keyword_empty() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);

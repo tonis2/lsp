@@ -62,6 +62,26 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 {
 	self.initialized = true;
 
+	// Remember the workspace root. workspaceFolders is the modern field and wins;
+	// rootUri is the deprecated fallback still sent by older clients.
+	String root_uri = "";
+	if (try folders = msg.get("params")!!.get("workspaceFolders"))
+	{
+		if (folders.get_len() > 0)
+		{
+			Object* first = folders.get_at(0);
+			if (first != null) root_uri = first.get_string("uri") ?? "";
+		}
+	}
+	if (root_uri.len == 0) root_uri = msg.get("params")!!.get_string("rootUri") ?? "";
+	if (root_uri.len > 0)
+	{
+		String p = uri_to_path(root_uri);
+		char[] copy = mem::new_array(char, p.len);
+		copy[..] = p[..];
+		self.root_path = (String)copy;
+	}
+
 	// Extract initializationOptions if provided by the client
 	if (try opts = msg.get("params")!!.get("initializationOptions"))
 	{
@@ -281,6 +301,30 @@ fn void LspServer.handle_document_symbol(&self, Object* msg, String id_json)
 		result.appendf("[%s]", data.str_view());
 		send_response(id_json, result.str_view());
 	}
+}
+
+fn void LspServer.handle_workspace_symbol(&self, Object* msg, String id_json)
+{
+	String query = msg.get("params")!!.get_string("query") ?? "";
+
+	// The scan engine finds project.json by walking up from a file path, so the
+	// anchor must be a file inside the project: an open document when there is one,
+	// otherwise a synthetic path directly under the workspace root.
+	String anchor = "";
+	DString anchor_buf = dstring::temp();
+	if (self.documents.size > 0)
+	{
+		anchor = uri_to_path(self.documents.entries[0].uri);
+	}
+	else if (self.root_path.len > 0)
+	{
+		anchor_buf.appendf("%s/project.json", self.root_path);
+		anchor = anchor_buf.str_view();
+	}
+
+	DString data = dstring::temp();
+	encode_workspace_symbols(query, &self.documents, anchor, &data);
+	send_response(id_json, data.str_view());
 }
 
 fn void LspServer.handle_hover(&self, Object* msg, String id_json)

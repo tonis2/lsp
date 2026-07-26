@@ -19,6 +19,9 @@ struct LspServer
 	DocumentList documents;
 	String stdlib_path;
 	String compiler_path;
+	// Workspace root from initialize, as a filesystem path. workspace/symbol carries
+	// no document to locate project.json from, so it anchors the project scan here.
+	String root_path;
 	long diag_delay_ms;
 	Time last_diag_time;
 	PublishedFiles diag_files;
@@ -73,6 +76,7 @@ const MethodHandler[] HANDLERS = {
 	{ "textDocument/references",          &LspServer.handle_references },
 	{ "textDocument/signatureHelp",       &LspServer.handle_signature_help },
 	{ "textDocument/rename",              &LspServer.handle_rename },
+	{ "workspace/symbol",                 &LspServer.handle_workspace_symbol },
 };
 
 fn void LspServer.handle_message(&self, String message)

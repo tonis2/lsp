@@ -70,12 +70,12 @@ fn String strip_json_comments(String input) @private
 	return out.str_view();
 }
 
-// Extract a directory from a source path and add it to search dirs.
-// Handles globs ("src/**"), individual files ("./helpers/context.c3"), and plain dirs ("src").
-fn void ProjectDirs.add_source_dir(&self, String src)
+// Reduce one "sources" entry to the directory it starts from. Handles globs
+// ("src/**" -> "src"), individual files ("./helpers/context.c3" -> "./helpers",
+// "main.c3" -> "."), and plain dirs ("src" -> "src"). Returns "" when the entry
+// yields no directory. Shared by project.json parsing and .c3l manifests.
+fn String source_entry_dir(String src)
 {
-	if (self.count >= MAX_SEARCH_DIRS) return;
-
 	sz dir_end = src.len;
 	for (sz j = 0; j < src.len; j++)
 	{
@@ -112,14 +112,22 @@ fn void ProjectDirs.add_source_dir(&self, String src)
 			else
 			{
 				// File in project root (e.g. "main.c3") — use "." as the dir
-				src = ".";
-				dir_end = 1;
+				return ".";
 			}
 		}
 	}
 
-	if (dir_end == 0) return;
-	String src_dir = src[:dir_end];
+	if (dir_end == 0) return "";
+	return src[:dir_end];
+}
+
+// Extract a directory from a source path and add it to search dirs.
+fn void ProjectDirs.add_source_dir(&self, String src)
+{
+	if (self.count >= MAX_SEARCH_DIRS) return;
+
+	String src_dir = source_entry_dir(src);
+	if (src_dir.len == 0) return;
 
 	// Dedup
 	for (sz k = 0; k < self.count; k++)

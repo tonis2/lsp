@@ -32,13 +32,77 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 	{
 		if (cached == null) owned.free();
 	}
-	LineOffsets* lo = stream.get_line_offsets();
-
 	// Collect all symbols first. Heap-backed lists (not fixed stack arrays) so large
 	// files aren't silently truncated at MAX_SYMBOLS and don't put ~130KB on the stack.
 	List{SymbolEntry} syms;
 	syms.init(mem);
 	defer syms.free();
+
+	collect_symbols(content, stream, &syms);
+
+	// Second pass: nest methods under their parent type symbols.
+	// Reserve the pool to the symbol count up front so it never reallocates — the
+	// children slices assigned below point into its backing buffer and must stay valid
+	// until the symbols are encoded. Total children across all parents <= syms.size.
+	List{DocumentSymbol} children_pool;
+	children_pool.init(mem, syms.size > 0 ? syms.size : 1);
+	defer children_pool.free();
+
+	for (sz i = 0; i < syms.size; i++)
+	{
+		int k = syms.entries[i].sym.kind;
+		// Only types can have children (struct, enum, interface, typedef/alias)
+		if (k != 23 && k != 10 && k != 11 && k != 26) continue;
+		String type_name = syms.entries[i].sym.name;
+
+		sz start = children_pool.size;
+		for (sz j = 0; j < syms.size; j++)
+		{
+			if (syms.entries[j].parent_type.len > 0 && syms.entries[j].parent_type == type_name)
+			{
+				children_pool.push(syms.entries[j].sym);
+				syms.entries[j].is_child = true;
+			}
+		}
+
+		if (children_pool.size > start)
+		{
+			syms.entries[i].sym.children = children_pool.entries[start..children_pool.size - 1];
+		}
+	}
+
+	// Encode: output top-level symbols only
+	bool first = true;
+	for (sz i = 0; i < syms.size; i++)
+	{
+		if (syms.entries[i].is_child) continue;
+
+		if (syms.entries[i].sym.kind == 6)
+		{
+			if (syms.entries[i].parent_type.len > 0)
+			{
+				// Orphan method (no matching struct in this file) — show as Type.method
+				DString combined = dstring::temp();
+				combined.append(syms.entries[i].parent_type);
+				combined.append_char('.');
+				combined.append(syms.entries[i].sym.name);
+				syms.entries[i].sym.name = combined.str_view();
+			}
+			syms.entries[i].sym.kind = 12; // Function
+		}
+
+		if (!first) out.append_char(',');
+		syms.entries[i].sym.encode(out);
+		first = false;
+	}
+}
+
+// Walk `stream` and push one SymbolEntry per declaration it contains. Shared by
+// textDocument/documentSymbol (which nests and encodes the result) and
+// workspace/symbol (which filters it by query and encodes it flat).
+fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* syms)
+{
+	LineOffsets* lo = stream.get_line_offsets();
 
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
@@ -61,7 +125,7 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 					Token first = stream.tokens.entries[i + 1];
 					sz path_end = stream.tokens.scope_path_end(i + 1);
 					push_module_symbol(
-						&syms,
+						syms,
 						lo,
 						content,
 						first.offset,
@@ -80,7 +144,7 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 				{
 					Token first = stream.tokens.entries[j];
 					sz path_end = stream.tokens.scope_path_end(j);
-					push_module_symbol(&syms, lo, content, first.offset, path_end - first.offset, tok.offset, eos_end);
+					push_module_symbol(syms, lo, content, first.offset, path_end - first.offset, tok.offset, eos_end);
 					// advance past this path
 					sz k = j + 1;
 					while (k + 1 < stream.tokens.size && stream.tokens.entries[k].type == SCOPE
@@ -253,62 +317,6 @@ fn void encode_document_symbols(String content, DString* out, TokenStream* cache
 				.parent_type = parent_type,
 			}
 		);
-	}
-
-	// Second pass: nest methods under their parent type symbols.
-	// Reserve the pool to the symbol count up front so it never reallocates — the
-	// children slices assigned below point into its backing buffer and must stay valid
-	// until the symbols are encoded. Total children across all parents <= syms.size.
-	List{DocumentSymbol} children_pool;
-	children_pool.init(mem, syms.size > 0 ? syms.size : 1);
-	defer children_pool.free();
-
-	for (sz i = 0; i < syms.size; i++)
-	{
-		int k = syms.entries[i].sym.kind;
-		// Only types can have children (struct, enum, interface, typedef/alias)
-		if (k != 23 && k != 10 && k != 11 && k != 26) continue;
-		String type_name = syms.entries[i].sym.name;
-
-		sz start = children_pool.size;
-		for (sz j = 0; j < syms.size; j++)
-		{
-			if (syms.entries[j].parent_type.len > 0 && syms.entries[j].parent_type == type_name)
-			{
-				children_pool.push(syms.entries[j].sym);
-				syms.entries[j].is_child = true;
-			}
-		}
-
-		if (children_pool.size > start)
-		{
-			syms.entries[i].sym.children = children_pool.entries[start..children_pool.size - 1];
-		}
-	}
-
-	// Encode: output top-level symbols only
-	bool first = true;
-	for (sz i = 0; i < syms.size; i++)
-	{
-		if (syms.entries[i].is_child) continue;
-
-		if (syms.entries[i].sym.kind == 6)
-		{
-			if (syms.entries[i].parent_type.len > 0)
-			{
-				// Orphan method (no matching struct in this file) — show as Type.method
-				DString combined = dstring::temp();
-				combined.append(syms.entries[i].parent_type);
-				combined.append_char('.');
-				combined.append(syms.entries[i].sym.name);
-				syms.entries[i].sym.name = combined.str_view();
-			}
-			syms.entries[i].sym.kind = 12; // Function
-		}
-
-		if (!first) out.append_char(',');
-		syms.entries[i].sym.encode(out);
-		first = false;
 	}
 }
 
