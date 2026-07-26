@@ -312,6 +312,22 @@ fn void emit_completion_item_detail(DString* out, String label, int kind, String
 	*first = false;
 }
 
+// Emit the compiler-builtin properties every array/slice/vector carries: `.len` on all
+// three shapes, `.ptr` only on an unsized slice (fixed arrays and vectors have no `.ptr`).
+// These are never declared in source (no `struct`/`fn` backs them), so they can't be
+// found by the normal field/method scan — this is the only place they come from.
+fn void emit_array_property_completions(String prefix, bool is_slice, DString* out, bool* first) @private
+{
+	if (prefix.len == 0 || starts_with_ci("len", prefix))
+	{
+		emit_completion_item_detail(out, "len", 10, "usz", first); // 10 = Property
+	}
+	if (is_slice && (prefix.len == 0 || starts_with_ci("ptr", prefix)))
+	{
+		emit_completion_item_detail(out, "ptr", 10, "void*", first); // 10 = Property
+	}
+}
+
 fn bool is_ident_char(char c) @private
 {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
@@ -937,7 +953,18 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 
 	// Resolve receiver type
 	if (!initializer_context) recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs);
-	if (recv_type.len == 0) return;
+	if (recv_type.len == 0)
+	{
+		// Not a named type — but it may still be a builtin array/slice/vector, which
+		// carries no struct/method declarations, only the compiler-builtin `.len` and
+		// (for slices) `.ptr` properties.
+		bool is_slice;
+		if (!initializer_context && stream.tokens.is_receiver_array(cursor_idx, uri, docs, &is_slice))
+		{
+			emit_array_property_completions(prefix, is_slice, out, first);
+		}
+		return;
+	}
 
 	// Resolve alias (e.g. LineOffsets → List)
 	String resolved_type = stream.tokens.resolve_type_alias_across(recv_type, docs);
@@ -1017,6 +1044,75 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 
 		if (!*first) break; // this pass emitted members — no fallback needed
 	}
+
+	// A typedef of an inline builtin slice (`typedef String = inline char[];`)
+	// forwards the compiler-builtin `.len`/`.ptr` properties of its underlying
+	// slice, but declares no `fn`/`struct` of its own that the scan above can find.
+	if (!initializer_context && !type_receiver)
+	{
+		bool is_slice;
+		if (resolve_inline_slice_typedef(struct_type, uri, content, docs, stdlib_path, &is_slice))
+		{
+			emit_array_property_completions(prefix, is_slice, out, first);
+		}
+		else if (struct_type != recv_type && resolve_inline_slice_typedef(recv_type, uri, content, docs, stdlib_path, &is_slice))
+		{
+			emit_array_property_completions(prefix, is_slice, out, first);
+		}
+	}
+}
+
+// Whether `type_name` is a typedef of an inline builtin slice (only `String` in the
+// stdlib today, but this also picks up any project-defined equivalent) — searches
+// current file, open docs, project files, then stdlib; stops at the first match.
+fn bool resolve_inline_slice_typedef(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, bool* is_slice) @private
+{
+	// 1. Current file
+	{
+		TokenStream owned;
+		bool owns;
+		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
+		bool found = stream.tokens.find_inline_slice_typedef(type_name, is_slice);
+		if (owns) owned.free();
+		if (found) return true;
+	}
+
+	// 2. Open documents
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].uri == uri) continue;
+		TokenStream* other = docs.entries[d].get_tokens();
+		if (other.tokens.find_inline_slice_typedef(type_name, is_slice)) return true;
+	}
+
+	// 3 + 4. Project files on disk, then stdlib
+	InlineSliceScan scan = { type_name, false, false };
+	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
+	if (scan.found)
+	{
+		*is_slice = scan.is_slice;
+		return true;
+	}
+	return false;
+}
+
+struct InlineSliceScan (FileVisitor) @private
+{
+	String type_name;
+	bool found;
+	bool is_slice;
+}
+
+fn bool InlineSliceScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	bool slice;
+	if (stream.tokens.find_inline_slice_typedef(self.type_name, &slice))
+	{
+		self.found = true;
+		self.is_slice = slice;
+		return true;
+	}
+	return false;
 }
 
 // Record field names already assigned in the initializer opened at lbrace_idx

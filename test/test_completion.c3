@@ -201,6 +201,82 @@ fn void test_completion_dot_field_detail() @test {
 	assert(result.contains(`"detail":"String"`), "expected detail with type String, got: %s", result);
 }
 
+// --- Builtin array/slice/vector property completion ---
+// Arrays/slices/vectors carry no `struct`/`fn` declarations of their own — `.len` and
+// `.ptr` are compiler-builtin properties that no source scan can find, so they need
+// their own completion path (see `is_receiver_array` / `emit_array_property_completions`).
+
+fn void test_completion_dot_slice_len_ptr() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// A slice (`char[]`, unsized) exposes both `.len` and `.ptr`.
+	String content = "fn void test() { char[] s; s.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"len"`), "expected len for slice, got: %s", result);
+	assert(result.contains(`"label":"ptr"`), "expected ptr for slice, got: %s", result);
+	assert(result.contains(`"kind":10`), "expected Property kind=10, got: %s", result);
+}
+
+fn void test_completion_dot_fixed_array_len_only() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// A fixed-size array has `.len` but no `.ptr`.
+	String content = "fn void test() { int[4] arr; arr.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"len"`), "expected len for fixed array, got: %s", result);
+	assert(!result.contains(`"label":"ptr"`), "fixed array should not offer ptr, got: %s", result);
+}
+
+fn void test_completion_dot_vector_len_only() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// A vector `T[<N>]` has `.len` but no `.ptr`.
+	String content = "fn void test() { int[<4>] v; v.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"len"`), "expected len for vector, got: %s", result);
+	assert(!result.contains(`"label":"ptr"`), "vector should not offer ptr, got: %s", result);
+}
+
+fn void test_completion_dot_array_field_self() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// A builtin-array struct field accessed through `self.` in a same-file method.
+	String content = "struct Buffer { char[] data; }\nfn void Buffer.dump(&self) { self.data.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"len"`), "expected len for self.field slice, got: %s", result);
+	assert(result.contains(`"label":"ptr"`), "expected ptr for self.field slice, got: %s", result);
+}
+
+fn void test_completion_dot_array_len_prefix_filter() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "fn void test() { char[] s; s.le";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"len"`), "expected len to match prefix 'le', got: %s", result);
+	assert(!result.contains(`"label":"ptr"`), "ptr should be filtered out by prefix 'le', got: %s", result);
+}
+
+fn void test_completion_dot_scalar_builtin_no_crash() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// A plain scalar builtin (no array suffix) has no dot-accessible members.
+	String content = "fn void test() { int x; x.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"items":[]`), "expected no completions for scalar int, got: %s", result);
+}
+
 fn void test_completion_parse_imports() @test {
 	String[MAX_IMPORTS] imports;
 	String content = "module lsp;\n\nimport std::io;\nimport c3::lexer;\nimport args;\n\nfn void main() {}";
@@ -999,4 +1075,30 @@ fn void test_completion_dot_fallback_when_not_imported() @test {
 	String result = out.str_view();
 	assert(result.contains(`"label":"radius"`), "fallback pass must still find the only candidate, got: %s", result);
 	docs.close("file:///geom.c3");
+}
+
+fn void test_completion_dot_inline_slice_typedef() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// Mirrors the stdlib's `typedef String = inline char[];` — the typedef forwards
+	// `.len`/`.ptr` from the underlying slice, on top of its own declared methods.
+	String content = "typedef Str = inline char[];\nfn void Str.upper(&self) {}\nfn void test() { Str s; s.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"len"`), "expected len, got: %s", result);
+	assert(result.contains(`"label":"ptr"`), "expected ptr, got: %s", result);
+	assert(result.contains(`"label":"upper"`), "expected declared method upper, got: %s", result);
+}
+
+fn void test_completion_dot_inline_scalar_typedef_no_array_props() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// `inline char` (not an array) — no `.len`/`.ptr` should be added.
+	String content = "typedef Cat = inline char;\nfn void test() { Cat c; c.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(!result.contains(`"label":"len"`), "scalar inline typedef should not offer len, got: %s", result);
+	assert(!result.contains(`"label":"ptr"`), "scalar inline typedef should not offer ptr, got: %s", result);
 }

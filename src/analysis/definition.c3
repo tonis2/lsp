@@ -471,15 +471,19 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 }
 
 // Find the type name of a variable by scanning for `TYPE_IDENT var`, `TYPE_IDENT* var`,
-// or the generic forms `TYPE_IDENT{...} var` / `TYPE_IDENT{...}* var`.
+// the generic forms `TYPE_IDENT{...} var` / `TYPE_IDENT{...}* var`, or a builtin
+// primitive leading type (`int var`, `char[] var`, ...).
 // Array declarations (`TYPE_IDENT[4] var`, `TYPE_IDENT[] var`, vectors `TYPE_IDENT[<4>] var`)
 // only match when the caller passes is_array to receive the flag — the element type is
-// not the variable's type, so callers that cannot handle arrays must not see it.
-fn String TokenList.find_variable_type(&self, String var_name, bool* is_array = null)
+// not the variable's type, so callers that cannot handle arrays must not see it. When
+// is_slice is also passed, it is set true for an unsized slice (`[]`) as opposed to a
+// fixed-size array or vector — the distinction that decides whether `.ptr` is valid.
+fn String TokenList.find_variable_type(&self, String var_name, bool* is_array = null, bool* is_slice = null)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
-		if (self.get(i).type != TYPE_IDENT) continue;
+		TokenType lead = self.get(i).type;
+		if (lead != TYPE_IDENT && !is_builtin_type_token(lead)) continue;
 
 		// Skip an optional generic instantiation block: TYPE_IDENT{...}
 		sz after = i + 1;
@@ -492,6 +496,7 @@ fn String TokenList.find_variable_type(&self, String var_name, bool* is_array = 
 
 		// Pointer/optional/array suffixes in any combination: TYPE_IDENT{...}[*][?][[N]] var
 		bool arr = false;
+		bool slice = false;
 		while (after < self.size)
 		{
 			TokenType at = self.entries[after].type;
@@ -504,6 +509,19 @@ fn String TokenList.find_variable_type(&self, String var_name, bool* is_array = 
 			{
 				sz close = self.match_rbracket(after);
 				if (close >= self.size) break;
+				if (!arr) slice = (after + 1 == close); // classify by the first bracket pair
+				arr = true;
+				after = close + 1;
+				continue;
+			}
+			if (at == LVEC)
+			{
+				// Vector suffix `[<N>]` — lexed as its own LVEC/RVEC pair, distinct
+				// from LBRACKET/RBRACKET, and never a slice.
+				sz close = after + 1;
+				while (close < self.size && self.entries[close].type != RVEC) close++;
+				if (close >= self.size) break;
+				if (!arr) slice = false;
 				arr = true;
 				after = close + 1;
 				continue;
@@ -520,6 +538,7 @@ fn String TokenList.find_variable_type(&self, String var_name, bool* is_array = 
 				if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
 				{
 					if (is_array) *is_array = arr;
+					if (is_slice) *is_slice = slice;
 					return self.get(i).text;
 				}
 			}
@@ -685,6 +704,51 @@ fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, Docu
 	if (type_name.len == 0) return "";
 
 	return type_name;
+}
+
+// Whether the dot-completion receiver at cursor_idx (the token AFTER the DOT) is
+// statically known to be array/slice/vector-shaped — a local variable, parameter, or
+// same-file struct field declared with an array suffix (`T[]`, `T[4]`, `T[<4>]`),
+// for ANY element type T (builtin or class). Arrays carry no named struct/method
+// declarations of their own; they only expose the compiler-builtin `.len` (all three
+// shapes) and `.ptr` (unsized slice only) properties, which resolve_receiver_type
+// cannot describe (it already returns "" for an array receiver, by design — see
+// find_variable_type/find_struct_field_type's `is_array == null` guards). Only the
+// current file's tokens are consulted — a struct defined in another file with an
+// array field is not detected, so completions may be missing (never wrong) there.
+fn bool TokenList.is_receiver_array(&self, sz cursor_idx, String uri, DocumentList* docs, bool* is_slice)
+{
+	if (cursor_idx < 2) return false;
+	if (self.entries[cursor_idx - 1].type != DOT) return false;
+	Token recv = self.entries[cursor_idx - 2];
+	if (!is_ident(recv.type)) return false;
+
+	bool is_array;
+	bool slice;
+
+	// Chained: `a.b.` (including `self.b.`) — resolve a's type, then look up b as a field.
+	if (cursor_idx >= 4 && self.entries[cursor_idx - 3].type == DOT)
+	{
+		String parent_type = self.resolve_receiver_type(cursor_idx - 2, uri, docs);
+		if (parent_type.len == 0) return false;
+		String resolved_parent = self.resolve_type_alias_across(parent_type, docs);
+		String lookup_type = resolved_parent.len > 0 ? resolved_parent : parent_type;
+
+		String field_type = self.find_struct_field_type(lookup_type, recv.text, &is_array, &slice);
+		if (field_type.len == 0 && lookup_type != parent_type)
+		{
+			field_type = self.find_struct_field_type(parent_type, recv.text, &is_array, &slice);
+		}
+		if (field_type.len == 0) return false;
+		if (is_slice) *is_slice = slice;
+		return is_array;
+	}
+
+	// Plain local variable or parameter declared in this file.
+	String type_name = self.find_variable_type(recv.text, &is_array, &slice);
+	if (type_name.len == 0) return false;
+	if (is_slice) *is_slice = slice;
+	return is_array;
 }
 
 // Walk backward from token index `start` (inclusive) to the '{' that opens the
@@ -1123,11 +1187,14 @@ fn String resolve_return_type_in_project(String file_path, String type_name, Str
 }
 
 // Find the type of a struct field: struct TypeName { FieldType field_name; }
-// Returns the type name (e.g. "TokenList"), or empty string if not found.
+// Returns the type name (e.g. "TokenList"), or empty string if not found. The field's
+// leading type may be a TYPE_IDENT or a builtin primitive (`int`, `char[]`, ...).
 // Array-typed fields (`Opt[4] options;`) only match when the caller passes is_array
 // to receive the flag — the element type alone would mislead callers that expect
-// the field's own type (e.g. dot-completion on the field).
-fn String TokenList.find_struct_field_type(&self, String type_name, String field_name, bool* is_array = null)
+// the field's own type (e.g. dot-completion on the field). When is_slice is also
+// passed, it is set true for an unsized slice (`[]`) as opposed to a fixed-size array
+// or vector — the distinction that decides whether `.ptr` is valid.
+fn String TokenList.find_struct_field_type(&self, String type_name, String field_name, bool* is_array = null, bool* is_slice = null)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
@@ -1160,13 +1227,25 @@ fn String TokenList.find_struct_field_type(&self, String type_name, String field
 				// generic block `{...}` (e.g. List{int} lst).
 				sz prev  = j - 1;
 				bool arr = false;
+				bool slice = false;
 				if (prev > 0 && self.entries[prev].type == STAR) prev--;
 				if (prev > 0 && self.entries[prev].type == RBRACKET)
 				{
 					sz lbk = self.match_lbracket_back(prev);
 					if (lbk >= self.size || lbk == 0) continue;
 					arr = true;
+					slice = (lbk + 1 == prev);
 					prev = lbk - 1;
+				}
+				else if (prev > 0 && self.entries[prev].type == RVEC)
+				{
+					// Vector suffix `[<N>]` — lexed as its own LVEC/RVEC pair,
+					// distinct from LBRACKET/RBRACKET, and never a slice.
+					sz lv = prev;
+					while (lv > 0 && self.entries[lv].type != LVEC) lv--;
+					if (self.entries[lv].type != LVEC) continue;
+					arr = true;
+					prev = lv - 1;
 				}
 				if (prev > 0 && self.entries[prev].type == STAR) prev--;
 				if (arr && is_array == null) continue; // caller cannot handle array fields
@@ -1176,15 +1255,63 @@ fn String TokenList.find_struct_field_type(&self, String type_name, String field
 					if (lbrace >= self.size || lbrace == 0) continue;
 					prev = lbrace - 1;
 				}
-				if (self.entries[prev].type == TYPE_IDENT)
+				TokenType lead = self.entries[prev].type;
+				if (lead == TYPE_IDENT || is_builtin_type_token(lead))
 				{
 					if (is_array) *is_array = arr;
+					if (is_slice) *is_slice = slice;
 					return self.entries[prev].text;
 				}
 			}
 		}
 	}
 	return "";
+}
+
+// Whether `type_name` is declared as a typedef of an inline builtin slice
+// (`typedef String = inline char[];`) — forwards the compiler-builtin `.len`/`.ptr`
+// properties of the underlying slice without declaring any `fn`/`struct` of its own.
+// Only a plain slice (`inline char[]`) counts; `inline char*` (e.g. ZString) and a
+// scalar inline typedef (e.g. `inline char`) are not array-shaped and return false.
+// Skips leading attributes (`@constinit`, `@if(...)`, ...) between the name and `=`.
+fn bool TokenList.find_inline_slice_typedef(&self, String type_name, bool* is_slice)
+{
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		if (self.entries[i].type != TYPEDEF) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+
+		sz j = i + 2;
+		sz paren_depth = 0;
+		while (j < self.size)
+		{
+			TokenType t = self.entries[j].type;
+			if (t == LPAREN) { paren_depth++; j++; continue; }
+			if (t == RPAREN) { paren_depth--; j++; continue; }
+			if (paren_depth == 0 && (t == EQ || t == EOS)) break;
+			j++;
+		}
+		if (j >= self.size || self.entries[j].type != EQ) continue;
+		j++;
+		if (j >= self.size || self.entries[j].type != INLINE) continue;
+		j++;
+		if (j >= self.size) continue;
+		TokenType lead = self.entries[j].type;
+		if (lead != TYPE_IDENT && !is_builtin_type_token(lead)) continue;
+		j++;
+
+		if (j < self.size && self.entries[j].type == LBRACKET)
+		{
+			sz close = self.match_rbracket(j);
+			if (close < self.size)
+			{
+				*is_slice = (j + 1 == close);
+				return true;
+			}
+		}
+		return false; // scalar or pointer inline base — not array-shaped
+	}
+	return false;
 }
 
 // Find a struct field declaration: struct/bitstruct/union TypeName { ... field_name ... }
