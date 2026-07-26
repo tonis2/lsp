@@ -1,3 +1,4 @@
 build/
 .claude
 build-windows
+.DS_Store
