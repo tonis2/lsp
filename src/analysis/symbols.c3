@@ -12,6 +12,9 @@ struct SymbolEntry
 {
 	DocumentSymbol sym;
 	String parent_type; // For "Type.method", this is "Type"; empty otherwise
+	// Module this declaration belongs to: the nearest `module` above it, not the
+	// first one in the file. A file may declare several modules in sequence.
+	String module_name;
 	bool is_child;
 }
 
@@ -104,6 +107,11 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 {
 	LineOffsets* lo = stream.get_line_offsets();
 
+	// The module a declaration belongs to is the last one declared above it. C3 allows
+	// several `module` sections per file, so this is tracked as the walk goes rather
+	// than read once from the top of the file.
+	String current_module = "";
+
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
 		Token tok          = stream.tokens.entries[i];
@@ -124,6 +132,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 				{
 					Token first = stream.tokens.entries[i + 1];
 					sz path_end = stream.tokens.scope_path_end(i + 1);
+					current_module = stream.tokens.module_path_at(i);
 					push_module_symbol(
 						syms,
 						lo,
@@ -131,7 +140,8 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 						first.offset,
 						path_end - first.offset,
 						tok.offset,
-						stream.tokens.find_eos_end(i + 2)
+						stream.tokens.find_eos_end(i + 2),
+						current_module
 					);
 				}
 				continue;
@@ -144,7 +154,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 				{
 					Token first = stream.tokens.entries[j];
 					sz path_end = stream.tokens.scope_path_end(j);
-					push_module_symbol(syms, lo, content, first.offset, path_end - first.offset, tok.offset, eos_end);
+					push_module_symbol(syms, lo, content, first.offset, path_end - first.offset, tok.offset, eos_end, current_module);
 					// advance past this path
 					sz k = j + 1;
 					while (k + 1 < stream.tokens.size && stream.tokens.entries[k].type == SCOPE
@@ -315,6 +325,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 					},
 				},
 				.parent_type = parent_type,
+				.module_name = current_module,
 			}
 		);
 	}
@@ -329,7 +340,8 @@ fn void push_module_symbol(
 	sz name_offset,
 	sz name_len,
 	sz decl_offset,
-	sz end_offset
+	sz end_offset,
+	String module_name = ""
 )
 {
 	// Keep selectionRange contained in range even if the EOS scan came up short.
@@ -356,6 +368,7 @@ fn void push_module_symbol(
 					.end = { .line = sel_line, .character = sel_char + name_len },
 				},
 			},
+			.module_name = module_name,
 		}
 	);
 }

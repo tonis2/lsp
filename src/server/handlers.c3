@@ -373,6 +373,91 @@ fn void LspServer.handle_definition(&self, Object* msg, String id_json)
 	}
 }
 
+fn void LspServer.handle_implementation(&self, Object* msg, String id_json)
+{
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "null"))
+	{
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
+
+		DString data = dstring::temp();
+		encode_implementation(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
+		respond_nonempty(id_json, &data, "null");
+	}
+}
+
+fn void LspServer.handle_prepare_call_hierarchy(&self, Object* msg, String id_json)
+{
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "null"))
+	{
+		DocPosition p = request_position(msg);
+		sz offset = position_to_offset(doc.content, p.line, p.character);
+
+		DString data = dstring::temp();
+		encode_prepare_call_hierarchy(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
+		respond_nonempty(id_json, &data, "null");
+	}
+}
+
+// incomingCalls / outgoingCalls carry the CallHierarchyItem the client got back from
+// prepareCallHierarchy, not a textDocument/position pair — and it may name a file that
+// was never opened, so neither handler requires an open document.
+fn Object*? request_hierarchy_item(Object* msg) @private
+{
+	return msg.get("params")!!.get("item");
+}
+
+// A CallHierarchyItem's selectionRange covers the declaration's name, which is the most
+// stable way back to the callable the item stands for.
+fn DocPosition hierarchy_item_position(Object* item) @private
+{
+	if (try sel = item.get("selectionRange"))
+	{
+		if (try start = sel.get("start"))
+		{
+			return { .line = start.get_int("line") ?? 0, .character = start.get_int("character") ?? 0 };
+		}
+	}
+	return { .line = 0, .character = 0 };
+}
+
+fn void LspServer.handle_incoming_calls(&self, Object* msg, String id_json)
+{
+	Object*? item = request_hierarchy_item(msg);
+	if (catch item)
+	{
+		send_response(id_json, "null");
+		return;
+	}
+
+	String uri  = item.get_string("uri") ?? "";
+	String name = item.get_string("name") ?? "";
+	DocPosition p = hierarchy_item_position(item);
+
+	DString data = dstring::temp();
+	encode_incoming_calls(uri, name, p.line, p.character, &self.documents, self.stdlib_path, &data);
+	respond_nonempty(id_json, &data, "null");
+}
+
+fn void LspServer.handle_outgoing_calls(&self, Object* msg, String id_json)
+{
+	Object*? item = request_hierarchy_item(msg);
+	if (catch item)
+	{
+		send_response(id_json, "null");
+		return;
+	}
+
+	String uri = item.get_string("uri") ?? "";
+	DocPosition p = hierarchy_item_position(item);
+
+	DString data = dstring::temp();
+	encode_outgoing_calls(uri, p.line, p.character, &self.documents, self.stdlib_path, &data);
+	respond_nonempty(id_json, &data, "null");
+}
+
 fn void LspServer.handle_signature_help(&self, Object* msg, String id_json)
 {
 	String uri = request_uri(msg);

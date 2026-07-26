@@ -33,15 +33,6 @@ fn bool symbol_matches_query(String name, String query) @private
 	return false;
 }
 
-// The module a file declares, used as SymbolInformation.containerName so a picker
-// can tell apart same-named symbols from different modules. "" when file-less.
-fn String file_module_name(TokenList* tokens) @private
-{
-	ModuleCtx ctx;
-	ctx.build(tokens);
-	return ctx.own_count > 0 ? ctx.own[0] : "";
-}
-
 // Emit one SymbolInformation object.
 fn void encode_symbol_information(DString* out, String name, int kind, String uri, Range range, String container) @private
 {
@@ -70,8 +61,6 @@ fn void collect_workspace_symbols_in(String uri, String content, TokenStream* st
 	defer syms.free();
 	collect_symbols(content, stream, &syms);
 
-	String container = file_module_name(&stream.tokens);
-
 	for (sz i = 0; i < syms.size && *count < MAX_WORKSPACE_SYMBOL_RESULTS; i++)
 	{
 		SymbolEntry* entry = &syms.entries[i];
@@ -99,7 +88,7 @@ fn void collect_workspace_symbols_in(String uri, String content, TokenStream* st
 		*first = false;
 		// selection_range covers just the identifier, so clients land on the name
 		// rather than the start of the declaration.
-		encode_symbol_information(out, name, kind, uri, entry.sym.selection_range, container);
+		encode_symbol_information(out, name, kind, uri, entry.sym.selection_range, entry.module_name);
 		(*count)++;
 	}
 }

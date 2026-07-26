@@ -233,6 +233,8 @@ fn void encode_server_capabilities(DString* out, String version)
 	out.append(`"completionProvider":{"triggerCharacters":[".",":","$","@","#"]},`);
 	out.append(`"definitionProvider":true,`);
 	out.append(`"declarationProvider":true,`);
+	out.append(`"implementationProvider":true,`);
+	out.append(`"callHierarchyProvider":true,`);
 	out.append(`"documentHighlightProvider":true,`);
 	out.append(`"referencesProvider":true,`);
 	out.append(`"renameProvider":true,`);

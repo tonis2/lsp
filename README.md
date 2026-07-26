@@ -7,10 +7,13 @@ A Language Server Protocol implementation for the [C3 programming language](http
 - **Go to Definition / Declaration** — navigate to functions, macros, types, constants, enum members, and struct fields; resolves method calls, module-qualified paths (`std::io::printfn`), and individual segments of `import` statements; searches the current file, project sources, and the C3 standard library, preferring declarations in modules visible from the current file (its module tree and imports)
 - **Find References** — find all occurrences of a symbol across the project and stdlib, skipping files that cannot see the symbol's module
 - **Rename Symbol** — rename identifiers, types, and constants across files.
+- **Go to Implementation** — from an interface name to the types whose conformance clause lists it (`struct Foo (Printable)`), and from a method to the `@dynamic` bodies that provide it
+- **Call Hierarchy** — incoming calls (which functions call this one, with every call site) and outgoing calls (what this function calls), for functions and macros
 - **Hover** — type signatures and doc comments (`<* ... *>`) for functions, macros, types, and struct fields
 - **Completion** — keywords, types, identifiers, compile-time builtins (`$if`, `@sizeof`, …), and attribute names; member completion after `.` for struct fields, methods, and enum values.
 - **Signature Help** — parameter hints when calling functions and macros, with the active parameter highlighted
 - **Document Symbols** — outline of modules, functions, structs, enums, macros, and constants
+- **Workspace Symbols** — search declarations across the project by name, each labelled with the module that declares it
 - **Document Highlights** — highlight all occurrences of a symbol in the current file
 - **Semantic Tokens** — enhanced syntax highlighting for identifiers, types, functions, macros, and attributes, including inside contract blocks (directives like `@require` and their arguments are colored as code, prose as comment)
 - **Folding Ranges** — code folding for braces, imports, and block comments

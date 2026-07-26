@@ -10,6 +10,9 @@ import c3::lexer;
 
 const int MAX_SEARCH_DIRS = 32;
 
+// Where c3c unpacks fetched .c3l archives, relative to the project root.
+const String UNPACKED_C3L_DIR = "build/unpacked_c3l";
+
 struct ProjectDirs
 {
 	String project_root;
@@ -121,20 +124,118 @@ fn String source_entry_dir(String src)
 	return src[:dir_end];
 }
 
+// Reduce a search-dir entry to a canonical relative form so entries that name the
+// same directory compare equal: drops a leading "./", drops trailing separators,
+// and maps the project root ("./", "/") to ".". Input is never empty — callers
+// drop empty entries before normalizing.
+fn String normalize_search_dir(String dir)
+{
+	String s = dir;
+	while (s.len >= 2 && s[0] == '.' && is_path_separator(s[1])) s = s[2..];
+	while (s.len > 0 && is_path_separator(s[s.len - 1])) s = s[:s.len - 1];
+	return s.len == 0 ? "." : s;
+}
+
+// True when scanning `parent` already reaches everything under `child` — `child` is
+// `parent` itself or nested inside it. Comparison is segment-aligned, so "src" does
+// not cover "srclib". "." is the project root and covers every relative entry.
+fn bool dir_covers(String parent, String child)
+{
+	if (parent == ".") return true;
+	if (parent.len > child.len) return false;
+	if (child[:parent.len] != parent) return false;
+	if (child.len == parent.len) return true;
+	return is_path_separator(child[parent.len]);
+}
+
+// Add one search dir, keeping the list free of directories that overlap. Scanning
+// two dirs where one contains the other visits every file below the inner one
+// twice, which is what made find-references and workspace/symbol report the same
+// location several times (a project.json with both `dependency-search-paths: ["./"]`
+// and a `sources` entry like "main.c3" yields two spellings of the project root).
+fn void ProjectDirs.add_search_dir(&self, String raw)
+{
+	if (raw.len == 0) return;
+	String dir = normalize_search_dir(raw);
+
+	// Already reached by a broader entry — adding it would duplicate every hit.
+	for (sz k = 0; k < self.count; k++)
+	{
+		if (dir_covers(self.dirs[k], dir)) return;
+	}
+
+	// This entry is broader than ones already collected: drop those, keep this.
+	sz keep = 0;
+	for (sz k = 0; k < self.count; k++)
+	{
+		if (dir_covers(dir, self.dirs[k])) continue;
+		self.dirs[keep++] = self.dirs[k];
+	}
+	self.count = keep;
+
+	if (self.count >= MAX_SEARCH_DIRS) return;
+	self.dirs[self.count++] = dir;
+}
+
 // Extract a directory from a source path and add it to search dirs.
 fn void ProjectDirs.add_source_dir(&self, String src)
 {
-	if (self.count >= MAX_SEARCH_DIRS) return;
-
 	String src_dir = source_entry_dir(src);
 	if (src_dir.len == 0) return;
+	self.add_search_dir(src_dir);
+}
 
-	// Dedup
-	for (sz k = 0; k < self.count; k++)
+// Add the unpacked-dependency dirs under build/unpacked_c3l, skipping libraries that
+// are also vendored in one of the search dirs collected so far. c3c unpacks a copy of
+// each fetched archive there, so a project that keeps `lib/foo.c3l` checked in has the
+// same library on disk twice — scanning both reports every symbol in it twice.
+fn void ProjectDirs.add_unpacked_c3l_dirs(&self)
+{
+	DString unpacked = dstring::temp();
+	unpacked.appendf("%s/%s", self.project_root, UNPACKED_C3L_DIR);
+
+	Path base;
+	if (try p = path::tnew(unpacked.str_view())) { base = p; } else { return; }
+	// See scan_dir_entries: path::ls leaks its result list when the read fails, and
+	// build/unpacked_c3l is absent in any project that has not been built yet.
+	if (!path::is_dir(base)) return;
+	PathList entries;
+	if (try el = path::ls(mem, base)) { entries = el; } else { return; }
+	defer
 	{
-		if (self.dirs[k] == src_dir) return;
+		foreach (&e : entries) e.free(mem);
+		entries.free();
 	}
-	self.dirs[self.count++] = src_dir;
+
+	// Snapshot the count: dirs added below must not be treated as vendoring roots.
+	sz vendor_count = self.count;
+
+	foreach (entry : entries)
+	{
+		String name = (String)entry;
+		if (!name.ends_with(".c3l")) continue;
+		if (self.is_vendored_lib(name, vendor_count)) continue;
+
+		DString rel = dstring::temp();
+		rel.appendf("%s/%s", UNPACKED_C3L_DIR, name);
+		self.add_search_dir(rel.str_view());
+	}
+}
+
+// True when `lib_name` (e.g. "window.c3l") exists as a directory under one of the
+// first `limit` search dirs, meaning the project already scans a vendored copy.
+fn bool ProjectDirs.is_vendored_lib(&self, String lib_name, sz limit)
+{
+	for (sz k = 0; k < limit; k++)
+	{
+		DString candidate = dstring::temp();
+		candidate.appendf("%s/%s", join_search_path(self.project_root, self.dirs[k]), lib_name);
+		if (try p = path::tnew(candidate.str_view()))
+		{
+			if (path::is_dir(p)) return true;
+		}
+	}
+	return false;
 }
 
 // Find project root and collect all search directories from project.json.
@@ -175,7 +276,7 @@ fn void ProjectDirs.get_search_dirs(&self, String file_path)
 				{
 					Object* item = deps.get_at(i);
 					if (item == null) break;
-					if (item.is_string()) self.dirs[self.count++] = item.s;
+					if (item.is_string()) self.add_search_dir(item.s);
 				}
 			}
 			if (try srcs = pjson.get("sources"))
@@ -218,16 +319,12 @@ fn void ProjectDirs.get_search_dirs(&self, String file_path)
 
 	if (self.count == 0)
 	{
-		self.dirs[0] = "src";
-		self.dirs[1] = "lib";
-		self.count = 2;
+		self.add_search_dir("src");
+		self.add_search_dir("lib");
 	}
 
-	// Always include unpacked c3l libraries
-	if (self.count < MAX_SEARCH_DIRS)
-	{
-		self.dirs[self.count++] = "build/unpacked_c3l";
-	}
+	// Always include unpacked c3l libraries, minus the ones already vendored above.
+	self.add_unpacked_c3l_dirs();
 }
 
 // Tokenize content into a token list.

@@ -38,6 +38,43 @@ fn void test_workspace_symbols_finds_open_document_symbol() @test {
 	ds.close("file:///proj/src/camera.c3");
 }
 
+// A file may declare several modules in sequence. Each symbol belongs to the module
+// declared closest above it, not to the first one in the file — the regression here
+// reported `c3w`'s Window as living in `std::core::env` because that module happened
+// to be declared on line 1.
+fn void test_workspace_symbols_uses_nearest_preceding_module() @test {
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///proj/lib/main.c3",
+		"module std::core::env;\n\nmodule c3w;\nimport std;\n\nstruct Wobble {}\n", 1);
+
+	DString out = dstring::temp();
+	encode_workspace_symbols("Wobble", ds, "", &out);
+	String r = out.str_view();
+
+	assert(r.contains(`"name":"Wobble"`), "struct must be found, got: %s", r);
+	assert(r.contains(`"containerName":"c3w"`), "container must be the nearest module above, got: %s", r);
+	assert(!r.contains(`"containerName":"std::core::env"`), "first module in file must not win, got: %s", r);
+
+	ds.close("file:///proj/lib/main.c3");
+}
+
+// Declarations before any `module` line have no container to report.
+fn void test_workspace_symbols_module_less_declaration_has_no_container() @test {
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///proj/src/snippet.c3", "fn void loose_fn() {}\n", 1);
+
+	DString out = dstring::temp();
+	encode_workspace_symbols("loose_fn", ds, "", &out);
+	String r = out.str_view();
+
+	assert(r.contains(`"name":"loose_fn"`), "function must be found, got: %s", r);
+	assert(!r.contains(`"containerName"`), "module-less decl must omit containerName, got: %s", r);
+
+	ds.close("file:///proj/src/snippet.c3");
+}
+
 fn void test_workspace_symbols_filters_by_query() @test {
 	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
