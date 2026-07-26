@@ -110,19 +110,37 @@ fn void ModuleCtx.build(&self, TokenList* tokens)
 // files keep the module-blind behavior.
 fn bool ModuleCtx.can_see(&self, String decl_mod)
 {
-	if (decl_mod.len == 0) return true;
-	if (self.overflow) return true;
-	if (self.own_count == 0 && self.import_count == 0) return true;
+	return self.visibility_rank(decl_mod) > 0;
+}
+
+// How closely this context is tied to decl_mod: DIRECT for an own module or an
+// explicit import, IMPLICIT when the only reason it is visible is the automatically
+// imported std::core subtree, INVISIBLE otherwise.
+//
+// Searches that match on a bare name use the rank to break ties, because can_see() on
+// its own cannot: std::core is visible from everywhere, so a user type reusing a std
+// name (`struct MyBuf (Allocator)`) tests as visible to std's `Allocator` exactly like
+// std's own implementors do. Preferring the strongest rank that produced any hit keeps
+// each name's real implementors apart.
+const int VIS_INVISIBLE = 0;
+const int VIS_IMPLICIT = 1;
+const int VIS_DIRECT = 2;
+
+fn int ModuleCtx.visibility_rank(&self, String decl_mod)
+{
+	if (decl_mod.len == 0) return VIS_DIRECT;
+	if (self.overflow) return VIS_DIRECT;
+	if (self.own_count == 0 && self.import_count == 0) return VIS_DIRECT;
 
 	for (sz i = 0; i < self.own_count; i++)
 	{
-		if (module_covers(self.own[i], decl_mod) || module_covers(decl_mod, self.own[i])) return true;
+		if (module_covers(self.own[i], decl_mod) || module_covers(decl_mod, self.own[i])) return VIS_DIRECT;
 	}
 	for (sz i = 0; i < self.import_count; i++)
 	{
-		if (module_covers(self.imports[i], decl_mod)) return true;
+		if (module_covers(self.imports[i], decl_mod)) return VIS_DIRECT;
 	}
-	return module_covers("std::core", decl_mod);
+	return module_covers("std::core", decl_mod) ? VIS_IMPLICIT : VIS_INVISIBLE;
 }
 
 // Build a ModuleCtx for `tokens` and test whether it can see decl_module.

@@ -23,8 +23,8 @@ struct ProjectDirs
 // Strip // and /* */ comments from JSON, respecting quoted strings.
 fn String strip_json_comments(String input) @private
 {
-	DString out = dstring::temp();
-	sz i = 0;
+	DString out    = dstring::temp();
+	sz i           = 0;
 	bool in_string = false;
 	while (i < input.len)
 	{
@@ -97,7 +97,7 @@ fn String source_entry_dir(String src)
 		if (s.ends_with(".c3") || s.ends_with(".c3i"))
 		{
 			// Find last separator
-			sz last_slash = 0;
+			sz last_slash    = 0;
 			bool found_slash = false;
 			for (sz j = s.len; j > 0; j--)
 			{
@@ -195,12 +195,26 @@ fn void ProjectDirs.add_unpacked_c3l_dirs(&self)
 	unpacked.appendf("%s/%s", self.project_root, UNPACKED_C3L_DIR);
 
 	Path base;
-	if (try p = path::tnew(unpacked.str_view())) { base = p; } else { return; }
+	if (try p = path::tnew(unpacked.str_view()))
+	{
+		base = p;
+	}
+	else
+	{
+		return;
+	}
 	// See scan_dir_entries: path::ls leaks its result list when the read fails, and
 	// build/unpacked_c3l is absent in any project that has not been built yet.
 	if (!path::is_dir(base)) return;
 	PathList entries;
-	if (try el = path::ls(mem, base)) { entries = el; } else { return; }
+	if (try el = path::ls(mem, base))
+	{
+		entries = el;
+	}
+	else
+	{
+		return;
+	}
 	defer
 	{
 		foreach (&e : entries) e.free(mem);
@@ -445,11 +459,14 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 	defer lo.free();
 	lo.build(content);
 
-	sz line = lo.find_line(tok.offset);
-	sz col = tok.offset - lo.entries[line];
+	sz line    = lo.find_line(tok.offset);
+	sz col     = tok.offset - lo.entries[line];
 	sz end_col = col + tok.len;
 
-	Location loc = { .uri = uri, .range = { .start = { .line = line, .character = col }, .end = { .line = line, .character = end_col }, }, };
+	Location loc = {
+		.uri = uri,
+		.range = { .start = { .line = line, .character = col }, .end = { .line = line, .character = end_col }, },
+	};
 	loc.encode(out);
 }
 
@@ -517,7 +534,10 @@ fn String TokenList.resolve_type_alias(&self, String type_name)
 {
 	for (sz i = 0; i + 3 < self.size; i++)
 	{
-		if (self.get(i).type == ALIAS && self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == type_name && self.entries[i + 2].type == EQ && self.entries[i + 3].type == TYPE_IDENT)
+		if (self.get(i)
+			.type == ALIAS && self.entries[i + 1].type
+				== TYPE_IDENT && self.entries[i + 1].text
+					== type_name && self.entries[i + 2].type == EQ && self.entries[i + 3].type == TYPE_IDENT)
 		{
 			return self.entries[i + 3].text;
 		}
@@ -676,9 +696,13 @@ fn sz TokenList.enclosing_lbrace_back(&self, sz start)
 	sz bracket_depth = 0;
 	for (sz k = start + 1; k > 1; k--)
 	{
-		sz i = k - 1;
+		sz i        = k - 1;
 		TokenType t = self.entries[i].type;
-		if (t == RBRACKET) { bracket_depth++; continue; }
+		if (t == RBRACKET)
+		{
+			bracket_depth++;
+			continue;
+		}
 		if (t == LBRACKET)
 		{
 			if (bracket_depth == 0) return self.size;
@@ -717,7 +741,14 @@ fn sz TokenList.enclosing_lbrace_back(&self, sz start)
 // the initializer's opening brace. Returns "" when the dot is not a designator in a
 // brace initializer (e.g. call arguments) or the type cannot be determined — including
 // when the initializer's type is an array, where designators are `[index] =`, not `.field`.
-fn String TokenList.resolve_initializer_type(&self, sz cursor_idx, String uri, DocumentList* docs, sz* lbrace_out = null, int depth = 0)
+fn String TokenList.resolve_initializer_type(
+	&self,
+	sz cursor_idx,
+	String uri,
+	DocumentList* docs,
+	sz* lbrace_out = null,
+	int depth = 0
+)
 {
 	if (cursor_idx < 2) return "";
 	if (depth > 8) return ""; // bound nested-initializer recursion
@@ -876,7 +907,14 @@ fn String TokenList.find_enclosing_method_type(&self, sz offset)
 }
 
 // Resolve the type of a struct field across current file, open docs, and project files.
-fn String TokenList.resolve_field_type_across(&self, String struct_type, String field_name, String uri, DocumentList* docs, bool* is_array = null)
+fn String TokenList.resolve_field_type_across(
+	&self,
+	String struct_type,
+	String field_name,
+	String uri,
+	DocumentList* docs,
+	bool* is_array = null
+)
 {
 	if (is_array) *is_array = false;
 
@@ -950,7 +988,7 @@ fn sz? TokenList.match_paren_backward(&self, sz rparen_idx)
 	int depth = 0;
 	for (sz k = rparen_idx + 1; k > 0; k--)
 	{
-		sz i = k - 1;
+		sz i        = k - 1;
 		TokenType t = self.entries[i].type;
 		if (t == RPAREN)
 		{
@@ -980,8 +1018,9 @@ fn String TokenList.find_function_return_type(&self, String name)
 			if (jt == LPAREN)
 			{
 				// `fn <RET> name(` — name not preceded by DOT (else it is a method).
-				if (is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
-					&& (j < 2 || self.entries[j - 2].type != DOT))
+				if (is_ident(
+					self.entries[j - 1].type
+				) && self.entries[j - 1].text == name && (j < 2 || self.entries[j - 2].type != DOT))
 				{
 					return self.entries[i + 1].text;
 				}
@@ -1013,9 +1052,11 @@ fn String TokenList.find_method_return_type(&self, String type_name, String meth
 			if (jt == LPAREN)
 			{
 				// `fn <RET> Type.method(`
-				if (j >= 4 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == method_name
-					&& self.entries[j - 2].type == DOT
-					&& self.entries[j - 3].type == TYPE_IDENT && self.entries[j - 3].text == type_name)
+				if (j >= 4 && is_ident(
+					self.entries[j - 1].type
+				) && self.entries[j - 1].text
+					== method_name && self.entries[j - 2].type
+						== DOT && self.entries[j - 3].type == TYPE_IDENT && self.entries[j - 3].text == type_name)
 				{
 					return self.entries[i + 1].text;
 				}
@@ -1036,11 +1077,16 @@ fn String TokenList.find_method_return_type(&self, String type_name, String meth
 
 // Resolve a call's return type across current file, open docs, and project files on disk.
 // When type_name is empty, `name` is a free function; otherwise a method on type_name.
-fn String TokenList.resolve_call_return_type_across(&self, String type_name, String name, String uri, DocumentList* docs)
+fn String TokenList.resolve_call_return_type_across(
+	&self,
+	String type_name,
+	String name,
+	String uri,
+	DocumentList* docs
+)
 {
 	// 1. Current file
-	String result = type_name.len > 0
-		? self.find_method_return_type(type_name, name)
+	String result = type_name.len > 0 ? self.find_method_return_type(type_name, name)
 		: self.find_function_return_type(name);
 	if (result.len > 0) return result;
 
@@ -1048,8 +1094,7 @@ fn String TokenList.resolve_call_return_type_across(&self, String type_name, Str
 	for (sz d = 0; d < docs.size; d++)
 	{
 		TokenStream* doc_stream = docs.entries[d].get_tokens();
-		result = type_name.len > 0
-			? doc_stream.tokens.find_method_return_type(type_name, name)
+		result = type_name.len > 0 ? doc_stream.tokens.find_method_return_type(type_name, name)
 			: doc_stream.tokens.find_function_return_type(name);
 		if (result.len > 0) return result;
 	}
@@ -1067,9 +1112,7 @@ fn String TokenList.resolve_call_return_type_across(&self, String type_name, Str
 // type_name empty = free function lookup, otherwise a method on type_name.
 fn String query_return_type(TokenList* tokens, String type_name, String name) @private
 {
-	return type_name.len > 0
-		? tokens.find_method_return_type(type_name, name)
-		: tokens.find_function_return_type(name);
+	return type_name.len > 0 ? tokens.find_method_return_type(type_name, name) : tokens.find_function_return_type(name);
 }
 
 fn String resolve_return_type_in_project(String file_path, String type_name, String name) @private
@@ -1115,7 +1158,7 @@ fn String TokenList.find_struct_field_type(&self, String type_name, String field
 				// The type sits just before the field name; step over an optional
 				// pointer `*`, an optional array suffix `[4]`, and an optional
 				// generic block `{...}` (e.g. List{int} lst).
-				sz prev = j - 1;
+				sz prev  = j - 1;
 				bool arr = false;
 				if (prev > 0 && self.entries[prev].type == STAR) prev--;
 				if (prev > 0 && self.entries[prev].type == RBRACKET)
@@ -1183,14 +1226,26 @@ fn sz? TokenList.find_struct_field(&self, String type_name, String field_name)
 
 // Search for a struct field declaration across all sources.
 // Uses the same 4-step search as try_find_definition.
-fn bool try_find_struct_field(String type_name, String field_name, String uri, String content, DocumentList* docs, String stdlib_path, DString* out) @private
+fn bool try_find_struct_field(
+	String type_name,
+	String field_name,
+	String uri,
+	String content,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out
+) @private
 {
 	// 1. Current file
+
 	{
 		TokenStream owned;
 		bool owns;
 		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
-		defer { if (owns) owned.free(); }
+		defer
+		{
+			if (owns) owned.free();
+		}
 		if (try found = stream.tokens.find_struct_field(type_name, field_name))
 		{
 			emit_location(uri, content, stream.tokens.entries[found], out);
@@ -1211,7 +1266,7 @@ fn bool try_find_struct_field(String type_name, String field_name, String uri, S
 	}
 
 	// 3 + 4. Project files on disk, then stdlib
-	String file_path = uri_to_path(uri);
+	String file_path     = uri_to_path(uri);
 	StructFieldScan scan = { type_name, field_name, out };
 	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
@@ -1259,7 +1314,7 @@ fn sz TokenList.qualifier_chain_start(&self, sz idx)
 fn String TokenList.join_path_segments(&self, sz start, sz end_exclusive)
 {
 	DString path = dstring::temp();
-	bool first = true;
+	bool first   = true;
 	for (sz i = start; i < end_exclusive; i++)
 	{
 		TokenType t = self.entries[i].type;
@@ -1306,7 +1361,11 @@ fn String TokenList.import_module_path_at(&self, sz cursor_idx)
 	for (sz j = start_idx; j > 0; j--)
 	{
 		TokenType t = self.entries[j - 1].type;
-		if (t == IMPORT) { in_import = true; break; }
+		if (t == IMPORT)
+		{
+			in_import = true;
+			break;
+		}
 		if (t == COMMA || t == IDENT || t == TYPE_IDENT || t == SCOPE) continue;
 		break;
 	}
@@ -1318,7 +1377,19 @@ fn String TokenList.import_module_path_at(&self, sz cursor_idx)
 
 // 4-step definition search: current file -> open docs -> project files -> stdlib.
 // Returns true if a definition was found and emitted.
-fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, String uri, String content, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "", ModuleCtx* ctx = null)
+fn bool TokenList.try_find_definition(
+	&self,
+	Token cursor_tok,
+	sz cursor_idx,
+	String uri,
+	String content,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out,
+	String method_type = "",
+	String module_filter = "",
+	ModuleCtx* ctx = null
+)
 {
 	// 1. Search current file (its declarations are always visible to itself)
 	if (try decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type, module_filter))
@@ -1353,7 +1424,12 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 			}
 			if (!have_fallback)
 			{
-				emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], &fallback);
+				emit_location(
+					docs.entries[d].uri,
+					docs.entries[d].content,
+					other_stream.tokens.entries[found],
+					&fallback
+				);
 				have_fallback = true;
 			}
 		}
@@ -1361,7 +1437,7 @@ fn bool TokenList.try_find_definition(&self, Token cursor_tok, sz cursor_idx, St
 
 	// 3 + 4. Scan project files on disk (src/ and lib/ relative to file), then stdlib
 	String file_path = uri_to_path(uri);
-	DeclScan scan = { cursor_tok, method_type, module_filter, out, ctx, &fallback, &have_fallback };
+	DeclScan scan    = { cursor_tok, method_type, module_filter, out, ctx, &fallback, &have_fallback };
 	if (scan_project_then_stdlib(file_path, stdlib_path, &scan)) return true;
 
 	// Nothing visible anywhere — fall back to the first module-blind match.
@@ -1432,7 +1508,15 @@ fn sz? TokenList.find_module_decl(&self, String module_path)
 // 4-step search for a `module <path>;` declaration, mirroring try_find_definition:
 // current file -> open docs -> project files -> stdlib. Emits a Location and
 // returns true on the first match.
-fn bool TokenList.try_find_module_definition(&self, String module_path, String uri, String content, DocumentList* docs, String stdlib_path, DString* out)
+fn bool TokenList.try_find_module_definition(
+	&self,
+	String module_path,
+	String uri,
+	String content,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out
+)
 {
 	// 1. Current file
 	if (try idx = self.find_module_decl(module_path))
@@ -1455,7 +1539,7 @@ fn bool TokenList.try_find_module_definition(&self, String module_path, String u
 	}
 
 	// 3 + 4. Project files on disk, then stdlib
-	String file_path = uri_to_path(uri);
+	String file_path    = uri_to_path(uri);
 	ModuleDeclScan scan = { module_path, out };
 	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
@@ -1487,7 +1571,10 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 	TokenStream owned;
 	bool owns;
 	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
-	defer { if (owns) owned.free(); }
+	defer
+	{
+		if (owns) owned.free();
+	}
 
 	// Find the token at cursor
 	Token cursor_tok;
@@ -1535,13 +1622,35 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 			// then with resolved alias
 			if (is_ident(ct))
 			{
-				if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, recv_type, "", &visctx))
+				if (stream.tokens.try_find_definition(
+					cursor_tok,
+					cursor_idx,
+					uri,
+					content,
+					docs,
+					stdlib_path,
+					out,
+					recv_type,
+					"",
+					&visctx
+				))
 				{
 					return;
 				}
 				if (resolved_type.len > 0 && resolved_type != recv_type)
 				{
-					if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, resolved_type, "", &visctx))
+					if (stream.tokens.try_find_definition(
+						cursor_tok,
+						cursor_idx,
+						uri,
+						content,
+						docs,
+						stdlib_path,
+						out,
+						resolved_type,
+						"",
+						&visctx
+					))
 					{
 						return;
 					}
@@ -1556,7 +1665,15 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 				return;
 			}
 			// Also try unresolved name for struct fields
-			if (field_type != recv_type && try_find_struct_field(recv_type, cursor_tok.text, uri, content, docs, stdlib_path, out))
+			if (field_type != recv_type && try_find_struct_field(
+				recv_type,
+				cursor_tok.text,
+				uri,
+				content,
+				docs,
+				stdlib_path,
+				out
+			))
 			{
 				return;
 			}
@@ -1570,7 +1687,18 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 		String method_type = stream.tokens.resolve_method_type(cursor_idx, uri, docs);
 		if (method_type.len > 0)
 		{
-			if (stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, method_type, "", &visctx))
+			if (stream.tokens.try_find_definition(
+				cursor_tok,
+				cursor_idx,
+				uri,
+				content,
+				docs,
+				stdlib_path,
+				out,
+				method_type,
+				"",
+				&visctx
+			))
 			{
 				return;
 			}
@@ -1581,14 +1709,25 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 	// (e.g. `foo::bar`), restrict the search to that module to disambiguate same-named
 	// symbols. The prefix is resolved to a full import path when possible.
 	String module_filter = "";
-	String mod_prefix = stream.tokens.resolve_module_prefix(cursor_idx);
+	String mod_prefix    = stream.tokens.resolve_module_prefix(cursor_idx);
 	if (mod_prefix.len > 0)
 	{
 		module_filter = resolve_module_name(content, mod_prefix);
 		if (module_filter.len == 0) module_filter = mod_prefix;
 	}
 	// A written qualifier is authoritative — visibility ranking only applies to bare names.
-	stream.tokens.try_find_definition(cursor_tok, cursor_idx, uri, content, docs, stdlib_path, out, "", module_filter, module_filter.len == 0 ? &visctx : null);
+	stream.tokens.try_find_definition(
+		cursor_tok,
+		cursor_idx,
+		uri,
+		content,
+		docs,
+		stdlib_path,
+		out,
+		"",
+		module_filter,
+		module_filter.len == 0 ? &visctx : null
+	);
 }
 
 // Find an enum/faultdef/constdef member named `name`. Handles both the block form
@@ -1615,8 +1754,16 @@ fn sz? TokenList.find_enum_or_constdef_member(&self, String name)
 			for (sz k = j + 1; k < self.size && depth > 0; k++)
 			{
 				TokenType t = self.entries[k].type;
-				if (t == LBRACE) { depth++; continue; }
-				if (t == RBRACE) { depth--; continue; }
+				if (t == LBRACE)
+				{
+					depth++;
+					continue;
+				}
+				if (t == RBRACE)
+				{
+					depth--;
+					continue;
+				}
 				if (depth == 1 && t == CONST_IDENT && self.entries[k].text == name) return k;
 			}
 		}
@@ -1627,7 +1774,11 @@ fn sz? TokenList.find_enum_or_constdef_member(&self, String name)
 			for (sz k = i + 1; k < j; k++)
 			{
 				TokenType t = self.entries[k].type;
-				if (t == COMMA) { decl_pos = true; continue; }
+				if (t == COMMA)
+				{
+					decl_pos = true;
+					continue;
+				}
 				if (decl_pos && t == CONST_IDENT && self.entries[k].text == name) return k;
 				decl_pos = false;
 			}
@@ -1655,7 +1806,13 @@ fn bool TokenList.decl_in_filter(&self, sz decl_idx, String module_filter)
 // Searches for the declaration of a token in the token stream.
 // When method_type is non-empty, searches for fn Type.name( pattern only.
 // When module_filter is non-empty, only declarations in the matching module match.
-fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String method_type = "", String module_filter = "")
+fn sz? TokenList.find_declaration(
+	&self,
+	Token target,
+	sz target_idx,
+	String method_type = "",
+	String module_filter = ""
+)
 {
 	String name = target.text;
 
@@ -1668,7 +1825,10 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 				if (is_type_declaration_keyword(kw))
 				{
 					if (self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == name
-						&& self.decl_in_filter(i + 1, module_filter))
+						&& self.decl_in_filter(
+						i + 1,
+						module_filter
+					))
 					{
 						return i + 1;
 					}
@@ -1678,8 +1838,12 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 			// constdef NAME
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (self.get(i).type == CONSTDEF && self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name
-					&& self.decl_in_filter(i + 1, module_filter))
+				if (self.get(i)
+					.type == CONSTDEF && self.entries[i + 1].type
+						== CONST_IDENT && self.entries[i + 1].text == name && self.decl_in_filter(
+						i + 1,
+						module_filter
+					))
 				{
 					return i + 1;
 				}
@@ -1689,14 +1853,20 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 			{
 				if (self.get(i).type != CONST) continue;
 				// const NAME = ... (no type)
-				if (self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name
-					&& self.decl_in_filter(i + 1, module_filter))
+				if (self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name && self.decl_in_filter(
+					i + 1,
+					module_filter
+				))
 				{
 					return i + 1;
 				}
 				// const Type NAME = ... (with type)
-				if (i + 2 < self.size && is_type_token(self.entries[i + 1].type) && self.entries[i + 2].type == CONST_IDENT && self.entries[i + 2].text == name
-					&& self.decl_in_filter(i + 2, module_filter))
+				if (i + 2 < self.size && is_type_token(
+					self.entries[i + 1].type
+				) && self.entries[i + 2].type == CONST_IDENT && self.entries[i + 2].text == name && self.decl_in_filter(
+					i + 2,
+					module_filter
+				))
 				{
 					return i + 2;
 				}
@@ -1713,8 +1883,12 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 					if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
 					if (try j = self.fn_lparen_after(i))
 					{
-						if (j >= 3 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name && self.entries[j - 2].type == DOT && self.entries[j - 3].type == TYPE_IDENT
-							&& self.entries[j - 3].text == method_type)
+						if (j >= 3 && is_ident(
+							self.entries[j - 1].type
+						) && self.entries[j - 1].text
+							== name && self.entries[j - 2].type
+								== DOT && self.entries[j - 3].type
+									== TYPE_IDENT && self.entries[j - 3].text == method_type)
 						{
 							return j - 1;
 						}
@@ -1728,8 +1902,9 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 				if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
 				if (try j = self.fn_lparen_after(i))
 				{
-					if (j > 0 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
-						&& self.decl_in_filter(j - 1, module_filter))
+					if (j > 0 && is_ident(
+						self.entries[j - 1].type
+					) && self.entries[j - 1].text == name && self.decl_in_filter(j - 1, module_filter))
 					{
 						return j - 1;
 					}
@@ -1738,8 +1913,10 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 			// macro name (no parens)
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (self.get(i).type == MACRO && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name
-					&& self.decl_in_filter(i + 1, module_filter))
+				if (self.get(i)
+					.type == MACRO && is_ident(
+						self.entries[i + 1].type
+					) && self.entries[i + 1].text == name && self.decl_in_filter(i + 1, module_filter))
 				{
 					return i + 1;
 				}
@@ -1747,7 +1924,8 @@ fn sz? TokenList.find_declaration(&self, Token target, sz target_idx, String met
 			// type IDENT = ...
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (is_type_token(self.get(i).type) && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name)
+				if (is_type_token(self.get(i)
+					.type) && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name)
 				{
 					if (i + 2 < self.size)
 					{

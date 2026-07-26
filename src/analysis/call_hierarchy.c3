@@ -7,7 +7,7 @@ import c3::lexer;
 
 // Call hierarchy: prepareCallHierarchy pins down one callable, then incomingCalls
 // ("who calls this") and outgoingCalls ("what does this call") walk one step out.
-//
+// 
 // Resolution is name-based, as everywhere else in this server: a call site is an
 // identifier followed by `(`, and it is matched to a declaration by that identifier.
 // Method calls therefore resolve by method name without proving the receiver's type,
@@ -21,11 +21,11 @@ const sz MAX_CALL_HIERARCHY_ITEMS = 128;
 // offset can be attributed to the function that contains it.
 struct CallableSpan
 {
-	String name;        // display name: "Type.method" or "func"
-	String bare;        // the identifier a call site spells
+	String name; // display name: "Type.method" or "func"
+	String bare; // the identifier a call site spells
 	String module_name; // shown as the item's detail
-	sz start;           // offset of the fn/macro keyword
-	sz end;             // offset just past the body (or past the name if unparsable)
+	sz start; // offset of the fn/macro keyword
+	sz end; // offset just past the body (or past the name if unparsable)
 	sz name_offset;
 	sz name_len;
 }
@@ -38,7 +38,7 @@ fn Range offsets_to_range(LineOffsets* lo, sz start, sz end)
 	sz end_line   = lo.find_line(end > 0 ? end - 1 : 0);
 	return {
 		.start = { .line = start_line, .character = start - lo.entries[start_line] },
-		.end   = { .line = end_line,   .character = end - lo.entries[end_line] },
+		.end = { .line = end_line, .character = end - lo.entries[end_line] },
 	};
 }
 
@@ -65,8 +65,7 @@ fn void TokenList.collect_callables(&self, List{CallableSpan}* out)
 
 		// `fn ret Type.method(` — qualify the display name with the receiver type.
 		String display = name_tok.text;
-		if (lparen >= i + 4 && self.entries[lparen - 2].type == DOT
-			&& self.entries[lparen - 3].type == TYPE_IDENT)
+		if (lparen >= i + 4 && self.entries[lparen - 2].type == DOT && self.entries[lparen - 3].type == TYPE_IDENT)
 		{
 			DString qualified = dstring::temp();
 			qualified.appendf("%s.%s", self.entries[lparen - 3].text, name_tok.text);
@@ -78,13 +77,13 @@ fn void TokenList.collect_callables(&self, List{CallableSpan}* out)
 
 		out.push(
 			{
-				.name        = display,
-				.bare        = name_tok.text,
+				.name = display,
+				.bare = name_tok.text,
 				.module_name = current_module,
-				.start       = self.entries[i].offset,
-				.end         = end,
+				.start = self.entries[i].offset,
+				.end = end,
 				.name_offset = name_tok.offset,
-				.name_len    = name_tok.len,
+				.name_len = name_tok.len,
 			}
 		);
 	}
@@ -145,14 +144,20 @@ fn String call_hierarchy_bare_name(String name)
 // file on disk. A client expands hierarchy nodes pointing at files the user never opened,
 // so neither direction can assume an open buffer. When `*owns` comes back true the caller
 // must free both the stream and the content.
-fn bool load_stream_for_uri(String uri, DocumentList* docs, TokenStream* owned,
-	TokenStream** stream, String* content, bool* owns)
+fn bool load_stream_for_uri(
+	String uri,
+	DocumentList* docs,
+	TokenStream* owned,
+	TokenStream** stream,
+	String* content,
+	bool* owns
+)
 {
 	*owns = false;
 	if (try doc = docs.find(uri))
 	{
 		*content = doc.content;
-		*stream  = doc.get_tokens();
+		*stream = doc.get_tokens();
 		return true;
 	}
 
@@ -224,13 +229,22 @@ fn bool PrepareScan.visit(&self, String path, String content, TokenStream* strea
 
 // Encode a textDocument/prepareCallHierarchy response: an array holding the one
 // callable the cursor identifies, or an empty string for none.
-fn void encode_prepare_call_hierarchy(String uri, String content, sz offset, DocumentList* docs,
-	String stdlib_path, DString* out)
+fn void encode_prepare_call_hierarchy(
+	String uri,
+	String content,
+	sz offset,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out
+)
 {
 	TokenStream owned;
 	bool owns;
 	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
-	defer { if (owns) owned.free(); }
+	defer
+	{
+		if (owns) owned.free();
+	}
 
 	List{CallableSpan} spans;
 	spans.init(mem);
@@ -278,15 +292,19 @@ fn void encode_prepare_call_hierarchy(String uri, String content, sz offset, Doc
 			if (find_span_named(&other_spans, bare, &idx))
 			{
 				out.append_char('[');
-				encode_call_hierarchy_item(out, &other_spans.entries[idx], docs.entries[d].uri,
-					other.get_line_offsets());
+				encode_call_hierarchy_item(
+					out,
+					&other_spans.entries[idx],
+					docs.entries[d].uri,
+					other.get_line_offsets()
+				);
 				out.append_char(']');
 				return;
 			}
 		}
 
-		DString item = dstring::temp();
-		bool found = false;
+		DString item     = dstring::temp();
+		bool found       = false;
 		PrepareScan scan = { bare, &item, &found };
 		scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
 		if (found)
@@ -309,12 +327,20 @@ fn void encode_prepare_call_hierarchy(String uri, String content, sz offset, Doc
 // --- incomingCalls ---------------------------------------------------------
 
 // Append one incoming-call entry per function in this file that calls `bare`.
-//
+// 
 // Token offsets ascend and declaration spans are non-overlapping and also ascend, so
 // every call site inside one function is contiguous in token order: a single pass with
 // a monotonically advancing span cursor groups them without rescanning.
-fn void collect_incoming_calls_in(String uri, String content, TokenStream* stream, String bare,
-	String target_module, DString* out, bool* first, sz* count)
+fn void collect_incoming_calls_in(
+	String uri,
+	String content,
+	TokenStream* stream,
+	String bare,
+	String target_module,
+	DString* out,
+	bool* first,
+	sz* count
+)
 {
 	if (*count >= MAX_CALL_HIERARCHY_ITEMS) return;
 
@@ -331,9 +357,9 @@ fn void collect_incoming_calls_in(String uri, String content, TokenStream* strea
 
 	LineOffsets* lo = stream.get_line_offsets();
 
-	sz span_idx = 0;
-	bool open_entry = false;
-	DString ranges = dstring::temp();
+	sz span_idx      = 0;
+	bool open_entry  = false;
+	DString ranges   = dstring::temp();
 	bool first_range = true;
 
 	for (sz i = 0; i < stream.tokens.size; i++)
@@ -355,8 +381,8 @@ fn void collect_incoming_calls_in(String uri, String content, TokenStream* strea
 		if (span_idx >= spans.size) break;
 
 		CallableSpan* span = &spans.entries[span_idx];
-		if (tok.offset < span.start) continue;            // between declarations
-		if (tok.offset == span.name_offset) continue;     // the declaration itself
+		if (tok.offset < span.start) continue; // between declarations
+		if (tok.offset == span.name_offset) continue; // the declaration itself
 
 		if (!open_entry)
 		{
@@ -400,15 +426,30 @@ fn bool IncomingScan.visit(&self, String path, String content, TokenStream* stre
 	if (already_collected(path, self.origin_uri, self.docs)) return false;
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);
-	collect_incoming_calls_in(uri.str_view(), content, stream, self.bare, self.target_module,
-		self.out, self.first, self.count);
+	collect_incoming_calls_in(
+		uri.str_view(),
+		content,
+		stream,
+		self.bare,
+		self.target_module,
+		self.out,
+		self.first,
+		self.count
+	);
 	return *self.count >= MAX_CALL_HIERARCHY_ITEMS;
 }
 
 // Encode a callHierarchy/incomingCalls response for the item named `item_name` in
 // `item_uri`: a JSON array of CallHierarchyIncomingCall, or an empty string for none.
-fn void encode_incoming_calls(String item_uri, String item_name, int line, int character,
-	DocumentList* docs, String stdlib_path, DString* out)
+fn void encode_incoming_calls(
+	String item_uri,
+	String item_name,
+	int line,
+	int character,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out
+)
 {
 	String bare = call_hierarchy_bare_name(item_name);
 	if (bare.len == 0) return;
@@ -416,11 +457,13 @@ fn void encode_incoming_calls(String item_uri, String item_name, int line, int c
 	// Which module declares the item, so unrelated same-named functions are not reported
 	// as callers. Resolved from the item's own file, at its selectionRange.
 	String target_module = "";
+
+
 	{
 		TokenStream owned;
 		TokenStream* stream = null;
-		String content = "";
-		bool owns = false;
+		String content      = "";
+		bool owns           = false;
 		if (load_stream_for_uri(item_uri, docs, &owned, &stream, &content, &owns))
 		{
 			defer
@@ -437,8 +480,11 @@ fn void encode_incoming_calls(String item_uri, String item_name, int line, int c
 			stream.tokens.collect_callables(&spans);
 
 			sz idx;
-			if (find_span_at(&spans, position_to_offset(content, line, character), &idx)
-				|| find_span_named(&spans, bare, &idx))
+			if (find_span_at(
+				&spans,
+				position_to_offset(content, line, character),
+				&idx
+			) || find_span_named(&spans, bare, &idx))
 			{
 				// module_path_at builds into the temp allocator, not the file buffer, so
 				// this outlives the content above.
@@ -448,14 +494,22 @@ fn void encode_incoming_calls(String item_uri, String item_name, int line, int c
 	}
 
 	bool first = true;
-	sz count = 0;
+	sz count   = 0;
 	out.append_char('[');
 
 	// Open documents first: their unsaved content wins over the copy on disk.
 	for (sz d = 0; d < docs.size; d++)
 	{
-		collect_incoming_calls_in(docs.entries[d].uri, docs.entries[d].content,
-			docs.entries[d].get_tokens(), bare, target_module, out, &first, &count);
+		collect_incoming_calls_in(
+			docs.entries[d].uri,
+			docs.entries[d].content,
+			docs.entries[d].get_tokens(),
+			bare,
+			target_module,
+			out,
+			&first,
+			&count
+		);
 	}
 
 	// Then the project on disk, then the stdlib. The anchor is the item's own file, so
@@ -479,7 +533,7 @@ fn void encode_incoming_calls(String item_uri, String item_name, int line, int c
 struct OutgoingCallee
 {
 	String bare;
-	DString ranges;    // call-site ranges inside the caller
+	DString ranges; // call-site ranges inside the caller
 	DString item_json; // encoded CallHierarchyItem, empty until resolved
 	// How good the current match is, so a later, better-placed declaration can replace
 	// it: -1 none yet, 0 a module the caller cannot see, 1 visible, 2 the caller's own
@@ -497,7 +551,9 @@ fn OutgoingCallee* find_or_add_callee(List{OutgoingCallee}* callees, String bare
 		if (callees.entries[i].bare == bare) return &callees.entries[i];
 	}
 	if (callees.size >= MAX_CALL_HIERARCHY_ITEMS) return null;
-	callees.push({ .bare = bare, .ranges = dstring::temp(), .item_json = dstring::temp(), .rank = -1, .first_range = true });
+	callees.push(
+		{ .bare = bare, .ranges = dstring::temp(), .item_json = dstring::temp(), .rank = -1, .first_range = true }
+	);
 	return &callees.entries[callees.size - 1];
 }
 
@@ -516,8 +572,14 @@ fn int callee_rank(ModuleCtx* caller_ctx, String decl_module)
 
 // Improve the callees' declarations from one file. `need_visible` counts the callees that
 // still have no match the caller could actually reach; the scan stops when it hits zero.
-fn void resolve_callees_in(String uri, String content, TokenStream* stream,
-	List{OutgoingCallee}* callees, ModuleCtx* caller_ctx, sz* need_visible)
+fn void resolve_callees_in(
+	String uri,
+	String content,
+	TokenStream* stream,
+	List{OutgoingCallee}* callees,
+	ModuleCtx* caller_ctx,
+	sz* need_visible
+)
 {
 	List{CallableSpan} spans;
 	spans.init(mem);
@@ -563,16 +625,22 @@ fn bool OutgoingResolveScan.visit(&self, String path, String content, TokenStrea
 
 // Encode a callHierarchy/outgoingCalls response for the item at (line, character) of
 // `item_uri`: a JSON array of CallHierarchyOutgoingCall, or an empty string for none.
-//
+// 
 // The item's file may not be open — a client expands hierarchy nodes pointing at files
 // the user never visited — so it is read from disk when necessary.
-fn void encode_outgoing_calls(String item_uri, int line, int character, DocumentList* docs,
-	String stdlib_path, DString* out)
+fn void encode_outgoing_calls(
+	String item_uri,
+	int line,
+	int character,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out
+)
 {
-	String content = "";
+	String content      = "";
 	TokenStream owned;
 	TokenStream* stream = null;
-	bool owns = false;
+	bool owns           = false;
 
 	if (!load_stream_for_uri(item_uri, docs, &owned, &stream, &content, &owns)) return;
 	defer
@@ -633,8 +701,14 @@ fn void encode_outgoing_calls(String item_uri, int line, int character, Document
 	for (sz d = 0; d < docs.size && need_visible > 0; d++)
 	{
 		if (docs.entries[d].uri == item_uri) continue;
-		resolve_callees_in(docs.entries[d].uri, docs.entries[d].content,
-			docs.entries[d].get_tokens(), &callees, &caller_ctx, &need_visible);
+		resolve_callees_in(
+			docs.entries[d].uri,
+			docs.entries[d].content,
+			docs.entries[d].get_tokens(),
+			&callees,
+			&caller_ctx,
+			&need_visible
+		);
 	}
 
 	if (need_visible > 0)
@@ -652,8 +726,11 @@ fn void encode_outgoing_calls(String item_uri, int line, int character, Document
 		if (callees.entries[c].item_json.len() == 0) continue;
 		if (!first) out.append_char(',');
 		first = false;
-		out.appendf(`{"to":%s,"fromRanges":[%s]}`,
-			callees.entries[c].item_json.str_view(), callees.entries[c].ranges.str_view());
+		out.appendf(
+			`{"to":%s,"fromRanges":[%s]}`,
+			callees.entries[c].item_json.str_view(),
+			callees.entries[c].ranges.str_view()
+		);
 	}
 	out.append_char(']');
 

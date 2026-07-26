@@ -6,18 +6,24 @@ import c3::lexer;
 
 // textDocument/implementation — navigate from an abstraction to the concrete code
 // behind it. C3 expresses that with interfaces, so there are two useful directions:
-//
+// 
 //   * cursor on an interface name  -> the types whose conformance clause lists it,
 //                                     e.g. `struct RefsScan (FileVisitor)`
 //   * cursor on a method name      -> the `fn ... Type.method(...) @dynamic`
 //                                     definitions that provide it, whether the cursor
 //                                     sits on the interface's declaration of the
 //                                     method or on a call through the interface
-//
+// 
 // Method lookup keys on the name plus `@dynamic` rather than proving that the owning
 // type implements the interface in question: @dynamic exists precisely to mark
 // interface dispatch, and confirming conformance would mean resolving every candidate
 // type's declaration across the project for each hit.
+//
+// Matching by name alone means a same-named abstraction in an unrelated module would
+// otherwise pool its implementors with the one asked about: `vk::Allocator` collected
+// every `struct X (Allocator)` in std::core::mem::allocator too. A conforming type has
+// to be able to see the module its interface is declared in, so ImplSink filters on
+// that visibility -- see the comment there for why the filter can never hide results.
 
 // Type declarations that can carry a conformance clause.
 fn bool is_type_decl_keyword(TokenType t)
@@ -63,7 +69,7 @@ fn bool TokenList.has_dynamic_attribute(&self, sz lparen_idx)
 }
 
 // True when the type named at name_idx lists `iface` among the interfaces it implements.
-//
+// 
 // The conformance clause is a parenthesised list of bare type names after the type's
 // name: `struct Foo (Printable, Hashable)`. Enums spell their associated-value list with
 // the same parentheses (`enum E : int (String desc)`), so an entry only counts when the
@@ -91,11 +97,67 @@ fn bool TokenList.type_implements(&self, sz name_idx, String iface)
 	return false;
 }
 
+// One bucket of Locations per visibility rank of the file they came from. The answer
+// is the strongest bucket that collected anything, so an unrelated module's `Greeter`
+// loses to ours -- while a hit whose visibility cannot be established at all is still
+// reported if nothing better turned up. The filter can narrow an answer, never empty it.
+struct ImplSink @private
+{
+	DString[3] buckets; // indexed by visibility rank
+	bool[3] empty;
+	String target_module; // "" disables ranking: everything lands in VIS_DIRECT
+}
+
+fn void ImplSink.init(&self, String target_module)
+{
+	for (int r = 0; r < 3; r++)
+	{
+		self.buckets[r] = dstring::temp();
+		self.empty[r] = true;
+	}
+	self.target_module = target_module;
+}
+
+// Rank of the file holding these tokens. Settled once per stream: visibility is a
+// property of the file, not of the individual hit.
+fn int ImplSink.rank_for(&self, TokenList* tokens)
+{
+	if (self.target_module.len == 0) return VIS_DIRECT;
+	ModuleCtx ctx;
+	ctx.build(tokens);
+	return ctx.visibility_rank(self.target_module);
+}
+
+fn void ImplSink.add(&self, String uri, String content, Token tok, int rank)
+{
+	if (!self.empty[rank]) self.buckets[rank].append_char(',');
+	self.empty[rank] = false;
+	emit_location(uri, content, tok, &self.buckets[rank]);
+}
+
+// Contents of the strongest non-empty bucket, or "" when nothing was found at all.
+fn String ImplSink.best(&self)
+{
+	for (int r = VIS_DIRECT; r >= VIS_INVISIBLE; r--)
+	{
+		if (!self.empty[r]) return self.buckets[r].str_view();
+	}
+	return "";
+}
+
 // Append a Location for every implementation found in one token stream. Exactly one of
 // `iface` / `method` is set by the caller.
-fn void TokenList.collect_implementations(&self, String uri, String content, String iface,
-	String method, DString* out, bool* first)
+fn void TokenList.collect_implementations(
+	&self,
+	String uri,
+	String content,
+	String iface,
+	String method,
+	ImplSink* sink
+)
 {
+	int rank = sink.rank_for(self);
+
 	if (method.len > 0)
 	{
 		for (sz i = 0; i < self.size; i++)
@@ -113,9 +175,7 @@ fn void TokenList.collect_implementations(&self, String uri, String content, Str
 			if (self.entries[lparen - 3].type != TYPE_IDENT) continue;
 			if (!self.has_dynamic_attribute(lparen)) continue;
 
-			if (!*first) out.append_char(',');
-			*first = false;
-			emit_location(uri, content, name_tok, out);
+			sink.add(uri, content, name_tok, rank);
 		}
 		return;
 	}
@@ -127,9 +187,7 @@ fn void TokenList.collect_implementations(&self, String uri, String content, Str
 		if (self.entries[i + 1].type != TYPE_IDENT) continue;
 		if (!self.type_implements(i + 1, iface)) continue;
 
-		if (!*first) out.append_char(',');
-		*first = false;
-		emit_location(uri, content, self.entries[i + 1], out);
+		sink.add(uri, content, self.entries[i + 1], rank);
 	}
 }
 
@@ -138,8 +196,7 @@ struct ImplScan (FileVisitor) @private
 {
 	String iface;
 	String method;
-	DString* out;
-	bool* first;
+	ImplSink* sink;
 	String origin_uri;
 	DocumentList* docs;
 }
@@ -149,20 +206,29 @@ fn bool ImplScan.visit(&self, String path, String content, TokenStream* stream) 
 	if (already_collected(path, self.origin_uri, self.docs)) return false;
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);
-	stream.tokens.collect_implementations(uri.str_view(), content, self.iface, self.method, self.out, self.first);
+	stream.tokens.collect_implementations(uri.str_view(), content, self.iface, self.method, self.sink);
 	return false; // collect-all: never stop early
 }
 
 // Encode a textDocument/implementation response: a JSON array of Locations, or an
 // empty string when there is nothing to report (the handler answers `null` then).
-fn void encode_implementation(String uri, String content, sz offset, DocumentList* docs,
-	String stdlib_path, DString* out)
+fn void encode_implementation(
+	String uri,
+	String content,
+	sz offset,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out
+)
 {
 	// Reuse the open document's cached token stream when available.
 	TokenStream owned;
 	bool owns;
 	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
-	defer { if (owns) owned.free(); }
+	defer
+	{
+		if (owns) owned.free();
+	}
 
 	Token cursor_tok;
 	sz cursor_idx;
@@ -185,29 +251,30 @@ fn void encode_implementation(String uri, String content, sz offset, DocumentLis
 		return;
 	}
 
-	bool first = true;
-	out.append("[");
+	// Where the abstraction at the cursor is declared. "" when it cannot be resolved,
+	// which leaves the search module-blind.
+	String target_module = find_symbol_module(&stream.tokens, cursor_tok, uri, docs, stdlib_path);
+
+	ImplSink sink;
+	sink.init(target_module);
 
 	// 1. Current file.
-	stream.tokens.collect_implementations(uri, content, iface, method, out, &first);
+	stream.tokens.collect_implementations(uri, content, iface, method, &sink);
 
 	// 2. Open documents (their unsaved content wins over the copy on disk).
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
 		TokenStream* other = docs.entries[d].get_tokens();
-		other.tokens.collect_implementations(docs.entries[d].uri, docs.entries[d].content,
-			iface, method, out, &first);
+		other.tokens.collect_implementations(docs.entries[d].uri, docs.entries[d].content, iface, method, &sink);
 	}
 
 	// 3 + 4. Project files on disk, then the stdlib.
-	ImplScan scan = { iface, method, out, &first, uri, docs };
+	ImplScan scan = { iface, method, &sink, uri, docs };
 	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
 
-	out.append("]");
-
-	if (first)
-	{
-		out.clear();
-	}
+	String body = sink.best();
+	// Nothing at all: leave the buffer empty so the handler answers `null`.
+	if (body.len == 0) return;
+	out.appendf("[%s]", body);
 }

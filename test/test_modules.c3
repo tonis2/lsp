@@ -33,6 +33,23 @@ fn void test_module_ctx_build_and_can_see() @test {
 	assert(!ctx.can_see("unrelated"), "unrelated module");
 }
 
+fn void test_module_ctx_visibility_rank_grades_the_relation() @test {
+	String content = "module myapp::core;\nimport std::io;\nfn void t() {}";
+	TokenStream stream = token_stream_tokenize(content);
+	defer stream.free();
+
+	ModuleCtx ctx;
+	ctx.build(&stream.tokens);
+
+	assert(ctx.visibility_rank("myapp::core") == VIS_DIRECT, "own module is a direct tie");
+	assert(ctx.visibility_rank("myapp") == VIS_DIRECT, "parent module is a direct tie");
+	assert(ctx.visibility_rank("std::io::path") == VIS_DIRECT, "an explicit import is a direct tie");
+	// Visible, but only because C3 imports std::core everywhere — not a real relation.
+	assert(ctx.visibility_rank("std::core::mem") == VIS_IMPLICIT, "std::core is only implicitly visible");
+	assert(ctx.visibility_rank("unrelated") == VIS_INVISIBLE, "unrelated module is invisible");
+	assert(ctx.can_see("std::core::mem"), "implicit visibility still counts as visible");
+}
+
 fn void test_module_ctx_no_module_info_is_permissive() @test {
 	String content = "struct Foo { int x; }\nfn void t() {}";
 	TokenStream stream = token_stream_tokenize(content);
