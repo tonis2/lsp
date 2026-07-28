@@ -233,9 +233,9 @@ fn void CompilerDiagList.parse(&self, String output, String project_root)
 	}
 }
 
-// Publish one textDocument/publishDiagnostics per file with errors, then clear
-// (publish an empty array for) any file that had diagnostics on the previous
-// run but no longer does. self.diag_files tracks the current set of error files.
+// Hand this build's diagnostics to the merged per-file state: one update per file with
+// errors, then a clear for every file that had compiler errors on the previous run but
+// no longer does. The clears are what keep fixed errors from sticking in the editor.
 fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 {
 	// Distinct URIs that have errors this run.
@@ -252,7 +252,6 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 		current.push(uri);
 
 		DString arr = dstring::temp();
-		arr.append_char('[');
 		int n = 0;
 		foreach (d2 : *diags)
 		{
@@ -261,30 +260,17 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 			d2.encode(&arr);
 			n++;
 		}
-		arr.append_char(']');
-		publish_file_diagnostics(uri, arr.str_view());
+		self.set_diagnostics(uri, arr.str_view(), COMPILER);
 	}
 
-	// Clear files that previously had diagnostics but no longer do.
-	foreach (old_uri : self.diag_files)
+	// Clear the compiler half of files that dropped out of this run, leaving any lexer
+	// markers they still have in place. Walk backwards: set_diagnostics drops an entry
+	// once both of its halves are empty, which shifts everything after it down.
+	for (sz i = self.diag_state.size; i > 0; i--)
 	{
-		if (!current.contains(old_uri))
-		{
-			publish_file_diagnostics(old_uri, "[]");
-		}
-	}
-
-	// Rebuild the persistent set with owned copies of the current error URIs.
-	foreach (old_uri : self.diag_files)
-	{
-		if (old_uri.len > 0) mem::free((char*)old_uri.ptr);
-	}
-	self.diag_files.clear();
-	foreach (u : current)
-	{
-		char[] copy = mem::new_array(char, u.len);
-		copy[..] = u[..];
-		self.diag_files.push((String)copy);
+		DiagEntry* e = &self.diag_state.entries[i - 1];
+		if (e.compiler.len == 0 || current.contains(e.uri)) continue;
+		self.set_diagnostics(e.uri, "", COMPILER);
 	}
 }
 

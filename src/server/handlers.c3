@@ -141,7 +141,7 @@ fn void LspServer.handle_exit(&self, Object* msg = null, String id_json = "")
 		self.documents.close(self.documents.entries[0].uri);
 	}
 	self.documents.free();
-	self.diag_files.free();
+	self.free_diag_state();
 
 	if (self.diag_pending_uri.len > 0) mem::free((char*)self.diag_pending_uri.ptr);
 	if (self.lex_diag_pending_uri.len > 0) mem::free((char*)self.lex_diag_pending_uri.ptr);
@@ -154,7 +154,7 @@ fn void LspServer.handle_did_open(&self, Object* msg, String id_json = "")
 	String text = td.get_string("text") ?? "";
 	int version = td.get_int("version") ?? 0;
 	self.documents.open(uri, text, version);
-	publish_diagnostics(uri, text);
+	self.publish_lex_diagnostics(uri, text);
 	self.maybe_run_compiler_diagnostics(uri);
 }
 
@@ -178,9 +178,21 @@ fn void LspServer.handle_did_close(&self, Object* msg, String id_json = "")
 	self.documents.close(request_uri(msg));
 }
 
+// A save is an explicit, low-frequency user action, so it always runs the compiler
+// immediately and never goes through the throttle. Deferring a save is what left fixed
+// errors on screen: a deferred run only fires when the next message arrives, and after
+// saving the client may send nothing at all until the user types again.
 fn void LspServer.handle_did_save(&self, Object* msg, String id_json = "")
 {
-	self.maybe_run_compiler_diagnostics(request_uri(msg));
+	self.run_compiler_diagnostics_now(request_uri(msg));
+}
+
+// Build now, superseding any deferred run so the same work isn't repeated on the next
+// incoming message.
+fn void LspServer.run_compiler_diagnostics_now(&self, String uri)
+{
+	self.diag_pending = false;
+	self.publish_compiler_diagnostics(uri);
 }
 
 fn void LspServer.maybe_run_compiler_diagnostics(&self, String uri)
@@ -188,8 +200,7 @@ fn void LspServer.maybe_run_compiler_diagnostics(&self, String uri)
 	// No throttle configured: run immediately.
 	if (self.diag_delay_ms <= 0)
 	{
-		self.diag_pending = false;
-		self.publish_compiler_diagnostics(uri);
+		self.run_compiler_diagnostics_now(uri);
 		return;
 	}
 
@@ -199,15 +210,14 @@ fn void LspServer.maybe_run_compiler_diagnostics(&self, String uri)
 	if ((long)elapsed >= (long)delay || (long)self.last_diag_time == 0)
 	{
 		// Enough time has passed (or first run) — run now.
-		self.diag_pending = false;
-		self.publish_compiler_diagnostics(uri);
+		self.run_compiler_diagnostics_now(uri);
 		return;
 	}
 
 	// Inside the throttle window — defer with a trailing-edge debounce. Store an
 	// owned copy of the URI so flush_pending_diagnostics can re-run it once the
-	// window elapses (on the next incoming message). This prevents a fix-save
-	// from being silently dropped and leaving stale diagnostics behind.
+	// window elapses (on the next incoming message). Only didOpen reaches here, so
+	// a burst of opened files collapses into one build; saves bypass this entirely.
 	self.set_pending_diag_uri(uri);
 	self.diag_pending = true;
 }
@@ -218,7 +228,7 @@ fn void LspServer.maybe_publish_lex_diagnostics(&self, String uri, String conten
 {
 	if (content.len <= LARGE_FILE_BYTES)
 	{
-		publish_diagnostics(uri, content);
+		self.publish_lex_diagnostics(uri, content);
 		return;
 	}
 
@@ -232,7 +242,7 @@ fn void LspServer.maybe_publish_lex_diagnostics(&self, String uri, String conten
 	{
 		self.last_lex_diag_time = now;
 		self.lex_diag_pending = false;
-		publish_diagnostics(uri, content);
+		self.publish_lex_diagnostics(uri, content);
 		return;
 	}
 

@@ -55,6 +55,7 @@ Options take their value after `=` (e.g. `--stdlib-path=/opt/c3/lib/std`).
 | `--diagnostics-delay=<ms>` | Throttle delay for compiler diagnostics (ms), `0` disables throttling | `2000` |
 | `--version`, `-v` | Print version and exit | |
 
+
 If no stdlib path is given, the server asks the configured compiler where it is
 installed (`c3c --version`) and uses `<install dir>/lib/std` when it exists. A missing
 or broken compiler never crashes the server — stdlib features simply stay off.

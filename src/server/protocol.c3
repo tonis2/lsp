@@ -7,10 +7,6 @@ import std::encoding::json;
 import std::collections::object;
 import std::time;
 
-// Set of file:// URIs that currently have published c3c compiler diagnostics.
-// Used to clear (publish an empty array for) files that no longer have errors.
-alias PublishedFiles = List{String};
-
 struct LspServer
 {
 	bool initialized;
@@ -24,7 +20,9 @@ struct LspServer
 	String root_path;
 	long diag_delay_ms;
 	Time last_diag_time;
-	PublishedFiles diag_files;
+	// What is currently published per file, so both producers can be merged and stale
+	// markers explicitly cleared. See DiagEntry.
+	DiagState diag_state;
 	bool diag_pending;
 	String diag_pending_uri;
 	// Trailing-edge debounce state for the cheap lexer diagnostics on large files.
@@ -39,7 +37,7 @@ fn void LspServer.init(&self, String stdlib_path, String compiler_path, long dia
 {
 	*self = { .running = true, .stdlib_path = stdlib_path, .compiler_path = compiler_path, .diag_delay_ms = diag_delay_ms, };
 	self.documents.init(mem);
-	self.diag_files.init(mem);
+	self.diag_state.init(mem);
 	self.fcache.init(mem);
 	// Publish the cache so the cross-file scan_dir_* helpers can consult it. The server
 	// is a stable stack value for the whole program, so &self.fcache is valid for life.
@@ -147,8 +145,7 @@ fn void LspServer.flush_pending_diagnostics(&self)
 		Duration elapsed = now - self.last_diag_time;
 		if ((long)elapsed >= (long)delay || (long)self.last_diag_time == 0)
 		{
-			self.diag_pending = false;
-			self.publish_compiler_diagnostics(self.diag_pending_uri);
+			self.run_compiler_diagnostics_now(self.diag_pending_uri);
 		}
 	}
 
@@ -162,7 +159,7 @@ fn void LspServer.flush_pending_diagnostics(&self)
 			self.last_lex_diag_time = now;
 			if (try d = self.documents.find(self.lex_diag_pending_uri))
 			{
-				publish_diagnostics(self.lex_diag_pending_uri, d.content);
+				self.publish_lex_diagnostics(self.lex_diag_pending_uri, d.content);
 			}
 		}
 	}
