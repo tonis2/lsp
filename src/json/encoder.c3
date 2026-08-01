@@ -56,6 +56,7 @@ struct CompletionItem
 	String detail;
 	String documentation;
 	String insert_text;
+    String sort_text;
 	int insert_text_format;      // 0 = unset, 1 = PlainText, 2 = Snippet
 	bool trigger_signature_help; // emit editor.action.triggerParameterHints command
 }
@@ -170,6 +171,12 @@ fn void CompletionItem.encode(&self, DString* out)
 		json_escape_into(out, self.detail);
 		out.append_char('"');
 	}
+    if (self.sort_text.len > 0)
+    {
+        out.append(",\"sortText\":\"");
+        json_escape_into(out, self.sort_text);
+        out.append_char('"');
+    }
 	if (self.documentation.len > 0)
 	{
 		out.append(",\"documentation\":\"");

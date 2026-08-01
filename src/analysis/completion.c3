@@ -208,7 +208,11 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 	// form gives VS Code unambiguous edit semantics so completions still show when a
 	// closing bracket sits right after the cursor (editor.autoClosingBrackets inserts one,
 	// e.g. "foo(|)"). With a bare Range VS Code suppresses the popup in that position.
-	out.append(`{"isIncomplete":false,"itemDefaults":{"editRange":{"insert":`);
+    //
+    // ranking now depends on complete current pattern. Client needs to request an updated
+    // list as typing continues. isIncomplete is teh completion-list signal for that behavior.
+    // src: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionList
+	out.append(`{"isIncomplete":true,"itemDefaults":{"editRange":{"insert":`);
 	edit_range.encode(out);
 	out.append(`,"replace":`);
 	edit_range.encode(out);
@@ -230,16 +234,16 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 		{
 			foreach (kw : KEYWORDS)
 			{
-				if (prefix.len == 0 || starts_with_ci(kw, prefix))
+				if (prefix.len == 0 || fuzzy_match_ci(kw, prefix))
 				{
-					emit_completion_item(out, kw, 14, &first); // Keyword
+					emit_completion_item(out, kw, 14, prefix, &first); // Keyword
 				}
 			}
 			foreach (bt : BUILTIN_TYPES)
 			{
-				if (prefix.len == 0 || starts_with_ci(bt, prefix))
+				if (prefix.len == 0 || fuzzy_match_ci(bt, prefix))
 				{
-					emit_completion_item(out, bt, 22, &first); // Struct (for types)
+					emit_completion_item(out, bt, 22, prefix, &first); // Struct (for types)
 				}
 			}
 		}
@@ -249,9 +253,9 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 		{
 			foreach (ct : CT_KEYWORDS)
 			{
-				if (prefix.len == 0 || starts_with_ci(ct, prefix))
+				if (prefix.len == 0 || fuzzy_match_ci(ct, prefix))
 				{
-					emit_completion_item(out, ct, 14, &first); // Keyword
+					emit_completion_item(out, ct, 14, prefix, &first); // Keyword
 				}
 			}
 		}
@@ -263,21 +267,21 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 	out.append("]}");
 }
 
-fn void emit_completion_item(DString* out, String label, int kind, bool* first) @private
+fn void emit_completion_item(DString* out, String label, int kind, String pattern, bool* first) @private
 {
-	if (!*first) out.append_char(',');
-	CompletionItem item = { .label = label, .kind = kind, };
-	if (kind == 2 || kind == 3) // Method / Function (incl. macros)
-	{
-		// Insert "label($0)" as a snippet and trigger the parameter-hints popup so
-		// accepting a callable drops the cursor inside the parens with signatures shown.
-		// The label stays the plain name (filtering/display unchanged); only inserted text differs.
-		item.insert_text = snippet_call_text(label);
-		item.insert_text_format = 2; // Snippet
-		item.trigger_signature_help = true;
-	}
-	item.encode(out);
-	*first = false;
+    if (!*first) out.append_char(',');
+    CompletionItem item = { .label = label, .kind = kind, .sort_text = fuzzy_sort_text(label,pattern),};
+    if (kind == 2 || kind == 3) // Method / Function (incl. macros)
+    {
+        // Insert "label($0)" as a snippet and trigger the parameter-hints popup so
+        // accepting a callable drops the cursor inside the parens with signatures shown.
+        // The label stays the plain name (filtering/display unchanged); only inserted text differs.
+        item.insert_text = snippet_call_text(label);
+        item.insert_text_format = 2; // Snippet
+        item.trigger_signature_help = true;
+    }
+    item.encode(out);
+    *first = false;
 }
 
 // Build a snippet insert text of the form "name($0)", backslash-escaping the snippet
@@ -304,10 +308,10 @@ fn String snippet_call_text(String name) @private
 	return s.str_view();
 }
 
-fn void emit_completion_item_detail(DString* out, String label, int kind, String detail, bool* first) @private
+fn void emit_completion_item_detail(DString* out, String label, int kind, String detail, String pattern, bool* first) @private
 {
 	if (!*first) out.append_char(',');
-	CompletionItem item = { .label = label, .kind = kind, .detail = detail, };
+	CompletionItem item = { .label = label, .kind = kind, .detail = detail, .sort_text = fuzzy_sort_text(label,pattern),};
 	item.encode(out);
 	*first = false;
 }
@@ -318,35 +322,21 @@ fn void emit_completion_item_detail(DString* out, String label, int kind, String
 // found by the normal field/method scan — this is the only place they come from.
 fn void emit_array_property_completions(String prefix, bool is_slice, DString* out, bool* first) @private
 {
-	if (prefix.len == 0 || starts_with_ci("len", prefix))
+	if (prefix.len == 0 || fuzzy_match_ci("len", prefix))
 	{
-		emit_completion_item_detail(out, "len", 10, "usz", first); // 10 = Property
+		emit_completion_item_detail(out, "len", 10, "usz", prefix, first); // 10 = Property
 	}
-	if (is_slice && (prefix.len == 0 || starts_with_ci("ptr", prefix)))
+	if (is_slice && (prefix.len == 0 || fuzzy_match_ci("ptr", prefix)))
 	{
-		emit_completion_item_detail(out, "ptr", 10, "void*", first); // 10 = Property
+		emit_completion_item_detail(out, "ptr", 10, "void*", prefix, first); // 10 = Property
 	}
 }
 
 fn bool is_ident_char(char c) @private
 {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+	return (c >= 'a' && c <= 'z') || (c >= 'A' &&  c<= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-fn bool starts_with_ci(String s, String prefix) @private
-{
-	if (prefix.len > s.len) return false;
-	for (sz i = 0; i < prefix.len; i++)
-	{
-		char a = s[i];
-		char b = prefix[i];
-		// Simple lowercase for ASCII letters
-		if (a >= 'A' && a <= 'Z') a += 32;
-		if (b >= 'A' && b <= 'Z') b += 32;
-		if (a != b) return false;
-	}
-	return true;
-}
 
 // Module-scoped completion: "args::h" → only declarations from the args module starting with h
 // The module_name may be a short name like "process" — resolve to full path via imports.
@@ -407,9 +397,9 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 					// what makes `import std::` / `std::io::` offer submodules.
 					String sub = next_submodule_segment(declared_mod, short_name);
 					if (sub.len == 0 && full_name.len > 0) sub = next_submodule_segment(declared_mod, full_name);
-					if (sub.len > 0 && sub != prefix && (prefix.len == 0 || starts_with_ci(sub, prefix)))
+					if (sub.len > 0 && sub != prefix && (prefix.len == 0 || fuzzy_match_ci(sub, prefix)))
 					{
-						emit_unique_completion(out, sub, 9, first, seen, seen_count);
+						emit_unique_completion(out, sub, 9, prefix, first, seen, seen_count);
 					}
 				}
 				continue;
@@ -499,16 +489,16 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 
 		if (!in_target) continue; // declaration belongs to a non-matching module section
 		if (name.len == 0 || kind == 0) continue;
-		if (prefix.len > 0 && !starts_with_ci(name, prefix)) continue;
+		if (prefix.len > 0 && !fuzzy_match_ci(name, prefix)) continue;
 		if (name == prefix) continue;
 
-		emit_unique_completion(out, name, kind, first, seen, seen_count);
+		emit_unique_completion(out, name, kind, prefix, first, seen, seen_count);
 	}
 }
 
 // Emit a completion item for `name` unless it was already emitted; records it in
 // `seen` so repeated declarations (across files/modules) are shown only once.
-fn void emit_unique_completion(DString* out, String name, int kind, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+fn void emit_unique_completion(DString* out, String name, int kind, String pattern, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
 {
 	for (sz k = 0; k < *seen_count; k++)
 	{
@@ -519,7 +509,7 @@ fn void emit_unique_completion(DString* out, String name, int kind, bool* first,
 		(*seen)[*seen_count] = name;
 		(*seen_count)++;
 	}
-	emit_completion_item(out, name, kind, first);
+	emit_completion_item(out, name, kind, pattern, first);
 }
 
 // If `declared` is a submodule of `target` (target is a proper segment-prefix, or a
@@ -872,7 +862,7 @@ fn void collect_idents_from_content(String content, String prefix, DString* out,
 		}
 
 		if (text.len == 0) continue;
-		if (prefix.len > 0 && !starts_with_ci(text, prefix)) continue;
+		if (prefix.len > 0 && !fuzzy_match_ci(text, prefix)) continue;
 
 		// Skip if same as prefix (don't suggest what's already typed)
 		if (text == prefix) continue;
@@ -895,7 +885,7 @@ fn void collect_idents_from_content(String content, String prefix, DString* out,
 			(*seen_count)++;
 		}
 
-		emit_completion_item(out, text, kind, first);
+		emit_completion_item(out, text, kind, prefix, first);
 	}
 }
 
@@ -1161,7 +1151,7 @@ fn void TokenList.collect_struct_fields_into(&self, String type_name, String pre
 			if (depth == 1 && is_ident(self.entries[j].type))
 			{
 				String field_name = self.entries[j].text;
-				if (prefix.len > 0 && !starts_with_ci(field_name, prefix)) continue;
+				if (prefix.len > 0 && !fuzzy_match_ci(field_name, prefix)) continue;
 
 				// Dedup
 				bool dup = false;
@@ -1187,7 +1177,7 @@ fn void TokenList.collect_struct_fields_into(&self, String type_name, String pre
 					detail = self.entries[j - 2].text;
 				}
 
-				emit_completion_item_detail(out, field_name, 5, detail, first); // 5 = Field
+				emit_completion_item_detail(out, field_name, 5, detail, prefix, first); // 5 = Field
 			}
 		}
 	}
@@ -1214,7 +1204,7 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 				{
 					if (ctx != null && !ctx.can_see(self.module_of_decl(i))) break;
 					String method_name = self.entries[j - 1].text;
-					if (prefix.len > 0 && !starts_with_ci(method_name, prefix)) break;
+					if (prefix.len > 0 && !fuzzy_match_ci(method_name, prefix)) break;
 
 					// Dedup
 					bool dup = false;
@@ -1229,7 +1219,7 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 							(*seen)[*seen_count] = method_name;
 							(*seen_count)++;
 						}
-						emit_completion_item(out, method_name, 2, first); // 2 = Method
+						emit_completion_item(out, method_name, 2, prefix, first); // 2 = Method
 					}
 				}
 				break;
@@ -1278,7 +1268,7 @@ fn void TokenList.collect_enum_members_into(&self, String type_name, String pref
 
 			if (tt != CONST_IDENT) continue;
 			String member_name = self.entries[j].text;
-			if (prefix.len > 0 && !starts_with_ci(member_name, prefix)) continue;
+			if (prefix.len > 0 && !fuzzy_match_ci(member_name, prefix)) continue;
 
 			// Dedup
 			bool dup = false;
@@ -1293,7 +1283,7 @@ fn void TokenList.collect_enum_members_into(&self, String type_name, String pref
 				(*seen_count)++;
 			}
 
-			emit_completion_item(out, member_name, 20, first); // 20 = EnumMember
+			emit_completion_item(out, member_name, 20, prefix, first); // 20 = EnumMember
 		}
 	}
 }
