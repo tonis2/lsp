@@ -210,7 +210,7 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 	// e.g. "foo(|)"). With a bare Range VS Code suppresses the popup in that position.
     //
     // ranking now depends on complete current pattern. Client needs to request an updated
-    // list as typing continues. isIncomplete is teh completion-list signal for that behavior.
+    // list as typing continues. isIncomplete is the completion-list signal for that behavior.
     // src: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionList
 	out.append(`{"isIncomplete":true,"itemDefaults":{"editRange":{"insert":`);
 	edit_range.encode(out);
