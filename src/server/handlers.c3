@@ -333,7 +333,7 @@ fn void LspServer.handle_workspace_symbol(&self, Object* msg, String id_json)
 	}
 
 	DString data = dstring::temp();
-	encode_workspace_symbols(query, &self.documents, anchor, &data);
+	encode_workspace_symbols(query, &self.documents, anchor, self.stdlib_path, &data);
 	send_response(id_json, data.str_view());
 }
 

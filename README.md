@@ -13,7 +13,7 @@ A Language Server Protocol implementation for the [C3 programming language](http
 - **Completion** — keywords, types, identifiers, compile-time builtins (`$if`, `@sizeof`, …), and attribute names; member completion after `.` for struct fields, methods, and enum values.
 - **Signature Help** — parameter hints when calling functions and macros, with the active parameter highlighted
 - **Document Symbols** — outline of modules, functions, structs, enums, macros, and constants
-- **Workspace Symbols** — search declarations across the project by name, each labelled with the module that declares it
+- **Workspace Symbols** — search declarations across the project *and the standard library* by name, each labelled with the module that declares it; queries may narrow by module or list one type's methods (see below)
 - **Document Highlights** — highlight all occurrences of a symbol in the current file
 - **Semantic Tokens** — enhanced syntax highlighting for identifiers, types, functions, macros, and attributes, including inside contract blocks (directives like `@require` and their arguments are colored as code, prose as comment)
 - **Folding Ranges** — code folding for braces, imports, and block comments
