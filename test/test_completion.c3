@@ -681,153 +681,102 @@ fn void test_completion_edit_range_dot_partial() @test {
 	assert(result.contains(`"itemDefaults":{"editRange":{"insert":{"start":{"line":1,"character":9},"end":{"line":1,"character":11}},"replace":{"start":{"line":1,"character":9},"end":{"line":1,"character":11}}}}`), "got: %s", result);
 }
 
-// --- enum-member completion tests ---
+// --- fuzzy matching / ranking tests ---
 
-
-fn void test_fuzzy_float_before_fault() @test
-{
-	FuzzyRank float_rank =
-		fuzzy_rank_ci("float", "flt");
-
-	FuzzyRank fault_rank =
-		fuzzy_rank_ci("fault", "flt");
-
+fn void test_fuzzy_float_before_fault() @test {
+	// Both match "flt" with the same span and gaps; "float" wins on position sum
+	// because its 'l' and 't' sit earlier (f-l--t vs f--l-t).
+	FuzzyRank float_rank = fuzzy_rank_ci("float", "flt");
+	FuzzyRank fault_rank = fuzzy_rank_ci("fault", "flt");
 	assert(float_rank.matched);
 	assert(fault_rank.matched);
-
-	assert(
-		fuzzy_rank_better(float_rank, fault_rank),
-		"float should rank before fault for flt"
-	);
+	assert(fuzzy_rank_better(float_rank, fault_rank), "float should rank before fault for flt");
 }
 
-fn void test_fuzzy_red_before_green() @test
-{
-	FuzzyRank red_rank =
-		fuzzy_rank_ci("red", "re");
-
-	FuzzyRank green_rank =
-		fuzzy_rank_ci("green", "re");
-
+fn void test_fuzzy_red_before_green() @test {
+	FuzzyRank red_rank = fuzzy_rank_ci("red", "re");
+	FuzzyRank green_rank = fuzzy_rank_ci("green", "re");
 	assert(red_rank.matched);
 	assert(green_rank.matched);
-
-	assert(
-		fuzzy_rank_better(red_rank, green_rank),
-		"red should rank before green for re"
-	);
+	assert(fuzzy_rank_better(red_rank, green_rank), "red (exact) should rank before green (subsequence)");
 }
 
-fn void test_fuzzy_prefix_before_subsequence() @test
-{
-	FuzzyRank prefix_rank =
-		fuzzy_rank_ci("render", "re");
-
-	FuzzyRank subsequence_rank =
-		fuzzy_rank_ci("green", "re");
-
-	assert(
-		fuzzy_rank_better(prefix_rank, subsequence_rank),
-		"prefix match should beat a general subsequence"
-	);
+fn void test_fuzzy_prefix_before_subsequence() @test {
+	FuzzyRank prefix_rank = fuzzy_rank_ci("render", "re");
+	FuzzyRank subsequence_rank = fuzzy_rank_ci("green", "re");
+	assert(prefix_rank.tier == 1, "render should be a prefix match for re");
+	assert(subsequence_rank.tier == 2, "green should be a subsequence match for re");
+	assert(fuzzy_rank_better(prefix_rank, subsequence_rank), "prefix match should beat a general subsequence");
 }
 
-fn void test_fuzzy_rejects_out_of_order_letters() @test
-{
+fn void test_fuzzy_rejects_out_of_order_letters() @test {
 	assert(!fuzzy_match_ci("start", "se"));
 	assert(!fuzzy_match_ci("float", "tf"));
 }
 
-fn void test_fuzzy_sort_text_order() @test
-{
-	String float_sort =
-		fuzzy_sort_text("float", "flt");
-
-	String fault_sort =
-		fuzzy_sort_text("fault", "flt");
-
-	assert(float_sort.len > 0);
-	assert(fault_sort.len > 0);
-
-	// The direct ranking test above verifies the semantic ordering.
-	// This verifies that both candidates receive explicit LSP keys.
-	assert(float_sort != fault_sort);
+// A one-character pattern only matches as a prefix — "contains this letter" would
+// match nearly every identifier and crowd out real matches (see FUZZY_MIN_PATTERN).
+fn void test_fuzzy_single_char_pattern_is_prefix_only() @test {
+	assert(fuzzy_match_ci("start", "s"), "s should still match start as a prefix");
+	assert(fuzzy_match_ci("s", "s"), "s should match itself exactly");
+	assert(!fuzzy_match_ci("best", "s"), "s should not match best on a mid-word letter");
 }
 
-fn void test_completion_fuzzy_identifier() @test
-{
+// sortText is compared as text by the client, so the fixed-width key must order
+// lexicographically in the same direction fuzzy_rank_better orders the ranks.
+fn void test_fuzzy_sort_text_order() @test {
+	String float_sort = fuzzy_sort_text("float", "flt");
+	String fault_sort = fuzzy_sort_text("fault", "flt");
+	assert(float_sort.len > 0);
+	assert(float_sort.len == fault_sort.len, "sort keys must be fixed width, got: %s / %s", float_sort, fault_sort);
+	assert(float_sort.compare_to(fault_sort) < 0, "float should sort before fault, got: %s / %s", float_sort, fault_sort);
+}
+
+fn void test_fuzzy_sort_text_empty_without_pattern() @test {
+	assert(fuzzy_sort_text("float", "").len == 0, "no pattern means no ranking key");
+	assert(fuzzy_sort_text("float", "zz").len == 0, "a non-match has no ranking key");
+}
+
+fn void test_completion_fuzzy_identifier() @test {
 	DString out = dstring::temp();
 	DocumentList* docs = mem::new(DocumentList);
 	defer mem::free(docs);
-
-	String content =
-		"fn void start() {}\n"
-		"fn void speed() {}\n"
-		"fn void test() { se";
-
+	String content = "fn void start() {}\nfn void speed() {}\nfn void test() { se";
 	encode_completions("", content, content.len, docs, "", &out);
 	String result = out.str_view();
-
-	assert(result.contains(`"label":"speed"`),
-		"speed should fuzzy-match se, got: %s", result);
-
-	assert(!result.contains(`"label":"start"`),
-		"start should not fuzzy-match se, got: %s", result);
+	assert(result.contains(`"label":"speed"`), "speed should fuzzy-match se, got: %s", result);
+	assert(!result.contains(`"label":"start"`), "start should not fuzzy-match se, got: %s", result);
+	assert(result.contains(`"sortText":"`), "fuzzy items must carry a sortText, got: %s", result);
 }
 
-fn void test_completion_enum_members_prefix() @test
-{
+// --- enum-member completion tests ---
+
+fn void test_completion_enum_members() @test {
 	DString out = dstring::temp();
 	DocumentList* docs = mem::new(DocumentList);
 	defer mem::free(docs);
-
-	String content =
-		"enum Color { RED, GREEN, BLUE }\n"
-		"fn void t() { Color.RE";
-
-	encode_completions(
-		"",
-		content,
-		content.len,
-		docs,
-		"",
-		&out
-	);
-
+	String content = "enum Color { RED, GREEN, BLUE }\nfn void t() { Color.";
+	encode_completions("", content, content.len, docs, "", &out);
 	String result = out.str_view();
+	assert(result.contains(`"label":"RED"`), "expected RED, got: %s", result);
+	assert(result.contains(`"label":"GREEN"`), "expected GREEN, got: %s", result);
+	assert(result.contains(`"label":"BLUE"`), "expected BLUE, got: %s", result);
+	assert(result.contains(`"kind":20`), "expected EnumMember kind=20, got: %s", result);
+}
 
-	// RED is a direct prefix match.
-	assert(
-		result.contains(`"label":"RED"`),
-		"expected RED, got: %s",
-		result
-	);
-
-	// GREEN is a valid fuzzy subsequence match:
-	// G [R] [E] E N
-	assert(
-		result.contains(`"label":"GREEN"`),
-		"expected fuzzy match GREEN, got: %s",
-		result
-	);
-
-	// BLUE contains no R and cannot match RE.
-	assert(
-		!result.contains(`"label":"BLUE"`),
-		"BLUE should not fuzzy-match RE, got: %s",
-		result
-	);
-
-	FuzzyRank red_rank = fuzzy_rank_ci("RED", "RE");
-	FuzzyRank green_rank = fuzzy_rank_ci("GREEN", "RE");
-
-	assert(red_rank.matched);
-	assert(green_rank.matched);
-
-	assert(
-		fuzzy_rank_better(red_rank, green_rank),
-		"RED should rank before GREEN for RE"
-	);
+fn void test_completion_enum_members_prefix() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "enum Color { RED, GREEN, BLUE }\nfn void t() { Color.RE";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	// RED is a direct prefix match; GREEN is a subsequence match (G[R][E]EN) and is
+	// kept, but must rank below RED. BLUE has no R at all and is filtered out.
+	assert(result.contains(`"label":"RED"`), "expected RED, got: %s", result);
+	assert(result.contains(`"label":"GREEN"`), "expected fuzzy match GREEN, got: %s", result);
+	assert(!result.contains(`"label":"BLUE"`), "BLUE should not fuzzy-match RE, got: %s", result);
+	assert(fuzzy_rank_better(fuzzy_rank_ci("RED", "RE"), fuzzy_rank_ci("GREEN", "RE")), "RED should rank before GREEN for RE");
 }
 
 fn void test_completion_enum_members_assoc_values() @test {

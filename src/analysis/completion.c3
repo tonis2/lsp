@@ -208,10 +208,12 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 	// form gives VS Code unambiguous edit semantics so completions still show when a
 	// closing bracket sits right after the cursor (editor.autoClosingBrackets inserts one,
 	// e.g. "foo(|)"). With a bare Range VS Code suppresses the popup in that position.
-    //
-    // ranking now depends on complete current pattern. Client needs to request an updated
-    // list as typing continues. isIncomplete is the completion-list signal for that behavior.
-    // src: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionList
+	//
+	// isIncomplete is true because every item's sortText is ranked against the prefix as
+	// typed at this instant. Those ranks go stale on the next keystroke, so the client must
+	// re-request rather than re-filter the cached list. Re-requests are cheap: on-disk files
+	// come from the token cache (see file_cache.c3), so no file is re-read or re-tokenized.
+	// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionList
 	out.append(`{"isIncomplete":true,"itemDefaults":{"editRange":{"insert":`);
 	edit_range.encode(out);
 	out.append(`,"replace":`);
@@ -269,19 +271,19 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 
 fn void emit_completion_item(DString* out, String label, int kind, String pattern, bool* first) @private
 {
-    if (!*first) out.append_char(',');
-    CompletionItem item = { .label = label, .kind = kind, .sort_text = fuzzy_sort_text(label,pattern),};
-    if (kind == 2 || kind == 3) // Method / Function (incl. macros)
-    {
-        // Insert "label($0)" as a snippet and trigger the parameter-hints popup so
-        // accepting a callable drops the cursor inside the parens with signatures shown.
-        // The label stays the plain name (filtering/display unchanged); only inserted text differs.
-        item.insert_text = snippet_call_text(label);
-        item.insert_text_format = 2; // Snippet
-        item.trigger_signature_help = true;
-    }
-    item.encode(out);
-    *first = false;
+	if (!*first) out.append_char(',');
+	CompletionItem item = { .label = label, .kind = kind, .sort_text = fuzzy_sort_text(label, pattern), };
+	if (kind == 2 || kind == 3) // Method / Function (incl. macros)
+	{
+		// Insert "label($0)" as a snippet and trigger the parameter-hints popup so
+		// accepting a callable drops the cursor inside the parens with signatures shown.
+		// The label stays the plain name (filtering/display unchanged); only inserted text differs.
+		item.insert_text = snippet_call_text(label);
+		item.insert_text_format = 2; // Snippet
+		item.trigger_signature_help = true;
+	}
+	item.encode(out);
+	*first = false;
 }
 
 // Build a snippet insert text of the form "name($0)", backslash-escaping the snippet
@@ -311,7 +313,7 @@ fn String snippet_call_text(String name) @private
 fn void emit_completion_item_detail(DString* out, String label, int kind, String detail, String pattern, bool* first) @private
 {
 	if (!*first) out.append_char(',');
-	CompletionItem item = { .label = label, .kind = kind, .detail = detail, .sort_text = fuzzy_sort_text(label,pattern),};
+	CompletionItem item = { .label = label, .kind = kind, .detail = detail, .sort_text = fuzzy_sort_text(label, pattern), };
 	item.encode(out);
 	*first = false;
 }
@@ -334,9 +336,8 @@ fn void emit_array_property_completions(String prefix, bool is_slice, DString* o
 
 fn bool is_ident_char(char c) @private
 {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' &&  c<= 'Z') || (c >= '0' && c <= '9') || c == '_';
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
-
 
 // Module-scoped completion: "args::h" → only declarations from the args module starting with h
 // The module_name may be a short name like "process" — resolve to full path via imports.
