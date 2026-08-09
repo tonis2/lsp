@@ -6,18 +6,30 @@ import std::io::file;
 
 // --- query matching ---
 
-fn void test_symbol_query_is_case_insensitive_substring() @test {
-	assert(symbol_matches_query("load_gltf", "gltf"), "substring must match");
-	assert(symbol_matches_query("Scene.load_gltf", "LOAD"), "match must ignore case");
-	assert(symbol_matches_query("Camera", "camera"), "match must ignore case both ways");
-	assert(!symbol_matches_query("Camera", "xyz"), "unrelated query must not match");
-	assert(!symbol_matches_query("ab", "abcd"), "query longer than name cannot match");
+// The module-path qualifier keeps the substring test: that part of a query names a
+// place rather than searching for one.
+fn void test_symbol_module_path_is_case_insensitive_substring() @test {
+	assert(symbol_matches_query("std::math::quaternion", "math"), "substring must match");
+	assert(symbol_matches_query("std::io", "IO"), "match must ignore case");
+	assert(!symbol_matches_query("std::io", "xyz"), "unrelated query must not match");
+	assert(!symbol_matches_query("io", "stdio"), "query longer than name cannot match");
 }
 
-fn void test_symbol_query_empty_matches_nothing() @test {
-	// Clients send an empty query for an empty picker box; answering with every
-	// declaration in the project would be slow and useless.
-	assert(!symbol_matches_query("Camera", ""), "empty query must match nothing");
+// The name term uses the completion matcher, so everything a substring query used to
+// find still matches — it is now the tightest kind of match rather than the only kind.
+fn void test_symbol_name_query_still_matches_substrings() @test {
+	assert(fuzzy_match_ci("load_gltf", "gltf"), "substring must match");
+	assert(fuzzy_match_ci("Scene.load_gltf", "LOAD"), "match must ignore case");
+	assert(fuzzy_match_ci("Camera", "camera"), "match must ignore case both ways");
+	assert(!fuzzy_match_ci("Camera", "xyz"), "unrelated query must not match");
+	assert(!fuzzy_match_ci("ab", "abcd"), "query longer than name cannot match");
+}
+
+// The point of the change: letters in order but not adjacent now find the symbol.
+fn void test_symbol_name_query_matches_subsequence() @test {
+	assert(fuzzy_match_ci("CompletionSink", "CompSink"), "subsequence must match");
+	assert(fuzzy_match_ci("Scene.load_gltf", "sldgl"), "subsequence across the qualified name must match");
+	assert(!fuzzy_match_ci("CompletionSink", "SinkComp"), "out-of-order letters must not match");
 }
 
 fn void test_symbol_query_splits_module_and_type() @test {
@@ -61,23 +73,72 @@ fn void test_symbol_query_keeps_an_empty_tail() @test {
 
 fn void test_symbol_query_matches_by_module_and_type() @test {
 	SymbolQuery scoped = parse_symbol_query("math::angle");
-	assert(symbol_query_matches(scoped, "to_angle", "to_angle", "", "std::math::quaternion"),
+	assert(symbol_query_rank(scoped, "to_angle", "to_angle", "", "std::math::quaternion").matched,
 		"a module fragment must match anywhere in the path");
-	assert(!symbol_query_matches(scoped, "to_angle", "to_angle", "", "std::io"),
+	assert(!symbol_query_rank(scoped, "to_angle", "to_angle", "", "std::io").matched,
 		"a symbol outside the named module must not match");
 
 	// The type is matched whole, not as a substring: a substring test over the
 	// "Type.method" display form lets `Camera.` answer with `FreeCamera.orbit`.
 	SymbolQuery member = parse_symbol_query("Camera.");
-	assert(symbol_query_matches(member, "Camera.rotate", "rotate", "Camera", "app"),
+	assert(symbol_query_rank(member, "Camera.rotate", "rotate", "Camera", "app").matched,
 		"a listing query must match every method on the type");
-	assert(!symbol_query_matches(member, "FreeCamera.orbit", "orbit", "FreeCamera", "app"),
+	assert(!symbol_query_rank(member, "FreeCamera.orbit", "orbit", "FreeCamera", "app").matched,
 		"a type whose name merely ends with the query must not match");
-	assert(!symbol_query_matches(member, "Camera", "Camera", "", "app"),
+	assert(!symbol_query_rank(member, "Camera", "Camera", "", "app").matched,
 		"the type itself is not one of its own members");
 }
 
+// An empty query matches nothing — clients send one for an empty picker box, and the
+// fuzzy matcher on its own treats an empty pattern as matching everything.
+fn void test_symbol_query_empty_matches_nothing() @test {
+	SymbolQuery empty = parse_symbol_query("");
+	assert(!symbol_query_rank(empty, "Camera", "Camera", "", "app").matched, "empty query must match nothing");
+}
+
 // --- response encoding ---
+
+// Returns the position of `name` in the response, or -1 when it is absent.
+fn sz symbol_position(String result, String name) @private {
+	DString needle = dstring::temp();
+	needle.appendf(`"name":"%s"`, name);
+	if (try at = result.index_of(needle.str_view())) return (sz)at;
+	return -1;
+}
+
+// Results come back best-match-first, not in the order the files were walked.
+// MainCamera is declared first so scan order and rank order disagree.
+fn void test_workspace_symbols_are_ranked() @test {
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///proj/src/scene.c3", "module scene;\nstruct MainCamera {}\nstruct Camera {}\nstruct CameraController {}", 1);
+
+	DString out = dstring::temp();
+	encode_workspace_symbols("cam", ds, "", "", &out);
+	String r = out.str_view();
+
+	sz camera = symbol_position(r, "Camera");
+	sz main_camera = symbol_position(r, "MainCamera");
+	assert(camera >= 0 && main_camera >= 0, "both should match cam, got: %s", r);
+	assert(camera < main_camera, "the prefix match should come first, got: %s", r);
+
+	ds.close("file:///proj/src/scene.c3");
+}
+
+// The reason for the change: letters in order but not adjacent now find the symbol.
+fn void test_workspace_symbols_match_subsequence() @test {
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///proj/src/scene.c3", "module scene;\nstruct CameraController {}\nstruct Buffer {}", 1);
+
+	DString out = dstring::temp();
+	encode_workspace_symbols("CamCtrl", ds, "", "", &out);
+	String r = out.str_view();
+	assert(r.contains(`"name":"CameraController"`), "CamCtrl should find CameraController, got: %s", r);
+	assert(!r.contains(`"name":"Buffer"`), "Buffer should not match CamCtrl, got: %s", r);
+
+	ds.close("file:///proj/src/scene.c3");
+}
 
 fn void test_workspace_symbols_finds_open_document_symbol() @test {
 	DocumentList* ds = mem::new(DocumentList);
