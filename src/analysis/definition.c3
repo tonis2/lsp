@@ -615,6 +615,37 @@ fn String resolve_alias_in_project(String file_path, String type_name)
 	return scan.result;
 }
 
+<*
+ Resolve `alias Type = Target` for a name declared anywhere the server can see:
+ open buffers first, so an alias edited but not saved wins, then the project's
+ sources, then the stdlib.
+
+ Returns "" when the name is not an alias — the common case, and the one that
+ costs a walk of both trees, since a miss can only be established by looking
+ everywhere. Call it once per request, not once per declaration.
+
+ The result is temp-allocated when it came from disk and points into a cached
+ file's content when it came from a buffer; either way it lasts until the end of
+ the message being handled, and no longer.
+*>
+fn String resolve_alias_anywhere(String type_name, DocumentList* docs, String anchor_path, String stdlib_path)
+{
+	if (type_name.len == 0) return "";
+
+	if (docs != null)
+	{
+		for (sz d = 0; d < docs.size; d++)
+		{
+			String resolved = docs.entries[d].get_tokens().tokens.resolve_type_alias(type_name);
+			if (resolved.len > 0) return resolved;
+		}
+	}
+
+	StringScan scan = { &query_type_alias, type_name, "", "" };
+	scan_project_then_stdlib(anchor_path, stdlib_path, &scan);
+	return scan.result;
+}
+
 // Resolve the type of a receiver in a DOT expression at cursor_idx.
 // cursor_idx is the token AFTER the DOT. The token at cursor_idx-2 must be an IDENT.
 // Handles chained access: for stream.tokens.method(), resolves stream→TokenStream,
