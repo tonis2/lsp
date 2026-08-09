@@ -861,7 +861,7 @@ fn void collect_all_identifiers(String uri, String content, String prefix, Docum
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		collect_idents_from_content(docs.entries[d].content, prefix, sink);
+		collect_idents_from_content(docs.entries[d].content, prefix, sink, docs.entries[d].get_tokens());
 	}
 
 	// 3. Project files on disk
@@ -950,21 +950,28 @@ fn void collect_callable_names(TokenStream* stream, String[MAX_FILE_CALLABLES]* 
 	}
 }
 
-fn void collect_idents_from_content(String content, String prefix, CompletionSink* sink) @private
+// `cached` is the caller's already-tokenized stream for this content, when it has one.
+// Tokenizing is the dominant cost of a completion request — every project and stdlib
+// file is walked — and the client re-requests on every keystroke, so re-tokenizing what
+// the file cache already holds is the difference between a snappy popup and a laggy one.
+fn void collect_idents_from_content(String content, String prefix, CompletionSink* sink, TokenStream* cached = null) @private
 {
-	TokenStream ts = token_stream_tokenize(content);
-	defer ts.free();
+	TokenStream owned;
+	TokenStream* stream;
+	if (cached != null) { stream = cached; }
+	else { owned = token_stream_tokenize(content); stream = &owned; }
+	defer { if (cached == null) owned.free(); }
 
 	// Pre-pass: names declared as free functions/macros, so they complete as callables.
 	String[MAX_FILE_CALLABLES] callables;
 	sz callable_count = 0;
-	collect_callable_names(&ts, &callables, &callable_count);
+	collect_callable_names(stream, &callables, &callable_count);
 
-	for (sz i = 0; i < ts.tokens.size; i++)
+	for (sz i = 0; i < stream.tokens.size; i++)
 	{
-		String text = ts.tokens.entries[i].text;
+		String text = stream.tokens.entries[i].text;
 		int kind = 0;
-		switch (ts.tokens.entries[i].type)
+		switch (stream.tokens.entries[i].type)
 		{
 			case IDENT:
 				kind = 6; // Variable
@@ -998,7 +1005,7 @@ struct IdentsScan (FileVisitor) @private
 fn bool IdentsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
 	if (self.sink.at_capacity()) return true; // scan budget spent — stop scanning
-	collect_idents_from_content(content, self.prefix, self.sink);
+	collect_idents_from_content(content, self.prefix, self.sink, stream);
 	return false;
 }
 
