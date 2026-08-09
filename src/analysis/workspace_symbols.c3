@@ -8,29 +8,87 @@ import std::collections::list;
 // so scanning the whole project is fine but serializing everything in it is not.
 const sz MAX_WORKSPACE_SYMBOL_RESULTS = 512;
 
-fn char ascii_lower(char c) @private => (c >= 'A' && c <= 'Z') ? c + 32 : c;
+// Matching symbols examined before the scan gives up. Larger than the result cap so
+// ranking has more candidates to choose from than it emits — files are visited in
+// directory order, not in match order.
+const sz MAX_WORKSPACE_SYMBOL_MATCHES = 4096;
 
-// Case-insensitive substring match — the conventional workspace/symbol filter.
-// An empty query matches nothing: clients send one for an empty picker box, and
-// answering it with every declaration in the project is slow and useless.
-fn bool symbol_matches_query(String name, String query) @private
+// One matched symbol held back for ranking. `name` and `uri` are built in the request's
+// temp pool by the caller, but `container` is a view into file content the scanner frees
+// as soon as the visitor returns (see FileVisitor in scan.c3), so it is interned.
+struct WorkspaceSymbolCandidate
 {
-	if (query.len == 0 || query.len > name.len) return false;
+	String name;
+	String container;
+	String uri;
+	Range range;
+	int kind;
+	FuzzyRank rank;
+}
 
-	for (sz i = 0; i + query.len <= name.len; i++)
+// Collects matches, keeps the best MAX_WORKSPACE_SYMBOL_RESULTS by fuzzy rank, and
+// writes them out best-first.
+//
+// The picker used to take the first N found in directory order, which was defensible
+// while the filter was a plain substring test — every hit contained the query, so one
+// was as good as another. Subsequence matching widens the candidate set enough that
+// the first N stops being a fair sample of it.
+struct WorkspaceSymbolSink
+{
+	WorkspaceSymbolCandidate[MAX_WORKSPACE_SYMBOL_RESULTS] items;
+	sz count;
+	sz matched; // total matches seen, including those the cap dropped
+	String query;
+}
+
+fn void WorkspaceSymbolSink.init(&self, String query)
+{
+	self.count = 0;
+	self.matched = 0;
+	self.query = query;
+}
+
+// True once the scan budget is spent; the file visitor uses this to stop walking.
+fn bool WorkspaceSymbolSink.at_capacity(&self)
+{
+	return self.matched >= MAX_WORKSPACE_SYMBOL_MATCHES;
+}
+
+// Offer a matched symbol, keeping the buffer in rank order. Once it is full a candidate
+// has to beat the weakest kept item to get in.
+fn void WorkspaceSymbolSink.add(&self, WorkspaceSymbolCandidate cand)
+{
+	self.matched++;
+
+	if (self.count == MAX_WORKSPACE_SYMBOL_RESULTS
+		&& !fuzzy_rank_better(cand.rank, self.items[self.count - 1].rank)) return;
+
+	sz pos;
+	if (self.count < MAX_WORKSPACE_SYMBOL_RESULTS)
 	{
-		bool hit = true;
-		for (sz j = 0; j < query.len; j++)
-		{
-			if (ascii_lower(name[i + j]) != ascii_lower(query[j]))
-			{
-				hit = false;
-				break;
-			}
-		}
-		if (hit) return true;
+		pos = self.count;
+		self.count++;
 	}
-	return false;
+	else
+	{
+		pos = self.count - 1; // the weakest item falls off the end
+	}
+	while (pos > 0 && fuzzy_rank_better(cand.rank, self.items[pos - 1].rank))
+	{
+		self.items[pos] = self.items[pos - 1];
+		pos--;
+	}
+	self.items[pos] = cand;
+}
+
+fn void WorkspaceSymbolSink.flush(&self, DString* out)
+{
+	for (sz i = 0; i < self.count; i++)
+	{
+		if (i > 0) out.append_char(',');
+		WorkspaceSymbolCandidate cand = self.items[i];
+		encode_symbol_information(out, cand.name, cand.kind, cand.uri, cand.range, cand.container);
+	}
 }
 
 // Emit one SymbolInformation object.
@@ -50,18 +108,18 @@ fn void encode_symbol_information(DString* out, String name, int kind, String ur
 	out.append_char('}');
 }
 
-// Append every declaration in one file whose name matches `query`.
+// Offer every declaration in one file whose name matches the sink's query.
 fn void collect_workspace_symbols_in(String uri, String content, TokenStream* stream,
-	String query, DString* out, bool* first, sz* count) @private
+	WorkspaceSymbolSink* sink) @private
 {
-	if (*count >= MAX_WORKSPACE_SYMBOL_RESULTS) return;
+	if (sink.at_capacity()) return;
 
 	List{SymbolEntry} syms;
 	syms.init(mem);
 	defer syms.free();
 	collect_symbols(content, stream, &syms);
 
-	for (sz i = 0; i < syms.size && *count < MAX_WORKSPACE_SYMBOL_RESULTS; i++)
+	for (sz i = 0; i < syms.size && !sink.at_capacity(); i++)
 	{
 		SymbolEntry* entry = &syms.entries[i];
 
@@ -69,8 +127,9 @@ fn void collect_workspace_symbols_in(String uri, String content, TokenStream* st
 		// searches the workspace for.
 		if (entry.sym.kind == 2) continue;
 
-		// Methods are searchable under "Type.method" as well as bare "method",
-		// which a substring query over the qualified name gives for free.
+		// Methods are searchable under "Type.method" as well as bare "method": the
+		// query is matched against the qualified name, and a bare-name match scores
+		// better than the same letters found after the "Type." prefix.
 		DString display = dstring::temp();
 		if (entry.parent_type.len > 0)
 		{
@@ -80,26 +139,28 @@ fn void collect_workspace_symbols_in(String uri, String content, TokenStream* st
 		display.append(entry.sym.name);
 		String name = display.str_view();
 
-		if (!symbol_matches_query(name, query)) continue;
+		FuzzyRank rank = fuzzy_rank_ci(name, sink.query);
+		if (!rank.matched) continue;
 
 		int kind = entry.sym.kind == 6 ? 12 : entry.sym.kind; // 6 = Method -> 12 = Function
 
-		if (!*first) out.append_char(',');
-		*first = false;
 		// selection_range covers just the identifier, so clients land on the name
 		// rather than the start of the declaration.
-		encode_symbol_information(out, name, kind, uri, entry.sym.selection_range, entry.module_name);
-		(*count)++;
+		sink.add({
+			.name = name,
+			.container = completion_intern(entry.module_name),
+			.uri = uri,
+			.range = entry.sym.selection_range,
+			.kind = kind,
+			.rank = rank,
+		});
 	}
 }
 
 // On-disk workspace-symbol collection, driven through the shared scan engine.
 struct WorkspaceSymbolScan (FileVisitor) @private
 {
-	String query;
-	DString* out;
-	bool* first;
-	sz* count;
+	WorkspaceSymbolSink* sink;
 	DocumentList* docs;
 }
 
@@ -110,15 +171,19 @@ fn bool WorkspaceSymbolScan.visit(&self, String path, String content, TokenStrea
 
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);
-	collect_workspace_symbols_in(uri.str_view(), content, stream, self.query, self.out, self.first, self.count);
-	return *self.count >= MAX_WORKSPACE_SYMBOL_RESULTS;
+	collect_workspace_symbols_in(uri.str_view(), content, stream, self.sink);
+	return self.sink.at_capacity();
 }
 
 // Encode a workspace/symbol response: every declaration in the project whose name
-// contains `query`, case-insensitively. Open documents are searched first so
-// unsaved edits win, then the project directories on disk. The stdlib is
-// deliberately excluded — "workspace" means this project, and including it buries
-// project symbols under thousands of std:: matches.
+// fuzzy-matches `query`, best match first — the same matcher completion uses, so
+// "CompSink" finds CompletionSink here just as it does in the completion list.
+// Open documents are searched first so unsaved edits win, then the project
+// directories on disk. The stdlib is deliberately excluded — "workspace" means this
+// project, and including it buries project symbols under thousands of std:: matches.
+//
+// An empty query matches nothing: clients send one for an empty picker box, and
+// answering it with every declaration in the project is slow and useless.
 //
 // `anchor_path` must be a file path inside the project: the scan engine locates
 // project.json by walking up from it.
@@ -126,23 +191,31 @@ fn void encode_workspace_symbols(String query, DocumentList* docs, String anchor
 {
 	out.append("[");
 
-	bool first = true;
-	sz count = 0;
+	if (query.len == 0)
+	{
+		out.append("]");
+		return;
+	}
+
+	// Too large for the stack, and it lives exactly as long as the request does.
+	WorkspaceSymbolSink* sink = mem::tnew(WorkspaceSymbolSink);
+	sink.init(query);
 
 	if (docs != null)
 	{
-		for (sz d = 0; d < docs.size && count < MAX_WORKSPACE_SYMBOL_RESULTS; d++)
+		for (sz d = 0; d < docs.size && !sink.at_capacity(); d++)
 		{
 			collect_workspace_symbols_in(docs.entries[d].uri, docs.entries[d].content,
-				docs.entries[d].get_tokens(), query, out, &first, &count);
+				docs.entries[d].get_tokens(), sink);
 		}
 	}
 
-	if (count < MAX_WORKSPACE_SYMBOL_RESULTS && anchor_path.len > 0)
+	if (!sink.at_capacity() && anchor_path.len > 0)
 	{
-		WorkspaceSymbolScan scan = { query, out, &first, &count, docs };
+		WorkspaceSymbolScan scan = { sink, docs };
 		scan_project_dirs(anchor_path, &scan);
 	}
 
+	sink.flush(out);
 	out.append("]");
 }

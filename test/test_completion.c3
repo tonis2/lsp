@@ -713,6 +713,28 @@ fn void test_fuzzy_contiguous_beats_early_scattered() @test {
 	assert(fuzzy_rank_better(contiguous, scattered), "a contained match should win, got gaps %d vs %d", contiguous.gaps, scattered.gaps);
 }
 
+// Between two matches that are equally contiguous, the one starting on a word
+// boundary wins — otherwise "dot" ranks SendOtherEvent (Sen-d-Ot-herEvent) above
+// AppState.dot_position purely because its letters start earlier.
+fn void test_fuzzy_word_start_beats_earlier_position() @test {
+	FuzzyRank boundary = fuzzy_rank_ci("AppState.dot_position", "dot");
+	FuzzyRank mid_word = fuzzy_rank_ci("SendOtherEvent", "dot");
+	assert(boundary.matched && mid_word.matched);
+	assert(boundary.gaps == 0 && mid_word.gaps == 0, "both are contiguous matches");
+	assert(boundary.first > mid_word.first, "the boundary match starts later");
+	assert(boundary.at_word_start && !mid_word.at_word_start, "only one opens a word");
+	assert(fuzzy_rank_better(boundary, mid_word), "the word-boundary match should win");
+}
+
+// Word starts are recognised after separators and at camelCase humps alike.
+fn void test_fuzzy_word_start_forms() @test {
+	assert(fuzzy_rank_ci("dot_position", "dot").at_word_start, "start of name");
+	assert(fuzzy_rank_ci("has_dot_named", "dot").at_word_start, "after an underscore");
+	assert(fuzzy_rank_ci("Type.dot", "dot").at_word_start, "after a dot");
+	assert(fuzzy_rank_ci("PosedDot", "dot").at_word_start, "camelCase hump");
+	assert(!fuzzy_rank_ci("f2dot14", "dot").at_word_start, "mid-token letters are not a word start");
+}
+
 // Among matches that are all scattered, position still comes before gap count, so a
 // candidate starting with the pattern's first letter is not pushed below a tighter
 // match buried mid-word.

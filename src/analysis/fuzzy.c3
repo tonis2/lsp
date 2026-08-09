@@ -13,10 +13,15 @@ module lsp;
 // 1. Exact match
 // 2. Prefix match
 // 3. Contiguous match — the candidate literally contains the pattern
-// 4. Earlier first matched character
-// 5. Fewer skipped characters
-// 6. Earlier matched characters overall
-// 7. Shorter candidate
+// 4. Match starting on a word boundary
+// 5. Earlier first matched character
+// 6. Fewer skipped characters
+// 7. Earlier matched characters overall
+// 8. Shorter candidate
+// 
+// The word-boundary test is what separates a match a human would call real from one
+// that merely satisfies the letters: searching "dot" for AppState.dot_position beats
+// SendOtherEvent, where the same three letters straddle "d" and "Other".
 // 
 // Contiguity is compared before position, but only as "contiguous or not". Ranking
 // by position first buries a candidate that literally contains the pattern under any
@@ -33,6 +38,7 @@ struct FuzzyRank
 	// 2 = subsequence
 	int tier;
 
+	bool at_word_start;
 	sz gaps;
 	sz first;
 	sz position_sum;
@@ -56,6 +62,19 @@ fn char fuzzy_ascii_lower(char c) @private
 	return c;
 }
 
+// True when the character at `index` opens a word: the start of the name, the first
+// character after a separator, or an uppercase letter opening a camelCase hump.
+fn bool fuzzy_at_word_start(String s, sz index) @private
+{
+	if (index == 0) return true;
+
+	char prev = s[index - 1];
+	if (prev == '_' || prev == '.' || prev == ':' || prev == '$' || prev == '@') return true;
+
+	// camelCase hump: an uppercase letter that does not continue a run of them.
+	return s[index] >= 'A' && s[index] <= 'Z' && !(prev >= 'A' && prev <= 'Z');
+}
+
 // Index of the earliest case-insensitive occurrence of `pattern` in `candidate`,
 // or -1 when it does not occur contiguously.
 fn sz fuzzy_first_occurrence_ci(String candidate, String pattern) @private
@@ -77,7 +96,7 @@ fn sz fuzzy_first_occurrence_ci(String candidate, String pattern) @private
 
 fn FuzzyRank fuzzy_rank_ci(String candidate, String pattern)
 {
-	FuzzyRank rank = { .matched = false, .tier = 2, .gaps = 0, .first = 0, .position_sum = 0, .candidate_length = candidate.len, };
+	FuzzyRank rank = { .matched = false, .tier = 2, .at_word_start = false, .gaps = 0, .first = 0, .position_sum = 0, .candidate_length = candidate.len, };
 
 	if (pattern.len == 0)
 	{
@@ -99,6 +118,7 @@ fn FuzzyRank fuzzy_rank_ci(String candidate, String pattern)
 	{
 		rank.matched = true;
 		rank.first = at;
+		rank.at_word_start = fuzzy_at_word_start(candidate, at);
 		rank.position_sum = pattern.len * at + pattern.len * (pattern.len - 1) / 2;
 		if (at == 0) rank.tier = candidate.len == pattern.len ? 0 : 1;
 
@@ -146,6 +166,7 @@ fn FuzzyRank fuzzy_rank_ci(String candidate, String pattern)
 		rank.matched = true;
 		rank.gaps = gaps;
 		rank.first = first_position;
+		rank.at_word_start = fuzzy_at_word_start(candidate, first_position);
 		rank.position_sum = position_sum;
 		return rank;
 	}
@@ -183,6 +204,13 @@ fn bool fuzzy_rank_better(FuzzyRank a, FuzzyRank b)
 	if (a_contiguous != b_contiguous)
 	{
 		return a_contiguous;
+	}
+
+	// Landing on a word boundary is what separates a match a human would call real
+	// from one that only satisfies the letters.
+	if (a.at_word_start != b.at_word_start)
+	{
+		return a.at_word_start;
 	}
 
 	if (a.first != b.first)
