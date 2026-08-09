@@ -698,7 +698,30 @@ fn void test_fuzzy_red_before_green() @test {
 	FuzzyRank green_rank = fuzzy_rank_ci("green", "re");
 	assert(red_rank.matched);
 	assert(green_rank.matched);
-	assert(fuzzy_rank_better(red_rank, green_rank), "red (exact) should rank before green (subsequence)");
+	assert(fuzzy_rank_better(red_rank, green_rank), "red (prefix) should rank before green (mid-word)");
+}
+
+// A candidate that literally contains the pattern beats a scattered match, even one
+// starting at position 0 — otherwise "sink" ranks strip_comment_markers above
+// CompletionSink (s-tr-i-p_comme-n-t_mar-k-ers all appear in order).
+fn void test_fuzzy_contiguous_beats_early_scattered() @test {
+	FuzzyRank contiguous = fuzzy_rank_ci("CompletionSink", "sink");
+	FuzzyRank scattered = fuzzy_rank_ci("strip_comment_markers", "sink");
+	assert(contiguous.matched && scattered.matched);
+	assert(contiguous.gaps == 0, "CompletionSink contains sink outright");
+	assert(scattered.gaps > 0, "strip_comment_markers only matches scattered");
+	assert(fuzzy_rank_better(contiguous, scattered), "a contained match should win, got gaps %d vs %d", contiguous.gaps, scattered.gaps);
+}
+
+// Among matches that are all scattered, position still comes before gap count, so a
+// candidate starting with the pattern's first letter is not pushed below a tighter
+// match buried mid-word.
+fn void test_fuzzy_position_beats_gap_count_when_both_scattered() @test {
+	FuzzyRank leading = fuzzy_rank_ci("float", "flt");        // f at 0, two gaps
+	FuzzyRank tighter = fuzzy_rank_ci("module_filter", "flt"); // f at 7, one gap
+	assert(leading.matched && tighter.matched);
+	assert(leading.gaps > tighter.gaps, "the mid-word match is the tighter one");
+	assert(fuzzy_rank_better(leading, tighter), "float should still beat module_filter for flt");
 }
 
 fn void test_fuzzy_prefix_before_subsequence() @test {
@@ -722,21 +745,6 @@ fn void test_fuzzy_single_char_pattern_is_prefix_only() @test {
 	assert(!fuzzy_match_ci("best", "s"), "s should not match best on a mid-word letter");
 }
 
-// sortText is compared as text by the client, so the fixed-width key must order
-// lexicographically in the same direction fuzzy_rank_better orders the ranks.
-fn void test_fuzzy_sort_text_order() @test {
-	String float_sort = fuzzy_sort_text("float", "flt");
-	String fault_sort = fuzzy_sort_text("fault", "flt");
-	assert(float_sort.len > 0);
-	assert(float_sort.len == fault_sort.len, "sort keys must be fixed width, got: %s / %s", float_sort, fault_sort);
-	assert(float_sort.compare_to(fault_sort) < 0, "float should sort before fault, got: %s / %s", float_sort, fault_sort);
-}
-
-fn void test_fuzzy_sort_text_empty_without_pattern() @test {
-	assert(fuzzy_sort_text("float", "").len == 0, "no pattern means no ranking key");
-	assert(fuzzy_sort_text("float", "zz").len == 0, "a non-match has no ranking key");
-}
-
 fn void test_completion_fuzzy_identifier() @test {
 	DString out = dstring::temp();
 	DocumentList* docs = mem::new(DocumentList);
@@ -746,7 +754,94 @@ fn void test_completion_fuzzy_identifier() @test {
 	String result = out.str_view();
 	assert(result.contains(`"label":"speed"`), "speed should fuzzy-match se, got: %s", result);
 	assert(!result.contains(`"label":"start"`), "start should not fuzzy-match se, got: %s", result);
-	assert(result.contains(`"sortText":"`), "fuzzy items must carry a sortText, got: %s", result);
+	assert(result.contains(`"sortText":"`), "ranked items must carry a sortText, got: %s", result);
+}
+
+// --- ranking and truncation of the emitted list ---
+
+// Returns the position of `label` in the items array, or -1 when it is absent.
+fn sz item_position(String result, String label) @private {
+	DString needle = dstring::temp();
+	needle.appendf(`"label":"%s"`, label);
+	if (try at = result.index_of(needle.str_view())) return (sz)at;
+	return -1;
+}
+
+// The whole point of buffering: items are emitted best-match-first, not in the order
+// the collectors happened to walk the file.
+fn void test_completion_emits_in_rank_order() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	// "faded" (subsequence f-a-d) is declared first, "fade" (prefix) second, so scan
+	// order and rank order disagree.
+	String content = "fn void faded() {}\nfn void fade() {}\nfn void t() { fad";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	sz fade = item_position(result, "fade");
+	sz faded = item_position(result, "faded");
+	assert(fade >= 0 && faded >= 0, "both candidates should be offered, got: %s", result);
+	assert(fade < faded, "shorter exact-span match should be emitted first, got: %s", result);
+	assert(result.contains(`"sortText":"0000"`), "the best item should carry index 0, got: %s", result);
+}
+
+// sortText is a fixed-width index so the client keeps the server's order. Without it a
+// client sorting by label would present an arbitrary alphabetical slice of the top N.
+fn void test_completion_sort_text_is_fixed_width_index() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "fn void t() { wh";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"sortText":"0000"`), "first item should be index 0000, got: %s", result);
+	assert(result.contains(`"sortText":"0001"`), "second item should be index 0001, got: %s", result);
+}
+
+// With nothing typed there is no ranking, so no sortText is emitted and the client
+// falls back to sorting by label.
+fn void test_completion_no_sort_text_without_prefix() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "struct Foo { int alpha; int beta; }\nFoo f; f.";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"alpha"`), "expected alpha, got: %s", result);
+	assert(!result.contains(`"sortText"`), "unranked items should carry no sortText, got: %s", result);
+}
+
+// The response is capped at MAX_COMPLETION_ITEMS, and the cap keeps the best matches
+// rather than the first ones found — the prefix match is declared last on purpose,
+// long after the buffer has filled up with weaker subsequence matches.
+fn void test_completion_truncates_to_best_items() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+
+	DString src = dstring::temp();
+	for (sz i = 0; i < MAX_COMPLETION_ITEMS + 200; i++)
+	{
+		src.appendf("fn void zz%dab() {}\n", i); // weak subsequence matches for "ab"
+	}
+	src.append("fn void abc() {}\n"); // prefix match, declared after the cap is full
+	src.append("fn void t() { ab");
+	String content = src.str_view();
+
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+
+	sz emitted = 0;
+	sz at = 0;
+	while (try found = result[at..].index_of(`"label":"`))
+	{
+		emitted++;
+		at += found + 9;
+	}
+	assert(emitted == MAX_COMPLETION_ITEMS, "expected exactly %d items, got %d", MAX_COMPLETION_ITEMS, emitted);
+	assert(item_position(result, "abc") >= 0, "the prefix match should survive truncation, got: %s", result[..400]);
+	assert(result.contains(`"sortText":"0000"}`) && item_position(result, "abc") < item_position(result, "zz0ab"),
+		"the prefix match should be emitted first, got: %s", result[..400]);
 }
 
 // --- enum-member completion tests ---

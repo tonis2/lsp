@@ -121,7 +121,198 @@ const String[*] CT_KEYWORDS = {
 	"$vatype",
 	};
 
-const sz MAX_DOC_IDENTS = 512;
+// How many items the response carries. Kept at the number the old streaming emit
+// happened to top out at, because with nothing typed there is no ranking and a lower
+// cap would drop arbitrary names rather than weak ones.
+const sz MAX_COMPLETION_ITEMS = 512;
+
+// How many distinct matching names are examined before collection stops. Deliberately
+// much larger than the emission budget: collectors walk files in scan order, not in
+// match order, so ranking only buys anything if it gets to choose from more candidates
+// than are emitted. With the two equal, "the best N" degenerates back into "the first N".
+const sz MAX_DOC_IDENTS = 2048;
+
+// Free functions/macros declared in a single file, used to tag identifiers as callable.
+const sz MAX_FILE_CALLABLES = 512;
+
+// One candidate held back for ranking. `label` and `detail` are interned into the
+// request's temp pool: collectors hand out views into file content that the scanner
+// frees as soon as the visitor returns (see FileVisitor in scan.c3).
+struct CompletionCandidate
+{
+	String label;
+	String detail;
+	int kind;
+	FuzzyRank rank;
+}
+
+// Collects candidates, keeps the best MAX_COMPLETION_ITEMS by fuzzy rank, and writes
+// them out best-first.
+//
+// Ranking has to happen before emission rather than during it. Collectors walk the
+// current file, then open documents, then project files, then the stdlib; a better
+// match in the last file scanned must still be able to displace a weak early one.
+// Streaming each item straight to JSON as it was found made the response "whatever
+// turned up first", which fuzzy matching made much worse by widening the candidate set.
+//
+// The sink also owns dedup. `seen` holds every distinct name accepted so far, both to
+// suppress repeats (the same declaration is reachable through several files) and to
+// bound the scan — collectors stop walking once it fills.
+struct CompletionSink
+{
+	CompletionCandidate[MAX_COMPLETION_ITEMS] items;
+	sz count;
+
+	String[MAX_DOC_IDENTS] seen;
+	uint[MAX_DOC_IDENTS] seen_hash;
+	sz seen_count;
+
+	String pattern;
+	bool ranked;
+}
+
+fn void CompletionSink.init(&self, String pattern)
+{
+	self.count = 0;
+	self.seen_count = 0;
+	self.pattern = pattern;
+	// Nothing typed means nothing to rank against, so keep insertion order and let the
+	// client sort by label — the behaviour before ranking existed.
+	self.ranked = pattern.len > 0;
+}
+
+// True once the scan budget is spent; the file visitors use this to stop walking.
+fn bool CompletionSink.at_capacity(&self)
+{
+	return self.seen_count >= MAX_DOC_IDENTS;
+}
+
+// Record `name` as seen and return the interned copy. Returns "" when the name was
+// already recorded or the scan budget is spent.
+fn String CompletionSink.record(&self, String name)
+{
+	uint hash = completion_hash(name);
+	for (sz i = 0; i < self.seen_count; i++)
+	{
+		if (self.seen_hash[i] == hash && self.seen[i] == name) return "";
+	}
+	if (self.seen_count >= MAX_DOC_IDENTS) return "";
+
+	String interned = completion_intern(name);
+	self.seen[self.seen_count] = interned;
+	self.seen_hash[self.seen_count] = hash;
+	self.seen_count++;
+	return interned;
+}
+
+// Record `name` so it is never offered, without emitting it. Used for the initializer
+// designators already assigned in the braces being completed.
+fn void CompletionSink.suppress(&self, String name)
+{
+	self.record(name);
+}
+
+// Offer a candidate. Names that do not match the pattern, and names already seen, are
+// dropped. The rest are kept in rank order; once the buffer is full a candidate has to
+// beat the weakest kept item to get in.
+fn void CompletionSink.add(&self, String label, int kind, String detail = "")
+{
+	if (label.len == 0) return;
+
+	FuzzyRank rank = fuzzy_rank_ci(label, self.pattern);
+	if (!rank.matched) return;
+
+	String interned = self.record(label);
+	if (interned.len == 0) return;
+
+	CompletionCandidate cand = { .label = interned, .detail = detail.len > 0 ? completion_intern(detail) : "", .kind = kind, .rank = rank, };
+
+	if (!self.ranked)
+	{
+		if (self.count < MAX_COMPLETION_ITEMS) self.items[self.count++] = cand;
+		return;
+	}
+
+	// Full, and no better than the weakest kept item — the common case, rejected in O(1).
+	if (self.count == MAX_COMPLETION_ITEMS && !fuzzy_rank_better(rank, self.items[self.count - 1].rank)) return;
+
+	sz pos;
+	if (self.count < MAX_COMPLETION_ITEMS)
+	{
+		pos = self.count;
+		self.count++;
+	}
+	else
+	{
+		pos = self.count - 1; // the weakest item falls off the end
+	}
+	while (pos > 0 && fuzzy_rank_better(rank, self.items[pos - 1].rank))
+	{
+		self.items[pos] = self.items[pos - 1];
+		pos--;
+	}
+	self.items[pos] = cand;
+}
+
+// Write the kept candidates as the body of the "items" array, best first.
+fn void CompletionSink.flush(&self, DString* out)
+{
+	for (sz i = 0; i < self.count; i++)
+	{
+		if (i > 0) out.append_char(',');
+
+		CompletionCandidate cand = self.items[i];
+		CompletionItem item = { .label = cand.label, .kind = cand.kind, .detail = cand.detail, };
+
+		// The list is truncated to the best MAX_COMPLETION_ITEMS, so the server's order is
+		// the meaningful one. sortText carries it; without it a client that sorts by label
+		// would present an arbitrary alphabetical slice of the top N as if it were the whole set.
+		if (self.ranked) item.sort_text = completion_order_key(i);
+
+		if (cand.kind == 2 || cand.kind == 3) // Method / Function (incl. macros)
+		{
+			// Insert "label($0)" as a snippet and trigger the parameter-hints popup so
+			// accepting a callable drops the cursor inside the parens with signatures shown.
+			// The label stays the plain name (filtering/display unchanged); only inserted text differs.
+			item.insert_text = snippet_call_text(cand.label);
+			item.insert_text_format = 2; // Snippet
+			item.trigger_signature_help = true;
+		}
+		item.encode(out);
+	}
+}
+
+// Zero-padded emission index. Fixed width because sortText is compared as text, where
+// "10" would otherwise sort before "9" — so MAX_COMPLETION_ITEMS must stay under 10000.
+fn String completion_order_key(sz index) @private
+{
+	DString key = dstring::temp();
+	key.appendf("%04d", index);
+	return key.str_view();
+}
+
+// Copy a string into the request's temp pool, which lives until the response is sent.
+// Collectors hand out views into file content that the scanner frees as soon as the
+// visitor returns (scan.c3), so nothing held past that point may alias it.
+fn String completion_intern(String s) @private
+{
+	DString copy = dstring::temp();
+	copy.append(s);
+	return copy.str_view();
+}
+
+// FNV-1a, only to make the linear dedup scan cheap: a mismatching hash skips the
+// string compare, which matters now that the scan budget is in the thousands.
+fn uint completion_hash(String s) @private
+{
+	uint hash = 0x811c9dc5;
+	foreach (c : s)
+	{
+		hash ^= (uint)c;
+		hash *= 0x01000193;
+	}
+	return hash;
+}
 
 fn void encode_completions(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, DString* out)
 {
@@ -209,81 +400,52 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 	// closing bracket sits right after the cursor (editor.autoClosingBrackets inserts one,
 	// e.g. "foo(|)"). With a bare Range VS Code suppresses the popup in that position.
 	//
-	// isIncomplete is true because every item's sortText is ranked against the prefix as
-	// typed at this instant. Those ranks go stale on the next keystroke, so the client must
-	// re-request rather than re-filter the cached list. Re-requests are cheap: on-disk files
-	// come from the token cache (see file_cache.c3), so no file is re-read or re-tokenized.
+	// isIncomplete is true because the items are ranked against the prefix as typed at
+	// this instant, and truncated to the best MAX_COMPLETION_ITEMS of them. Both go stale
+	// on the next keystroke — a client re-filtering the cached list would be filtering a
+	// slice chosen for the old prefix — so it must re-request. Re-requests are cheap:
+	// on-disk files come from the token cache (file_cache.c3), so nothing is re-read.
 	// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#completionList
 	out.append(`{"isIncomplete":true,"itemDefaults":{"editRange":{"insert":`);
 	edit_range.encode(out);
 	out.append(`,"replace":`);
 	edit_range.encode(out);
 	out.append(`}},"items":[`);
-	bool first = true;
+
+	// Too large for the stack (the candidate buffer plus the seen-name table), and it
+	// lives exactly as long as the request does, so it comes from the temp pool.
+	CompletionSink* sink = mem::tnew(CompletionSink);
+	sink.init(prefix);
 
 	if (is_dot_context)
 	{
-		collect_dot_completions(uri, content, offset, docs, stdlib_path, prefix, out, &first);
+		collect_dot_completions(uri, content, offset, docs, stdlib_path, sink);
 	}
 	else if (is_scope_context)
 	{
-		collect_module_completions(uri, content, module_scope, prefix, docs, stdlib_path, out, &first);
+		collect_module_completions(uri, content, module_scope, prefix, docs, stdlib_path, sink);
 	}
 	else
 	{
 		// Static keywords
 		if (prefix.len == 0 || (prefix[0] != '$' && prefix[0] != '@' && prefix[0] != '#'))
 		{
-			foreach (kw : KEYWORDS)
-			{
-				if (prefix.len == 0 || fuzzy_match_ci(kw, prefix))
-				{
-					emit_completion_item(out, kw, 14, prefix, &first); // Keyword
-				}
-			}
-			foreach (bt : BUILTIN_TYPES)
-			{
-				if (prefix.len == 0 || fuzzy_match_ci(bt, prefix))
-				{
-					emit_completion_item(out, bt, 22, prefix, &first); // Struct (for types)
-				}
-			}
+			foreach (kw : KEYWORDS) sink.add(kw, 14);      // Keyword
+			foreach (bt : BUILTIN_TYPES) sink.add(bt, 22); // Struct (for types)
 		}
 
 		// CT keywords when prefix starts with $
 		if (prefix.len == 0 || prefix[0] == '$')
 		{
-			foreach (ct : CT_KEYWORDS)
-			{
-				if (prefix.len == 0 || fuzzy_match_ci(ct, prefix))
-				{
-					emit_completion_item(out, ct, 14, prefix, &first); // Keyword
-				}
-			}
+			foreach (ct : CT_KEYWORDS) sink.add(ct, 14); // Keyword
 		}
 
 		// Document identifiers (current file + open docs + project files)
-		collect_all_identifiers(uri, content, prefix, docs, stdlib_path, out, &first);
+		collect_all_identifiers(uri, content, prefix, docs, stdlib_path, sink);
 	}
 
+	sink.flush(out);
 	out.append("]}");
-}
-
-fn void emit_completion_item(DString* out, String label, int kind, String pattern, bool* first) @private
-{
-	if (!*first) out.append_char(',');
-	CompletionItem item = { .label = label, .kind = kind, .sort_text = fuzzy_sort_text(label, pattern), };
-	if (kind == 2 || kind == 3) // Method / Function (incl. macros)
-	{
-		// Insert "label($0)" as a snippet and trigger the parameter-hints popup so
-		// accepting a callable drops the cursor inside the parens with signatures shown.
-		// The label stays the plain name (filtering/display unchanged); only inserted text differs.
-		item.insert_text = snippet_call_text(label);
-		item.insert_text_format = 2; // Snippet
-		item.trigger_signature_help = true;
-	}
-	item.encode(out);
-	*first = false;
 }
 
 // Build a snippet insert text of the form "name($0)", backslash-escaping the snippet
@@ -310,28 +472,14 @@ fn String snippet_call_text(String name) @private
 	return s.str_view();
 }
 
-fn void emit_completion_item_detail(DString* out, String label, int kind, String detail, String pattern, bool* first) @private
-{
-	if (!*first) out.append_char(',');
-	CompletionItem item = { .label = label, .kind = kind, .detail = detail, .sort_text = fuzzy_sort_text(label, pattern), };
-	item.encode(out);
-	*first = false;
-}
-
 // Emit the compiler-builtin properties every array/slice/vector carries: `.len` on all
 // three shapes, `.ptr` only on an unsized slice (fixed arrays and vectors have no `.ptr`).
 // These are never declared in source (no `struct`/`fn` backs them), so they can't be
 // found by the normal field/method scan — this is the only place they come from.
-fn void emit_array_property_completions(String prefix, bool is_slice, DString* out, bool* first) @private
+fn void emit_array_property_completions(bool is_slice, CompletionSink* sink) @private
 {
-	if (prefix.len == 0 || fuzzy_match_ci("len", prefix))
-	{
-		emit_completion_item_detail(out, "len", 10, "usz", prefix, first); // 10 = Property
-	}
-	if (is_slice && (prefix.len == 0 || fuzzy_match_ci("ptr", prefix)))
-	{
-		emit_completion_item_detail(out, "ptr", 10, "void*", prefix, first); // 10 = Property
-	}
+	sink.add("len", 10, "usz"); // 10 = Property
+	if (is_slice) sink.add("ptr", 10, "void*");
 }
 
 fn bool is_ident_char(char c) @private
@@ -341,11 +489,8 @@ fn bool is_ident_char(char c) @private
 
 // Module-scoped completion: "args::h" → only declarations from the args module starting with h
 // The module_name may be a short name like "process" — resolve to full path via imports.
-fn void collect_module_completions(String uri, String content, String module_name, String prefix, DocumentList* docs, String stdlib_path, DString* out, bool* first) @private
+fn void collect_module_completions(String uri, String content, String module_name, String prefix, DocumentList* docs, String stdlib_path, CompletionSink* sink) @private
 {
-	String[MAX_DOC_IDENTS] seen;
-	sz seen_count = 0;
-
 	// Resolve short module name to full path via imports.
 	// e.g. "process" → "std::os::process" if file has "import std::os::process;"
 	String full_module = resolve_module_name(content, module_name);
@@ -353,12 +498,12 @@ fn void collect_module_completions(String uri, String content, String module_nam
 	// 1. Search open documents for files declaring this module
 	for (sz d = 0; d < docs.size; d++)
 	{
-		collect_declarations_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count, docs.entries[d].get_tokens(), module_name, full_module);
+		collect_declarations_from_content(docs.entries[d].content, prefix, sink, docs.entries[d].get_tokens(), module_name, full_module);
 	}
 
 	// 2 + 3. Search project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	ModuleDeclsScan scan = { module_name, full_module, prefix, out, first, &seen, &seen_count };
+	ModuleDeclsScan scan = { module_name, full_module, prefix, sink };
 	scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
 
@@ -366,7 +511,7 @@ fn void collect_module_completions(String uri, String content, String module_nam
 // When short_name/full_name are given, only declarations inside a matching `module` section
 // are collected — a single C3 file may declare several modules (e.g. std/io/file.c3 opens with
 // `module std::io;` and later `module std::io::file;`). When both are empty, collect from all.
-fn void collect_declarations_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, TokenStream* cached = null, String short_name = "", String full_name = "") @private
+fn void collect_declarations_from_content(String content, String prefix, CompletionSink* sink, TokenStream* cached = null, String short_name = "", String full_name = "") @private
 {
 	TokenStream owned;
 	TokenStream* stream;
@@ -398,10 +543,7 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 					// what makes `import std::` / `std::io::` offer submodules.
 					String sub = next_submodule_segment(declared_mod, short_name);
 					if (sub.len == 0 && full_name.len > 0) sub = next_submodule_segment(declared_mod, full_name);
-					if (sub.len > 0 && sub != prefix && (prefix.len == 0 || fuzzy_match_ci(sub, prefix)))
-					{
-						emit_unique_completion(out, sub, 9, prefix, first, seen, seen_count);
-					}
+					if (sub.len > 0 && sub != prefix) sink.add(sub, 9); // Module
 				}
 				continue;
 			case FUNC:
@@ -489,28 +631,11 @@ fn void collect_declarations_from_content(String content, String prefix, DString
 		}
 
 		if (!in_target) continue; // declaration belongs to a non-matching module section
-		if (name.len == 0 || kind == 0) continue;
-		if (prefix.len > 0 && !fuzzy_match_ci(name, prefix)) continue;
+		if (kind == 0) continue;
 		if (name == prefix) continue;
 
-		emit_unique_completion(out, name, kind, prefix, first, seen, seen_count);
+		sink.add(name, kind);
 	}
-}
-
-// Emit a completion item for `name` unless it was already emitted; records it in
-// `seen` so repeated declarations (across files/modules) are shown only once.
-fn void emit_unique_completion(DString* out, String name, int kind, String pattern, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
-{
-	for (sz k = 0; k < *seen_count; k++)
-	{
-		if ((*seen)[k] == name) return;
-	}
-	if (*seen_count < MAX_DOC_IDENTS)
-	{
-		(*seen)[*seen_count] = name;
-		(*seen_count)++;
-	}
-	emit_completion_item(out, name, kind, pattern, first);
 }
 
 // If `declared` is a submodule of `target` (target is a proper segment-prefix, or a
@@ -613,17 +738,14 @@ struct ModuleDeclsScan (FileVisitor) @private
 	String short_name;
 	String full_name;
 	String prefix;
-	DString* out;
-	bool* first;
-	String[MAX_DOC_IDENTS]* seen;
-	sz* seen_count;
+	CompletionSink* sink;
 }
 
 fn bool ModuleDeclsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (*self.seen_count >= MAX_DOC_IDENTS) return true; // capacity reached — stop scanning
+	if (self.sink.at_capacity()) return true; // scan budget spent — stop scanning
 	// collect_declarations_from_content gates by module section internally.
-	collect_declarations_from_content(content, self.prefix, self.out, self.first, self.seen, self.seen_count, stream, self.short_name, self.full_name);
+	collect_declarations_from_content(content, self.prefix, self.sink, stream, self.short_name, self.full_name);
 	return false;
 }
 
@@ -727,13 +849,10 @@ fn String module_to_dir_path(String mod_path, DString* buf) @private
 }
 
 // Collect identifiers from current file, open docs, project files, and imported stdlib modules
-fn void collect_all_identifiers(String uri, String content, String prefix, DocumentList* docs, String stdlib_path, DString* out, bool* first) @private
+fn void collect_all_identifiers(String uri, String content, String prefix, DocumentList* docs, String stdlib_path, CompletionSink* sink) @private
 {
-	String[MAX_DOC_IDENTS] seen;
-	sz seen_count = 0;
-
 	// 1. Current file
-	collect_idents_from_content(content, prefix, out, first, &seen, &seen_count);
+	collect_idents_from_content(content, prefix, sink);
 
 	// Only search cross-file when there's a prefix (avoid flooding with every identifier)
 	if (prefix.len == 0) return;
@@ -742,12 +861,12 @@ fn void collect_all_identifiers(String uri, String content, String prefix, Docum
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		collect_idents_from_content(docs.entries[d].content, prefix, out, first, &seen, &seen_count);
+		collect_idents_from_content(docs.entries[d].content, prefix, sink);
 	}
 
 	// 3. Project files on disk
 	String file_path = uri_to_path(uri);
-	IdentsScan scan = { prefix, out, first, &seen, &seen_count };
+	IdentsScan scan = { prefix, sink };
 	if (file_path.len > 0)
 	{
 		scan_project_dirs(file_path, &scan);
@@ -783,7 +902,7 @@ fn void collect_all_identifiers(String uri, String content, String prefix, Docum
 // so identifier completions can tag those names as callable (kind 3) and emit the
 // "name($0)" snippet + parameter-hints command. Methods (Type.name) are skipped — they
 // surface through the dot-completion path instead.
-fn void collect_callable_names(TokenStream* stream, String[MAX_DOC_IDENTS]* names, sz* count) @private
+fn void collect_callable_names(TokenStream* stream, String[MAX_FILE_CALLABLES]* names, sz* count) @private
 {
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
@@ -827,17 +946,17 @@ fn void collect_callable_names(TokenStream* stream, String[MAX_DOC_IDENTS]* name
 
 		bool dup = false;
 		for (sz k = 0; k < *count; k++) { if ((*names)[k] == name) { dup = true; break; } }
-		if (!dup && *count < MAX_DOC_IDENTS) { (*names)[*count] = name; (*count)++; }
+		if (!dup && *count < MAX_FILE_CALLABLES) { (*names)[*count] = name; (*count)++; }
 	}
 }
 
-fn void collect_idents_from_content(String content, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count) @private
+fn void collect_idents_from_content(String content, String prefix, CompletionSink* sink) @private
 {
 	TokenStream ts = token_stream_tokenize(content);
 	defer ts.free();
 
 	// Pre-pass: names declared as free functions/macros, so they complete as callables.
-	String[MAX_DOC_IDENTS] callables;
+	String[MAX_FILE_CALLABLES] callables;
 	sz callable_count = 0;
 	collect_callable_names(&ts, &callables, &callable_count);
 
@@ -862,31 +981,10 @@ fn void collect_idents_from_content(String content, String prefix, DString* out,
 				continue;
 		}
 
-		if (text.len == 0) continue;
-		if (prefix.len > 0 && !fuzzy_match_ci(text, prefix)) continue;
-
 		// Skip if same as prefix (don't suggest what's already typed)
 		if (text == prefix) continue;
 
-		// Dedup with linear scan
-		bool dup = false;
-		for (sz j = 0; j < *seen_count; j++)
-		{
-			if ((*seen)[j] == text)
-			{
-				dup = true;
-				break;
-			}
-		}
-		if (dup) continue;
-
-		if (*seen_count < MAX_DOC_IDENTS)
-		{
-			(*seen)[*seen_count] = text;
-			(*seen_count)++;
-		}
-
-		emit_completion_item(out, text, kind, prefix, first);
+		sink.add(text, kind);
 	}
 }
 
@@ -894,21 +992,18 @@ fn void collect_idents_from_content(String content, String prefix, DString* out,
 struct IdentsScan (FileVisitor) @private
 {
 	String prefix;
-	DString* out;
-	bool* first;
-	String[MAX_DOC_IDENTS]* seen;
-	sz* seen_count;
+	CompletionSink* sink;
 }
 
 fn bool IdentsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (*self.seen_count >= MAX_DOC_IDENTS) return true; // capacity reached — stop scanning
-	collect_idents_from_content(content, self.prefix, self.out, self.first, self.seen, self.seen_count);
+	if (self.sink.at_capacity()) return true; // scan budget spent — stop scanning
+	collect_idents_from_content(content, self.prefix, self.sink);
 	return false;
 }
 
 // DOT-expression completion: resolve receiver type and collect fields + methods
-fn void collect_dot_completions(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first) @private
+fn void collect_dot_completions(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, CompletionSink* sink) @private
 {
 	TokenStream owned;
 	bool owns;
@@ -952,7 +1047,7 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 		bool is_slice;
 		if (!initializer_context && stream.tokens.is_receiver_array(cursor_idx, uri, docs, &is_slice))
 		{
-			emit_array_property_completions(prefix, is_slice, out, first);
+			emit_array_property_completions(is_slice, sink);
 		}
 		return;
 	}
@@ -976,13 +1071,10 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 	// positions before the cursor (…receiver `.` cursor).
 	bool type_receiver = cursor_idx >= 2 && stream.tokens.entries[cursor_idx - 2].type == TYPE_IDENT;
 
-	String[MAX_DOC_IDENTS] seen;
-	sz seen_count = 0;
-
 	if (initializer_context)
 	{
 		// Fields already assigned in this initializer are not offered again.
-		stream.tokens.seed_assigned_fields(init_lbrace, cursor_idx, &seen, &seen_count);
+		stream.tokens.seed_assigned_fields(init_lbrace, cursor_idx, sink);
 	}
 
 	// Two passes: first restricted to modules visible from this file (own module
@@ -999,10 +1091,10 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 		{
 			// Initializer designators are fields only — methods and enum members
 			// are not valid there.
-			collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+			collect_struct_fields(struct_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 			if (struct_type != recv_type)
 			{
-				collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				collect_struct_fields(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 			}
 		}
 		else
@@ -1010,30 +1102,30 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 			if (!type_receiver)
 			{
 				// Collect struct fields (use resolved alias for struct lookup)
-				collect_struct_fields(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				collect_struct_fields(struct_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 				// Also try unresolved name for struct fields
 				if (struct_type != recv_type)
 				{
-					collect_struct_fields(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+					collect_struct_fields(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 				}
 
 				// Collect methods (try original alias name first, then resolved)
-				collect_type_methods(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				collect_type_methods(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 				if (resolved_type.len > 0 && resolved_type != recv_type)
 				{
-					collect_type_methods(resolved_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+					collect_type_methods(resolved_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 				}
 			}
 
 			// Collect enum members (Type.MEMBER) — valid for both type and instance receivers.
-			collect_enum_members(struct_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+			collect_enum_members(struct_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 			if (resolved_type.len > 0 && resolved_type != recv_type)
 			{
-				collect_enum_members(recv_type, uri, content, docs, stdlib_path, prefix, out, first, &seen, &seen_count, pass_ctx);
+				collect_enum_members(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
 			}
 		}
 
-		if (!*first) break; // this pass emitted members — no fallback needed
+		if (sink.count > 0) break; // this pass found members — no fallback needed
 	}
 
 	// A typedef of an inline builtin slice (`typedef String = inline char[];`)
@@ -1044,11 +1136,11 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 		bool is_slice;
 		if (resolve_inline_slice_typedef(struct_type, uri, content, docs, stdlib_path, &is_slice))
 		{
-			emit_array_property_completions(prefix, is_slice, out, first);
+			emit_array_property_completions(is_slice, sink);
 		}
 		else if (struct_type != recv_type && resolve_inline_slice_typedef(recv_type, uri, content, docs, stdlib_path, &is_slice))
 		{
-			emit_array_property_completions(prefix, is_slice, out, first);
+			emit_array_property_completions(is_slice, sink);
 		}
 	}
 }
@@ -1109,7 +1201,7 @@ fn bool InlineSliceScan.visit(&self, String path, String content, TokenStream* s
 // Record field names already assigned in the initializer opened at lbrace_idx
 // (`.name =` designators at brace depth 1) so they are not offered again.
 // The designator currently being typed at cursor_idx is not counted.
-fn void TokenList.seed_assigned_fields(&self, sz lbrace_idx, sz cursor_idx, String[MAX_DOC_IDENTS]* seen, sz* seen_count)
+fn void TokenList.seed_assigned_fields(&self, sz lbrace_idx, sz cursor_idx, CompletionSink* sink)
 {
 	sz depth = 1;
 	for (sz j = lbrace_idx + 1; j < self.size && depth > 0; j++)
@@ -1122,15 +1214,13 @@ fn void TokenList.seed_assigned_fields(&self, sz lbrace_idx, sz cursor_idx, Stri
 		if (j + 1 == cursor_idx) continue; // the designator being completed
 		if (!is_ident(self.entries[j + 1].type)) continue;
 		if (self.entries[j + 2].type != EQ) continue;
-		if (*seen_count >= MAX_DOC_IDENTS) return;
-		(*seen)[*seen_count] = self.entries[j + 1].text;
-		(*seen_count)++;
+		sink.suppress(self.entries[j + 1].text);
 	}
 }
 
 // Collect all struct fields matching prefix from a TokenList.
 // A non-null ctx skips declarations in modules not visible from the requesting file.
-fn void TokenList.collect_struct_fields_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx)
+fn void TokenList.collect_struct_fields_into(&self, String type_name, CompletionSink* sink, ModuleCtx* ctx)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
@@ -1151,22 +1241,6 @@ fn void TokenList.collect_struct_fields_into(&self, String type_name, String pre
 
 			if (depth == 1 && is_ident(self.entries[j].type))
 			{
-				String field_name = self.entries[j].text;
-				if (prefix.len > 0 && !fuzzy_match_ci(field_name, prefix)) continue;
-
-				// Dedup
-				bool dup = false;
-				for (sz k = 0; k < *seen_count; k++)
-				{
-					if ((*seen)[k] == field_name) { dup = true; break; }
-				}
-				if (dup) continue;
-				if (*seen_count < MAX_DOC_IDENTS)
-				{
-					(*seen)[*seen_count] = field_name;
-					(*seen_count)++;
-				}
-
 				// Get field type for detail
 				String detail = "";
 				if (j > 0 && self.entries[j - 1].type == TYPE_IDENT)
@@ -1178,7 +1252,7 @@ fn void TokenList.collect_struct_fields_into(&self, String type_name, String pre
 					detail = self.entries[j - 2].text;
 				}
 
-				emit_completion_item_detail(out, field_name, 5, detail, prefix, first); // 5 = Field
+				sink.add(self.entries[j].text, 5, detail); // 5 = Field
 			}
 		}
 	}
@@ -1186,7 +1260,7 @@ fn void TokenList.collect_struct_fields_into(&self, String type_name, String pre
 
 // Collect all methods matching prefix from a TokenList (fn Type.method_name( patterns).
 // A non-null ctx skips declarations in modules not visible from the requesting file.
-fn void TokenList.collect_methods_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx)
+fn void TokenList.collect_methods_into(&self, String type_name, CompletionSink* sink, ModuleCtx* ctx)
 {
 	for (sz i = 0; i < self.size; i++)
 	{
@@ -1204,24 +1278,7 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 					&& is_ident(self.entries[j - 1].type))
 				{
 					if (ctx != null && !ctx.can_see(self.module_of_decl(i))) break;
-					String method_name = self.entries[j - 1].text;
-					if (prefix.len > 0 && !fuzzy_match_ci(method_name, prefix)) break;
-
-					// Dedup
-					bool dup = false;
-					for (sz k = 0; k < *seen_count; k++)
-					{
-						if ((*seen)[k] == method_name) { dup = true; break; }
-					}
-					if (!dup)
-					{
-						if (*seen_count < MAX_DOC_IDENTS)
-						{
-							(*seen)[*seen_count] = method_name;
-							(*seen_count)++;
-						}
-						emit_completion_item(out, method_name, 2, prefix, first); // 2 = Method
-					}
+					sink.add(self.entries[j - 1].text, 2); // 2 = Method
 				}
 				break;
 			}
@@ -1239,7 +1296,7 @@ fn void TokenList.collect_methods_into(&self, String type_name, String prefix, D
 
 // Collect enum/faultdef members matching prefix from a TokenList (enum Type { MEMBER, ... } patterns).
 // A non-null ctx skips declarations in modules not visible from the requesting file.
-fn void TokenList.collect_enum_members_into(&self, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx)
+fn void TokenList.collect_enum_members_into(&self, String type_name, CompletionSink* sink, ModuleCtx* ctx)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
@@ -1268,23 +1325,7 @@ fn void TokenList.collect_enum_members_into(&self, String type_name, String pref
 			expect_member = false;
 
 			if (tt != CONST_IDENT) continue;
-			String member_name = self.entries[j].text;
-			if (prefix.len > 0 && !fuzzy_match_ci(member_name, prefix)) continue;
-
-			// Dedup
-			bool dup = false;
-			for (sz k = 0; k < *seen_count; k++)
-			{
-				if ((*seen)[k] == member_name) { dup = true; break; }
-			}
-			if (dup) continue;
-			if (*seen_count < MAX_DOC_IDENTS)
-			{
-				(*seen)[*seen_count] = member_name;
-				(*seen_count)++;
-			}
-
-			emit_completion_item(out, member_name, 20, prefix, first); // 20 = EnumMember
+			sink.add(self.entries[j].text, 20); // 20 = EnumMember
 		}
 	}
 }
@@ -1292,29 +1333,26 @@ fn void TokenList.collect_enum_members_into(&self, String type_name, String pref
 // Collect struct fields across current file, open docs, project files, and stdlib
 // One member-collection routine per member kind (fields / methods / enum members) —
 // all three share the same 4-step search, differing only in the TokenList collector.
-alias MemberCollectFn = fn void(TokenList*, String type_name, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx);
+alias MemberCollectFn = fn void(TokenList*, String type_name, CompletionSink* sink, ModuleCtx* ctx);
 
 struct MemberScan (FileVisitor) @private
 {
 	MemberCollectFn collect;
 	String type_name;
-	String prefix;
-	DString* out;
-	bool* first;
-	String[MAX_DOC_IDENTS]* seen;
-	sz* seen_count;
+	CompletionSink* sink;
 	ModuleCtx* ctx;
 }
 
 fn bool MemberScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	self.collect(&stream.tokens, self.type_name, self.prefix, self.out, self.first, self.seen, self.seen_count, self.ctx);
-	return false; // collect-all: never stop early
+	if (self.sink.at_capacity()) return true; // scan budget spent — stop scanning
+	self.collect(&stream.tokens, self.type_name, self.sink, self.ctx);
+	return false; // members of one type can be declared across many files — visit them all
 }
 
 // Collect type members (per `collect`) across current file, open docs, project files, and stdlib.
 // A non-null ctx restricts matches to modules visible from the requesting file.
-fn void collect_members_all(MemberCollectFn collect, String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
+fn void collect_members_all(MemberCollectFn collect, String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
 	// 1. Current file
 	{
@@ -1322,7 +1360,7 @@ fn void collect_members_all(MemberCollectFn collect, String type_name, String ur
 		bool owns;
 		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
 		defer { if (owns) owned.free(); }
-		collect(&stream.tokens, type_name, prefix, out, first, seen, seen_count, ctx);
+		collect(&stream.tokens, type_name, sink, ctx);
 	}
 
 	// 2. Open documents (reuse their cached token streams)
@@ -1330,25 +1368,25 @@ fn void collect_members_all(MemberCollectFn collect, String type_name, String ur
 	{
 		if (docs.entries[d].uri == uri) continue;
 		TokenStream* other_stream = docs.entries[d].get_tokens();
-		collect(&other_stream.tokens, type_name, prefix, out, first, seen, seen_count, ctx);
+		collect(&other_stream.tokens, type_name, sink, ctx);
 	}
 
 	// 3 + 4. Project files on disk, then stdlib
-	MemberScan scan = { collect, type_name, prefix, out, first, seen, seen_count, ctx };
+	MemberScan scan = { collect, type_name, sink, ctx };
 	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
 }
 
-fn void collect_struct_fields(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
+fn void collect_struct_fields(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_struct_fields_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count, ctx);
+	collect_members_all(&TokenList.collect_struct_fields_into, type_name, uri, content, docs, stdlib_path, sink, ctx);
 }
 
-fn void collect_type_methods(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
+fn void collect_type_methods(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_methods_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count, ctx);
+	collect_members_all(&TokenList.collect_methods_into, type_name, uri, content, docs, stdlib_path, sink, ctx);
 }
 
-fn void collect_enum_members(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, String prefix, DString* out, bool* first, String[MAX_DOC_IDENTS]* seen, sz* seen_count, ModuleCtx* ctx = null) @private
+fn void collect_enum_members(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_enum_members_into, type_name, uri, content, docs, stdlib_path, prefix, out, first, seen, seen_count, ctx);
+	collect_members_all(&TokenList.collect_enum_members_into, type_name, uri, content, docs, stdlib_path, sink, ctx);
 }

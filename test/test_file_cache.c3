@@ -50,13 +50,13 @@ fn void test_file_cache_used_by_scan() @test {
 	g_file_cache = &fc;
 	defer { g_file_cache = null; fc.free_all(); }
 
-	DString out = dstring::temp();
-	bool first = true;
-	String[MAX_DOC_IDENTS] seen;
-	sz seen_count = 0;
-	MemberScan scan = { &TokenList.collect_enum_members_into, "Color", "", &out, &first, &seen, &seen_count, null };
+	CompletionSink* sink = mem::tnew(CompletionSink);
+	sink.init("");
+	MemberScan scan = { &TokenList.collect_enum_members_into, "Color", sink, null };
 	scan_dir(dir, &scan);
 
+	DString out = dstring::temp();
+	sink.flush(&out);
 	String r = out.str_view();
 	assert(r.contains(`"label":"RED"`), "expected RED from cached scan, got: %s", r);
 	assert(fc.size > 0, "scan should have populated the file cache");
