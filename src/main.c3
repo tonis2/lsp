@@ -7,7 +7,7 @@ const String VERSION = "0.3.2";
 
 // On Windows, stdin/stdout default to text mode which translates \n <-> \r\n.
 // This corrupts LSP protocol framing, so we must set binary mode before any I/O.
-extern fn int _setmode(int fd, int mode) @if(env::WIN32);
+extern fn int _setmode(int fd, int mode) @feat(WIN32);
 
 fn int main(String[] args_in)
 {
