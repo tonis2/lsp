@@ -1039,38 +1039,35 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 		TokenType before_dot = stream.tokens.entries[cursor_idx - 2].type;
 		if (before_dot == LBRACE || before_dot == COMMA)
 		{
-			recv_type = stream.tokens.resolve_initializer_type(cursor_idx, uri, docs, &init_lbrace);
+			recv_type = stream.tokens.resolve_initializer_type(cursor_idx, uri, docs, &init_lbrace, 0, stdlib_path);
 			initializer_context = recv_type.len > 0;
 		}
 	}
 
 	// Resolve receiver type
-	if (!initializer_context) recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs);
+	if (!initializer_context) recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs, stdlib_path);
 	if (recv_type.len == 0)
 	{
 		// Not a named type — but it may still be a builtin array/slice/vector, which
 		// carries no struct/method declarations, only the compiler-builtin `.len` and
 		// (for slices) `.ptr` properties.
 		bool is_slice;
-		if (!initializer_context && stream.tokens.is_receiver_array(cursor_idx, uri, docs, &is_slice))
+		if (!initializer_context && stream.tokens.is_receiver_array(cursor_idx, uri, docs, &is_slice, stdlib_path))
 		{
 			emit_array_property_completions(is_slice, sink);
 		}
 		return;
 	}
 
-	// Resolve alias (e.g. LineOffsets → List)
-	String resolved_type = stream.tokens.resolve_type_alias_across(recv_type, docs);
-	if (resolved_type.len == 0)
-	{
-		String file_path = uri_to_path(uri);
-		if (file_path.len > 0)
-		{
-			resolved_type = resolve_alias_in_project(file_path, recv_type);
-		}
-	}
+	// Follow the alias chain (LineOffsets -> List, Vec3 -> float[<3>]), searching the
+	// stdlib too since that is where most aliases live. The alias may end at a builtin
+	// array or vector, whose members are declared on a wildcard receiver.
+	TypeInfo canon       = stream.tokens.canonical_type(recv_type, uri, docs, stdlib_path);
+	String resolved_type = canon.name == recv_type ? "" : canon.name;
 
-	String struct_type = resolved_type.len > 0 ? resolved_type : recv_type;
+	TypeInfo recv        = { .name = recv_type };
+	TypeInfo struct_info = resolved_type.len > 0 ? canon : recv;
+	String struct_type   = struct_info.name;
 
 	// Is the receiver a *type name* (`Config.`) rather than an instance (`value.`)?
 	// On a type receiver, instance fields and methods are not accessible — only
@@ -1098,10 +1095,10 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 		{
 			// Initializer designators are fields only — methods and enum members
 			// are not valid there.
-			collect_struct_fields(struct_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+			collect_struct_fields(struct_info, uri, content, docs, stdlib_path, sink, pass_ctx);
 			if (struct_type != recv_type)
 			{
-				collect_struct_fields(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+				collect_struct_fields(recv, uri, content, docs, stdlib_path, sink, pass_ctx);
 			}
 		}
 		else
@@ -1109,30 +1106,37 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 			if (!type_receiver)
 			{
 				// Collect struct fields (use resolved alias for struct lookup)
-				collect_struct_fields(struct_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+				collect_struct_fields(struct_info, uri, content, docs, stdlib_path, sink, pass_ctx);
 				// Also try unresolved name for struct fields
 				if (struct_type != recv_type)
 				{
-					collect_struct_fields(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+					collect_struct_fields(recv, uri, content, docs, stdlib_path, sink, pass_ctx);
 				}
 
 				// Collect methods (try original alias name first, then resolved)
-				collect_type_methods(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+				collect_type_methods(recv, uri, content, docs, stdlib_path, sink, pass_ctx);
 				if (resolved_type.len > 0 && resolved_type != recv_type)
 				{
-					collect_type_methods(resolved_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+					collect_type_methods(canon, uri, content, docs, stdlib_path, sink, pass_ctx);
 				}
 			}
 
 			// Collect enum members (Type.MEMBER) — valid for both type and instance receivers.
-			collect_enum_members(struct_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+			collect_enum_members(struct_info, uri, content, docs, stdlib_path, sink, pass_ctx);
 			if (resolved_type.len > 0 && resolved_type != recv_type)
 			{
-				collect_enum_members(recv_type, uri, content, docs, stdlib_path, sink, pass_ctx);
+				collect_enum_members(recv, uri, content, docs, stdlib_path, sink, pass_ctx);
 			}
 		}
 
 		if (sink.count > 0) break; // this pass found members — no fallback needed
+	}
+
+	// An alias of a builtin array or vector (`alias Vec3 = float[<3>]`) also carries
+	// the compiler-builtin `.len`, which no declaration scan can find.
+	if (!initializer_context && !type_receiver && canon.is_array)
+	{
+		emit_array_property_completions(canon.is_slice, sink);
 	}
 
 	// A typedef of an inline builtin slice (`typedef String = inline char[];`)
@@ -1227,47 +1231,21 @@ fn void TokenList.seed_assigned_fields(&self, sz lbrace_idx, sz cursor_idx, Comp
 
 // Collect all struct fields matching prefix from a TokenList.
 // A non-null ctx skips declarations in modules not visible from the requesting file.
-fn void TokenList.collect_struct_fields_into(&self, String type_name, CompletionSink* sink, ModuleCtx* ctx)
+fn void TokenList.collect_struct_fields_into(&self, TypeInfo type, CompletionSink* sink, ModuleCtx* ctx)
 {
-	for (sz i = 0; i + 1 < self.size; i++)
+	self.@each_struct_member(type.name, ctx; sz j)
 	{
-		TokenType kw = self.entries[i].type;
-		if (kw != STRUCT && kw != BITSTRUCT && kw != UNION) continue;
-		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
-		if (ctx != null && !ctx.can_see(self.module_of_decl(i))) continue;
-
-		sz brace = i + 2;
-		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
-		if (brace >= self.size) continue;
-
-		sz depth = 1;
-		for (sz j = brace + 1; j < self.size && depth > 0; j++)
-		{
-			if (self.entries[j].type == LBRACE) { depth++; continue; }
-			if (self.entries[j].type == RBRACE) { depth--; continue; }
-
-			if (depth == 1 && is_ident(self.entries[j].type))
-			{
-				// Get field type for detail
-				String detail = "";
-				if (j > 0 && self.entries[j - 1].type == TYPE_IDENT)
-				{
-					detail = self.entries[j - 1].text;
-				}
-				else if (j > 1 && self.entries[j - 1].type == STAR && self.entries[j - 2].type == TYPE_IDENT)
-				{
-					detail = self.entries[j - 2].text;
-				}
-
-				sink.add(self.entries[j].text, 5, detail); // 5 = Field
-			}
-		}
-	}
+		// The declared type is the completion's detail text; a field in a comma list
+		// (`Real m00, m10;`) carries none of its own, which is fine to leave blank.
+		TypeInfo t;
+		String detail = self.read_field_decl(j, &t) ? t.name : "";
+		sink.add(self.entries[j].text, 5, detail); // 5 = Field
+	};
 }
 
 // Collect all methods matching prefix from a TokenList (fn Type.method_name( patterns).
 // A non-null ctx skips declarations in modules not visible from the requesting file.
-fn void TokenList.collect_methods_into(&self, String type_name, CompletionSink* sink, ModuleCtx* ctx)
+fn void TokenList.collect_methods_into(&self, TypeInfo type, CompletionSink* sink, ModuleCtx* ctx)
 {
 	for (sz i = 0; i < self.size; i++)
 	{
@@ -1278,11 +1256,10 @@ fn void TokenList.collect_methods_into(&self, String type_name, CompletionSink* 
 		{
 			if (self.entries[j].type == LPAREN)
 			{
-				// Check for Type.name( pattern: [j-3]=TYPE_IDENT, [j-2]=DOT, [j-1]=IDENT
-				if (j >= 3 && self.entries[j - 2].type == DOT
-					&& self.entries[j - 3].type == TYPE_IDENT
-					&& self.entries[j - 3].text == type_name
-					&& is_ident(self.entries[j - 1].type))
+				// `<Type>.name(` — the receiver may be a builtin carrying an array or
+				// vector suffix (`float[<*>].length`), not just a plain TYPE_IDENT.
+				if (j >= 3 && is_ident(self.entries[j - 1].type)
+					&& self.method_receiver_matches(j - 1, type.name, type.is_array))
 				{
 					if (ctx != null && !ctx.can_see(self.module_of_decl(i))) break;
 					sink.add(self.entries[j - 1].text, 2); // 2 = Method
@@ -1303,13 +1280,13 @@ fn void TokenList.collect_methods_into(&self, String type_name, CompletionSink* 
 
 // Collect enum/faultdef members matching prefix from a TokenList (enum Type { MEMBER, ... } patterns).
 // A non-null ctx skips declarations in modules not visible from the requesting file.
-fn void TokenList.collect_enum_members_into(&self, String type_name, CompletionSink* sink, ModuleCtx* ctx)
+fn void TokenList.collect_enum_members_into(&self, TypeInfo type, CompletionSink* sink, ModuleCtx* ctx)
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
 		TokenType kw = self.entries[i].type;
 		if (kw != ENUM && kw != FAULTDEF) continue;
-		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type.name) continue;
 		if (ctx != null && !ctx.can_see(self.module_of_decl(i))) continue;
 
 		sz brace = i + 2;
@@ -1340,12 +1317,12 @@ fn void TokenList.collect_enum_members_into(&self, String type_name, CompletionS
 // Collect struct fields across current file, open docs, project files, and stdlib
 // One member-collection routine per member kind (fields / methods / enum members) —
 // all three share the same 4-step search, differing only in the TokenList collector.
-alias MemberCollectFn = fn void(TokenList*, String type_name, CompletionSink* sink, ModuleCtx* ctx);
+alias MemberCollectFn = fn void(TokenList*, TypeInfo type, CompletionSink* sink, ModuleCtx* ctx);
 
 struct MemberScan (FileVisitor) @private
 {
 	MemberCollectFn collect;
-	String type_name;
+	TypeInfo type;
 	CompletionSink* sink;
 	ModuleCtx* ctx;
 }
@@ -1353,13 +1330,13 @@ struct MemberScan (FileVisitor) @private
 fn bool MemberScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
 	if (self.sink.at_capacity()) return true; // scan budget spent — stop scanning
-	self.collect(&stream.tokens, self.type_name, self.sink, self.ctx);
+	self.collect(&stream.tokens, self.type, self.sink, self.ctx);
 	return false; // members of one type can be declared across many files — visit them all
 }
 
 // Collect type members (per `collect`) across current file, open docs, project files, and stdlib.
 // A non-null ctx restricts matches to modules visible from the requesting file.
-fn void collect_members_all(MemberCollectFn collect, String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
+fn void collect_members_all(MemberCollectFn collect, TypeInfo type, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
 	// 1. Current file
 	{
@@ -1367,7 +1344,7 @@ fn void collect_members_all(MemberCollectFn collect, String type_name, String ur
 		bool owns;
 		TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
 		defer { if (owns) owned.free(); }
-		collect(&stream.tokens, type_name, sink, ctx);
+		collect(&stream.tokens, type, sink, ctx);
 	}
 
 	// 2. Open documents (reuse their cached token streams)
@@ -1375,25 +1352,25 @@ fn void collect_members_all(MemberCollectFn collect, String type_name, String ur
 	{
 		if (docs.entries[d].uri == uri) continue;
 		TokenStream* other_stream = docs.entries[d].get_tokens();
-		collect(&other_stream.tokens, type_name, sink, ctx);
+		collect(&other_stream.tokens, type, sink, ctx);
 	}
 
 	// 3 + 4. Project files on disk, then stdlib
-	MemberScan scan = { collect, type_name, sink, ctx };
+	MemberScan scan = { collect, type, sink, ctx };
 	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
 }
 
-fn void collect_struct_fields(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
+fn void collect_struct_fields(TypeInfo type, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_struct_fields_into, type_name, uri, content, docs, stdlib_path, sink, ctx);
+	collect_members_all(&TokenList.collect_struct_fields_into, type, uri, content, docs, stdlib_path, sink, ctx);
 }
 
-fn void collect_type_methods(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
+fn void collect_type_methods(TypeInfo type, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_methods_into, type_name, uri, content, docs, stdlib_path, sink, ctx);
+	collect_members_all(&TokenList.collect_methods_into, type, uri, content, docs, stdlib_path, sink, ctx);
 }
 
-fn void collect_enum_members(String type_name, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
+fn void collect_enum_members(TypeInfo type, String uri, String content, DocumentList* docs, String stdlib_path, CompletionSink* sink, ModuleCtx* ctx = null) @private
 {
-	collect_members_all(&TokenList.collect_enum_members_into, type_name, uri, content, docs, stdlib_path, sink, ctx);
+	collect_members_all(&TokenList.collect_enum_members_into, type, uri, content, docs, stdlib_path, sink, ctx);
 }

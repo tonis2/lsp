@@ -44,27 +44,20 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 					if (is_member && is_ident(ct))
 					{
 						// Resolve receiver type and search for method or struct field
-						String recv_type = hover_stream.tokens.resolve_receiver_type(hover_idx, uri, docs);
+						String recv_type = hover_stream.tokens.resolve_receiver_type(hover_idx, uri, docs, stdlib_path);
 						if (recv_type.len > 0)
 						{
 							// Try method docs with original type first (methods declared on alias name)
 							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, recv_type);
 
-							// Resolve alias for fallback
-							String resolved_type = hover_stream.tokens.resolve_type_alias_across(recv_type, docs);
-							if (resolved_type.len == 0)
-							{
-								String file_path = uri_to_path(uri);
-								if (file_path.len > 0)
-								{
-									resolved_type = resolve_alias_in_project(file_path, recv_type);
-								}
-							}
+							// Follow the alias chain, stdlib included, for the fallback.
+							TypeInfo base        = hover_stream.tokens.canonical_type(recv_type, uri, docs, stdlib_path);
+							String resolved_type = base.name == recv_type ? "" : base.name;
 
 							// Try method docs with resolved alias
 							if (doc.str_view().len == 0 && resolved_type.len > 0 && resolved_type != recv_type)
 							{
-								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, resolved_type);
+								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, resolved_type, "", base.is_array);
 							}
 
 							// Try struct field docs (use resolved alias for struct lookup)
@@ -84,7 +77,7 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 						// Detect method call context for hover
 						if (is_ident(ct) && have_idx)
 						{
-							String method_type = hover_stream.tokens.resolve_method_type(hover_idx, uri, docs);
+							String method_type = hover_stream.tokens.resolve_method_type(hover_idx, uri, docs, stdlib_path);
 							if (method_type.len > 0)
 							{
 								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, method_type);
@@ -156,7 +149,7 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 
 // Search for the declaration of a token and extract its doc comment + signature.
 // Searches: current file -> open documents -> project files -> stdlib.
-fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "") @private
+fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "", bool method_recv_array = false) @private
 {
 	// Cached token stream for the current document (reused across the searches below).
 	TokenStream cur_owned;
@@ -167,14 +160,22 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 	// If method type specified, try method-specific search first with each type candidate
 	if (method_type.len > 0)
 	{
-		if (try_extract_docs_from(content, cursor_tok, out, method_type, cur_stream, module_filter)) return;
+		if (try_extract_docs_from(content, cursor_tok, out, method_type, cur_stream, module_filter, method_recv_array)) return;
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
-			if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, method_type, docs.entries[d].get_tokens(), module_filter)) return;
+			if (try_extract_docs_from(
+				docs.entries[d].content,
+				cursor_tok,
+				out,
+				method_type,
+				docs.entries[d].get_tokens(),
+				module_filter,
+				method_recv_array
+			)) return;
 		}
 		String file_path = uri_to_path(uri);
-		DocsScan scan = { cursor_tok, method_type, module_filter, out };
+		DocsScan scan = { cursor_tok, method_type, module_filter, out, method_recv_array };
 		scan_project_then_stdlib(file_path, stdlib_path, &scan);
 		return;
 	}
@@ -191,7 +192,7 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 
 	// 3 + 4. Project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	DocsScan scan = { cursor_tok, "", module_filter, out };
+	DocsScan scan = { cursor_tok, "", module_filter, out, false };
 	scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
 
@@ -239,7 +240,7 @@ fn bool try_extract_field_docs_from(String content, String type_name, String fie
 }
 
 // Tokenize content, find the declaration of target, and extract doc comment + signature.
-fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "", TokenStream* cached = null, String module_filter = "") @private
+fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "", TokenStream* cached = null, String module_filter = "", bool method_recv_array = false) @private
 {
 	TokenStream owned;
 	TokenStream* stream;
@@ -247,7 +248,7 @@ fn bool try_extract_docs_from(String content, Token target, DString* out, String
 	else { owned = token_stream_tokenize(content); stream = &owned; }
 	defer { if (cached == null) owned.free(); }
 
-	if (try decl_idx = stream.tokens.find_declaration_in(target, method_type, module_filter))
+	if (try decl_idx = stream.tokens.find_declaration_in(target, method_type, module_filter, method_recv_array))
 	{
 		stream.tokens.extract_docs_at(content, decl_idx, out);
 		return out.str_view().len > 0;
@@ -406,11 +407,20 @@ struct DocsScan (FileVisitor) @private
 	String method_type;
 	String module_filter;
 	DString* out;
+	bool method_recv_array;
 }
 
 fn bool DocsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	return try_extract_docs_from(content, self.target, self.out, self.method_type, stream, self.module_filter);
+	return try_extract_docs_from(
+		content,
+		self.target,
+		self.out,
+		self.method_type,
+		stream,
+		self.module_filter,
+		self.method_recv_array
+	);
 }
 
 // On-disk struct-field hover-doc lookup, driven through the shared scan engine.
