@@ -466,3 +466,63 @@ fn void test_definition_fallback_unimported_module() @test {
 
 	ds.close("file:///aaa.c3");
 }
+
+// --- Local-variable scope tests ---
+
+// Regression (io.c3 printfn): `len` in the second function must resolve to its
+// own `sz? len`, not to the first `sz len;` in the file — find_declaration
+// scans top-down with no notion of function scope.
+fn void test_definition_local_var_prefers_enclosing_function() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz? len = 0; return len + 1; }";
+	sz offset = content.len - 10; // on `len` in `return len + 1;`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "must jump to b's own `sz? len` (line 1), got: %s", result);
+	assert(result.contains(`"character":18`), "got: %s", result);
+}
+
+// A use in b still resolves to b's own declaration even though a declared the
+// same name earlier — guards a scope-aware fix against over-correcting.
+fn void test_definition_local_var_in_declaring_function() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz? len = 0; }\nfn void b() { sz len; len++; }";
+	sz offset = content.len - 8; // on `len` in `len++`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "must jump to b's own `sz len` (line 1), got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// The same scope bug with no optional types at all: a's plain `sz len` still
+// captures the use in b — the wrong jump needs no `?` to happen.
+fn void test_definition_local_var_plain_declarations() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; return len + 1; }";
+	sz offset = content.len - 10; // on `len` in `return len + 1;`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "must jump to b's own `sz len` (line 1), got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+	assert(!result.contains(`"line":0`), "must not jump to a's `sz len` (line 0), got: %s", result);
+}
+
+// A parameter resolves like a local. The LAST parameter is followed by `)`,
+// not `;`/`=`/`,` — the declaration-shape check must accept it.
+fn void test_definition_local_var_parameter() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a(int len) { return len + 1; }";
+	sz offset = content.len - 10; // on `len` in `return len + 1;`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "must jump to the `int len` parameter, got: %s", result);
+	assert(result.contains(`"character":14`), "got: %s", result);
+}
