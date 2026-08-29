@@ -301,19 +301,20 @@ fn void TokenList.extract_docs_at(&self, String content, sz decl_idx, DString* o
 	DString comment = dstring::temp();
 	if (decl_start_idx > 0)
 	{
-		// Collect comment tokens immediately before the declaration
+		// Collect the comment block nearest the declaration. A blank line ends a
+		// block, so of `// single`, `/* block */` and `<* contract *>` stacked
+		// above a fn, only the contract documents it — the others are separate
+		// remarks that happen to sit higher up in the file.
+		//
+		// The gap between the block and the declaration is not itself a
+		// separator: a lone comment a blank line above a fn still documents it.
 		sz first_comment = decl_start_idx;
 		for (sz i = decl_start_idx; i > 0; i--)
 		{
 			TokenType t = self.entries[i - 1].type;
-			if (t == LINE_COMMENT || t == BLOCK_COMMENT || t == CONTRACT)
-			{
-				first_comment = i - 1;
-			}
-			else
-			{
-				break;
-			}
+			if (t != LINE_COMMENT && t != BLOCK_COMMENT && t != CONTRACT) break;
+			if (first_comment < decl_start_idx && self.blank_line_between(content, i - 1, first_comment)) break;
+			first_comment = i - 1;
 		}
 
 		for (sz i = first_comment; i < decl_start_idx; i++)
@@ -341,6 +342,24 @@ fn void TokenList.extract_docs_at(&self, String content, sz decl_idx, DString* o
 		out.append("\n\n---\n\n");
 		out.append(comment.str_view());
 	}
+}
+
+// True when a blank line separates the token at `before` from the one at `after`,
+// i.e. their gap holds more than one line break. Comment tokens stop short of the
+// newline that ends them, so a single break only means "the following line".
+fn bool TokenList.blank_line_between(&self, String content, sz before, sz after) @private
+{
+	sz gap_start = self.entries[before].offset + self.entries[before].len;
+	sz gap_end   = self.entries[after].offset;
+	if (gap_end > content.len) gap_end = content.len;
+	sz breaks = 0;
+	for (sz i = gap_start; i < gap_end; i++)
+	{
+		if (content[i] != '\n') continue;
+		breaks++;
+		if (breaks > 1) return true;
+	}
+	return false;
 }
 
 // Strip comment markers (// or /* ... */) from a comment string.

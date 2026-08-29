@@ -181,3 +181,60 @@ fn void test_hover_contract_doc_single_line() @test {
 	String result = out.str_view();
 	assert(result.contains("Returns the length"), "expected contract doc, got: %s", result);
 }
+
+// #15: several comments stacked above a declaration, each separated by a blank
+// line, are separate remarks — only the block touching the declaration documents
+// it. Stacking all three made every hover on `main` a wall of unrelated text.
+fn void test_hover_picks_nearest_comment_block() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "// single\n\n/* block */\n\n<*\ncontract\n*>\nfn int main(String[] args)\n{\n}\nmain(x);";
+	// Cursor on the call below the declaration
+	encode_hover("file:///test.c3", content, 70, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("contract"), "expected the nearest comment, got: %s", result);
+	assert(!result.contains("single"), "the detached line comment is not the doc, got: %s", result);
+	assert(!result.contains("block"), "the detached block comment is not the doc, got: %s", result);
+}
+
+// A blank line is what ends a block, not a line break: consecutive `//` lines are
+// one doc comment and all of them are kept.
+fn void test_hover_keeps_whole_comment_block() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "// First line.\n// Second line.\nfn void greet() {}\ngreet();";
+	// Cursor on the call below the declaration
+	encode_hover("file:///test.c3", content, 50, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("First line"), "expected the whole block, got: %s", result);
+	assert(result.contains("Second line"), "expected the whole block, got: %s", result);
+}
+
+// Nearest wins on distance alone — a `<* *>` contract further up does not outrank
+// the comment actually sitting on the declaration.
+fn void test_hover_nearest_wins_over_contract() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "<*\nfar doc\n*>\n\n/* near note */\nfn void greet() {}\ngreet();";
+	// Cursor on the call below the declaration
+	encode_hover("file:///test.c3", content, 50, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("near note"), "expected the nearest comment, got: %s", result);
+	assert(!result.contains("far doc"), "the detached contract is not the doc, got: %s", result);
+}
+
+// The gap between the nearest block and the declaration is not a separator: with
+// nothing else above it, a comment a blank line up is still that fn's doc.
+fn void test_hover_comment_detached_by_blank_line() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "// Detached note.\n\nfn void greet() {}\ngreet();";
+	// Cursor on the call below the declaration
+	encode_hover("file:///test.c3", content, 38, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("Detached note"), "a lone comment above a fn still documents it, got: %s", result);
+}
