@@ -347,7 +347,7 @@ fn void TokenList.extract_docs_at(&self, String content, sz decl_idx, DString* o
 // True when a blank line separates the token at `before` from the one at `after`,
 // i.e. their gap holds more than one line break. Comment tokens stop short of the
 // newline that ends them, so a single break only means "the following line".
-fn bool TokenList.blank_line_between(&self, String content, sz before, sz after) @private
+fn bool TokenList.blank_line_between(&self, String content, sz before, sz after)
 {
 	sz gap_start = self.entries[before].offset + self.entries[before].len;
 	sz gap_end   = self.entries[after].offset;
