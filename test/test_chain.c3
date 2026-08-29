@@ -407,3 +407,54 @@ fn void test_definition_through_a_stdlib_method_return() @test {
         assert(result.contains("string.c3"), "expected String.%s in the stdlib, got: %s", name, result);
     }
 }
+
+// `!!` (force unwrap) and `!` (rethrow) sit between a call and the next dot, so
+// without stripping them the receiver of `find()!!.baz` reads as the operator.
+fn void test_chain_through_optional_operators() @test {
+    String content = `struct Bar { int baz; }
+fn Bar*? find() { return null; }
+fn void test() {
+    find()!!.baz = 1;
+    find()!.baz = 2;
+}`;
+    TokenStream stream = token_stream_tokenize(content);
+    defer stream.free();
+
+    DocumentList* docs = mem::new(DocumentList);
+    defer mem::free(docs);
+
+    sz seen = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
+        if (stream.tokens.entries[i].text != "baz") continue;
+        if (i == 0 || stream.tokens.entries[i - 1].type != DOT) continue;
+        String recv_type = stream.tokens.resolve_receiver_type(i, "file:///test.c3", docs);
+        assert(recv_type == "Bar", "expected Bar, got: '%s'", recv_type);
+        seen++;
+    }
+    assert(seen == 2, "expected 2 member accesses, saw %d", seen);
+}
+
+// A prefix `!` is not a postfix unwrap — `!ready.baz` must not read `ready` as the
+// receiver of an unwrapped expression ending at the `!`.
+fn void test_chain_prefix_bang_not_unwrap() @test {
+    String content = `struct Bar { int baz; }
+fn void test() {
+    Bar b;
+    bool ok = !b.baz;
+}`;
+    TokenStream stream = token_stream_tokenize(content);
+    defer stream.free();
+
+    DocumentList* docs = mem::new(DocumentList);
+    defer mem::free(docs);
+
+    sz baz_idx = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
+        if (stream.tokens.entries[i].text == "baz" && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
+            baz_idx = i;
+            break;
+        }
+    }
+    String recv_type = stream.tokens.resolve_receiver_type(baz_idx, "file:///test.c3", docs);
+    assert(recv_type == "Bar", "expected Bar, got: '%s'", recv_type);
+}

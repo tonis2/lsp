@@ -780,6 +780,16 @@ fn TypeInfo TokenList.expr_type(&self, sz last, String uri, DocumentList* docs, 
 			TypeInfo indexed = self.expr_type(open - 1, uri, docs, stdlib_path, depth + 1);
 			if (self.brackets_hold_range(open, last)) return slice_of(indexed);
 			return self.element_type_of(indexed, uri, docs, stdlib_path, depth);
+		case BANGBANG:
+		case BANG:
+			// Postfix `!!` (force unwrap) and `!` (rethrow) yield the optional's
+			// success type, so `msg.get("params")!!.get("item")` chains off whatever
+			// `get` returns. A prefix `!` never *ends* an expression, so only strip
+			// the operator when the token before it can close one.
+			if (last == 0) return {};
+			TokenType before = self.entries[last - 1].type;
+			if (before != RPAREN && before != RBRACKET && !is_ident(before) && before != CONST_IDENT) return {};
+			return self.expr_type(last - 1, uri, docs, stdlib_path, depth + 1);
 		case TYPE_IDENT:
 			// A type name used as a namespace: `Color.RED`, `Foo.static_method()`.
 			TypeInfo named = { .name = t.text };
