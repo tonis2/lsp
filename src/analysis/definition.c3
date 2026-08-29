@@ -1476,6 +1476,30 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 		return; // import segments never resolve as ordinary symbols
 	}
 
+	// A qualifier segment in usage position — `io` in `io::print()` or in
+	// `std::io::print()` — names a module too. `::` only ever separates module path
+	// segments, so a token followed by one is never an ordinary symbol.
+	if (cursor_idx + 1 < stream.tokens.size && stream.tokens.entries[cursor_idx + 1].type == SCOPE)
+	{
+		String written = stream.tokens.join_path_segments(
+			stream.tokens.qualifier_chain_start(cursor_idx),
+			cursor_idx + 1
+		);
+		if (written.len > 0)
+		{
+			// The path as written first, so `std::io::print()` needs no import to
+			// resolve. Failing that, `io` is the last segment of an imported
+			// `std::io`, the shorthand C3 itself allows.
+			if (stream.tokens.try_find_module_definition(written, uri, content, docs, stdlib_path, out)) return;
+			String full = resolve_module_name(content, written);
+			if (full.len > 0 && full != written)
+			{
+				stream.tokens.try_find_module_definition(full, uri, content, docs, stdlib_path, out);
+			}
+		}
+		return;
+	}
+
 	// For DOT-preceded tokens (field/method access), resolve the receiver type
 	// to avoid jumping to unrelated declarations with the same name.
 	if (cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT)
@@ -1739,6 +1763,13 @@ fn sz? TokenList.find_local_declaration(&self, String name, sz target_idx)
 		TokenType next = self.entries[i + 1].type;
 		if (next != EOS && next != EQ && next != COMMA && next != RPAREN) continue;
 
+		// `try name = ...` / `catch name = ...` bind a name without writing a
+		// type. The `=` is what makes it a binding: bare `if (try x)` tests an
+		// optional that was declared elsewhere, and must not claim to be x's
+		// declaration.
+		TokenType lead = self.entries[i - 1].type;
+		if ((lead == TRY || lead == CATCH) && next == EQ) return i;
+
 		// The left side must be a type, across `?`/`*` suffixes and a generic
 		// `{...}` block — exactly the declaration shapes the file-global loops
 		// cannot see (io.c3: `sz? len`).
@@ -1824,15 +1855,17 @@ fn sz? TokenList.find_declaration(
 				{
 					return i + 1;
 				}
-				// const Type NAME = ... (with type)
-				if (i + 2 < self.size && is_type_token(
-					self.entries[i + 1].type
-				) && self.entries[i + 2].type == CONST_IDENT && self.entries[i + 2].text == name && self.decl_in_filter(
-					i + 2,
-					module_filter
-				))
+				// const Type NAME = ... — `read_type_at` steps over the whole type,
+				// so a `[]`/`[N]`/`[<N>]`/`*`/`?` suffix or a generic `{...}` block
+				// between the type and the name no longer hides the declaration
+				// (`const Handler[] HANDLERS = ...`).
+				TypeInfo written;
+				sz name_idx;
+				if (self.read_type_at(i + 1, &written, &name_idx) && name_idx < self.size
+					&& self.entries[name_idx].type == CONST_IDENT && self.entries[name_idx].text == name
+					&& self.decl_in_filter(name_idx, module_filter))
 				{
-					return i + 2;
+					return name_idx;
 				}
 			}
 			// enum / faultdef / constdef member: enum Foo { NAME }, constdef Bar : T { NAME = v }, faultdef NAME
