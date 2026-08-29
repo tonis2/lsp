@@ -526,3 +526,59 @@ fn void test_definition_local_var_parameter() @test {
 	assert(result.contains(`"line":0`), "must jump to the `int len` parameter, got: %s", result);
 	assert(result.contains(`"character":14`), "got: %s", result);
 }
+
+// A use nested in an `if` block still belongs to b's scope: the enclosing
+// declaration is the fn, not the block the cursor happens to sit in.
+fn void test_definition_local_var_nested_if_block() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; if (1) { return len + 1; } }";
+	sz offset = 66;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// Same through several levels of block nesting, and past the `)` that closes
+// a `for` header — which is not the fn's parameter list.
+fn void test_definition_local_var_nested_loop_block() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; for (int i = 0; i < 2; i++) { while (1) { return len + 1; } } }";
+	sz offset = 99;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// A `switch` body nests the same way.
+fn void test_definition_local_var_nested_switch_case() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; switch (1) { case 1: int q = len; } }";
+	sz offset = 79;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// io.c3's printfn is declared `fn sz? printfn(String format, args...) @format(0)`.
+// The parenthesised attribute must not be mistaken for the parameter list, or
+// the parameters drop out of the searched range.
+fn void test_definition_local_var_parameter_with_attribute() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a(int len) @format(0) { return len + 1; }";
+	sz offset = 39;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":14`), "got: %s", result);
+}

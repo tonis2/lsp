@@ -1708,87 +1708,27 @@ fn sz? TokenList.find_declaration_in(
 	return self.find_declaration(target, self.size, method_type, module_filter, method_recv_array);
 }
 
-// Index of the parameter-list '(' of the fn/macro whose body encloses
-// target_idx, or self.size when the cursor is not inside one (module level, or
-// a lambda body — `func` is not the FUNC keyword, so lambdas don't qualify).
-fn sz TokenList.find_enclosing_fn_lparen(&self, sz target_idx)
-{
-	sz rparen = self.size;
-	sz depth  = 0;
-	for (sz k = target_idx; k > 0 && rparen == self.size; k--)
-	{
-		sz i        = k - 1;
-		TokenType t = self.entries[i].type;
-		if (t == RBRACE)
-		{
-			depth++;
-			continue;
-		}
-		if (t != LBRACE) continue;
-		if (depth > 0)
-		{
-			depth--;
-			continue;
-		}
-
-		// An '{' reached at depth 0 opens a block containing the cursor. A
-		// fn/macro body has the parameter list's ')' before it, possibly with
-		// `<...>` interfaces and attributes in between.
-		for (sz j = i; j > 0 && j + 8 > i; j--)
-		{
-			TokenType u = self.entries[j - 1].type;
-			if (u == RPAREN)
-			{
-				rparen = j - 1;
-				break;
-			}
-			if (u == AT_IDENT || u == LESS || u == GREATER || u == COMMA || u == IDENT || u == TYPE_IDENT || u == CONST_IDENT || u == QUESTION) continue;
-			break;
-		}
-	}
-	if (rparen == self.size) return self.size;
-
-	sz lparen = self.size;
-	if (try p = self.match_paren_backward(rparen))
-	{
-		lparen = p;
-	}
-	if (lparen == 0 || lparen >= self.size) return self.size;
-
-	// Confirm a fn/macro head precedes the '(' (not a lambda or another
-	// paren-then-brace shape): the keyword must appear before the head runs
-	// into anything statement-like.
-	for (sz j = lparen; j > 0 && j + 16 > lparen; j--)
-	{
-		TokenType u = self.entries[j - 1].type;
-		if (u == FUNC || u == MACRO) return lparen;
-		if (u == RBRACE)
-		{
-			// Generic type block in the head, e.g. `fn List{int} get_list()`.
-			sz lbrace = self.match_lbrace_back(j - 1);
-			if (lbrace == 0 || lbrace >= self.size) break;
-			j = lbrace + 1;
-			continue;
-		}
-		if (u == EOS || u == LBRACE) break;
-	}
-	return self.size;
-}
-
 // Scope-aware local-variable lookup: the nearest declaration of `name` before
-// target_idx, inside the fn/macro enclosing it (parameters included in the
-// range). C3 forbids shadowing, so a name is declared at most once per function
-// — the nearest preceding declaration is the one the use refers to. Returns
-// empty when target_idx carries no cursor (find_declaration_in passes
-// self.size) or the cursor sits outside any fn/macro body.
+// target_idx, inside the fn/macro enclosing it. The range spans the whole
+// declaration, so parameters count and a use nested in an `if`/`for`/`while`/
+// `switch` block still sees the locals around it. C3 forbids shadowing, so a
+// name is declared at most once per function — the nearest preceding
+// declaration is the one the use refers to. Returns empty when target_idx
+// carries no cursor (find_declaration_in passes self.size) or the cursor sits
+// outside any fn/macro body.
 fn sz? TokenList.find_local_declaration(&self, String name, sz target_idx)
 {
 	if (target_idx == 0 || target_idx >= self.size) return TOKEN_NOT_FOUND~;
 
-	sz lparen = self.find_enclosing_fn_lparen(target_idx);
-	if (lparen >= self.size) return TOKEN_NOT_FOUND~;
+	// `enclosing_decl_start` reports the `fn`/`macro` keyword opening the
+	// declaration around target_idx, so the range below covers the parameter
+	// list as well as the body. It returns 0 both for "not inside a function"
+	// and for a keyword that IS token 0, so the latter is checked separately.
+	sz kw = self.enclosing_decl_start(target_idx);
+	if (kw == 0 && self.entries[0].type != FUNC && self.entries[0].type != MACRO) return TOKEN_NOT_FOUND~;
+	sz start = kw + 1;
 
-	for (sz k = target_idx; k > lparen + 1; k--)
+	for (sz k = target_idx; k > start + 1; k--)
 	{
 		sz i = k - 1;
 		if (self.entries[i].type != IDENT || self.entries[i].text != name) continue;
@@ -1803,8 +1743,8 @@ fn sz? TokenList.find_local_declaration(&self, String name, sz target_idx)
 		// `{...}` block — exactly the declaration shapes the file-global loops
 		// cannot see (io.c3: `sz? len`).
 		sz p = i;
-		while (p > lparen + 1 && (self.entries[p - 1].type == QUESTION || self.entries[p - 1].type == STAR)) p--;
-		if (p > lparen + 1 && self.entries[p - 1].type == RBRACE)
+		while (p > start + 1 && (self.entries[p - 1].type == QUESTION || self.entries[p - 1].type == STAR)) p--;
+		if (p > start + 1 && self.entries[p - 1].type == RBRACE)
 		{
 			sz lbrace = self.match_lbrace_back(p - 1);
 			if (lbrace == 0 || lbrace >= self.size) continue;
