@@ -407,3 +407,59 @@ fn void test_references_from_importer_resolves_visible_decl() @test {
 	ds.close("file:///other.c3");
 	ds.close("file:///lib.c3");
 }
+
+// The declaration writes `Shape.run` and its calls write `s.run` — receivers that
+// never match textually, so the two used to come back as disjoint sets. Issue #16,
+// sub-issue 8.
+fn void test_references_method_from_declaration() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Shape {}\nstruct Other {}\nfn void Shape.run(&self) {}\nfn void Other.run(&self) {}\nfn void t() { Shape s; s.run(); Other o; o.run(); s.run(); }";
+	encode_references("file:///main.c3", content, 58, ds, "", true, &out);
+	String result = out.str_view();
+	assert(count_occurrences(result, `"uri"`) == 3, "expected 3 references, got: %s", result);
+	assert(result.contains(`"line":3`), "must include the declaration, got: %s", result);
+	assert(!result.contains(`"line":4`), "Other.run is a different method, got: %s", result);
+}
+
+// Same set from either end: asking at a call finds the declaration too.
+fn void test_references_method_from_call() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Shape {}\nstruct Other {}\nfn void Shape.run(&self) {}\nfn void Other.run(&self) {}\nfn void t() { Shape s; s.run(); Other o; o.run(); s.run(); }";
+	encode_references("file:///main.c3", content, 152, ds, "", true, &out);
+	String result = out.str_view();
+	assert(count_occurrences(result, `"uri"`) == 3, "expected 3 references, got: %s", result);
+	assert(result.contains(`"line":3`), "must include the declaration, got: %s", result);
+	assert(!result.contains(`"line":4`), "Other.run is a different method, got: %s", result);
+}
+
+// `self` resolves to the enclosing method's receiver like any other expression.
+fn void test_references_method_through_self() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Shape {}\nfn void Shape.run(&self) {}\nfn void Shape.go(&self) { self.run(); }";
+	encode_references("file:///main.c3", content, 87, ds, "", true, &out);
+	String result = out.str_view();
+	assert(count_occurrences(result, `"uri"`) == 2, "expected 2 references, got: %s", result);
+	assert(result.contains(`"line":2`), "must include the declaration, got: %s", result);
+	assert(result.contains(`"line":3`), "must include the self call, got: %s", result);
+}
+
+// Two receivers of the same type share a field; a same-named field on another type
+// does not. Receiver-text matching got this backwards in both directions.
+fn void test_references_field_matches_by_type_not_receiver() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Alpha { int len; }\nstruct Beta { int len; }\nfn void t() { Alpha a1; Alpha a2; Beta b; int x = a1.len; int y = a2.len; int z = b.len; }";
+	encode_references("file:///main.c3", content, 132, ds, "", true, &out);
+	String result = out.str_view();
+	assert(count_occurrences(result, `"uri"`) == 2, "expected 2 references, got: %s", result);
+	assert(result.contains(`"character":53`), "must include a1.len, got: %s", result);
+	assert(result.contains(`"character":69`), "must include a2.len, got: %s", result);
+	assert(!result.contains(`"character":84`), "Beta.len is a different field, got: %s", result);
+}
