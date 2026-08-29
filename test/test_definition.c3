@@ -582,3 +582,45 @@ fn void test_definition_local_var_parameter_with_attribute() @test {
 	assert(result.contains(`"line":0`), "got: %s", result);
 	assert(result.contains(`"character":14`), "got: %s", result);
 }
+
+// The name of a const is not the token right after the type when the type carries a
+// `[]`/`[N]`/`*` suffix — issue #16, sub-issue 5.
+fn void test_definition_const_slice_suffix() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Handler {}\nconst Handler[] HANDLERS = {};\nfn void t() { Handler x = HANDLERS[0]; }";
+	sz offset = 87; // on the use of `HANDLERS`
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":2`), "got: %s", result);
+	assert(result.contains(`"character":16`), "got: %s", result);
+}
+
+// The name of a const is not the token right after the type when the type carries a
+// `[]`/`[N]`/`*` suffix — issue #16, sub-issue 5.
+fn void test_definition_const_sized_suffix() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nconst int[2] LIMITS = {1,2};\nfn void t() { int x = LIMITS[0]; }";
+	sz offset = 63; // on the use of `LIMITS`
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":13`), "got: %s", result);
+}
+
+// The name of a const is not the token right after the type when the type carries a
+// `[]`/`[N]`/`*` suffix — issue #16, sub-issue 5.
+fn void test_definition_const_pointer_suffix() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Handler {}\nconst Handler* ROOT = null;\nfn void t() { Handler* x = ROOT; }";
+	sz offset = 85; // on the use of `ROOT`
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":2`), "got: %s", result);
+	assert(result.contains(`"character":15`), "got: %s", result);
+}

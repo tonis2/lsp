@@ -1824,15 +1824,17 @@ fn sz? TokenList.find_declaration(
 				{
 					return i + 1;
 				}
-				// const Type NAME = ... (with type)
-				if (i + 2 < self.size && is_type_token(
-					self.entries[i + 1].type
-				) && self.entries[i + 2].type == CONST_IDENT && self.entries[i + 2].text == name && self.decl_in_filter(
-					i + 2,
-					module_filter
-				))
+				// const Type NAME = ... — `read_type_at` steps over the whole type,
+				// so a `[]`/`[N]`/`[<N>]`/`*`/`?` suffix or a generic `{...}` block
+				// between the type and the name no longer hides the declaration
+				// (`const Handler[] HANDLERS = ...`).
+				TypeInfo written;
+				sz name_idx;
+				if (self.read_type_at(i + 1, &written, &name_idx) && name_idx < self.size
+					&& self.entries[name_idx].type == CONST_IDENT && self.entries[name_idx].text == name
+					&& self.decl_in_filter(name_idx, module_filter))
 				{
-					return i + 2;
+					return name_idx;
 				}
 			}
 			// enum / faultdef / constdef member: enum Foo { NAME }, constdef Bar : T { NAME = v }, faultdef NAME
