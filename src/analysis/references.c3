@@ -117,7 +117,28 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 	out.append("[");
 
 	// 1. Current file — collect all matching tokens
-	stream.tokens.collect_refs(uri, content, cursor_tok, out, &first, is_member, member_receiver);
+	if (is_member)
+	{
+		// A method declaration writes `Shape.run`, its calls write `s.run`: the
+		// receivers never match textually, which is why the declaration and its
+		// calls used to be reported as two disjoint sets. Matching on the type the
+		// receiver resolves to joins them, and still keeps `other.run()` on an
+		// unrelated type out. Without a resolvable type, fall back to the literal
+		// receiver rather than over-report.
+		String owner = stream.tokens.member_owner_type(cursor_idx, uri, docs, stdlib_path);
+		if (owner.len > 0)
+		{
+			stream.tokens.collect_member_refs(uri, content, cursor_tok, owner, docs, stdlib_path, out, &first);
+		}
+		else
+		{
+			stream.tokens.collect_refs(uri, content, cursor_tok, out, &first, true, member_receiver);
+		}
+	}
+	else
+	{
+		stream.tokens.collect_refs(uri, content, cursor_tok, out, &first);
+	}
 
 	if (!is_member)
 	{
@@ -179,23 +200,70 @@ fn void TokenList.collect_refs(&self, String uri, String content, Token target, 
 				if (recv.text != member_receiver) continue;
 			}
 
-			if (!*first) out.append(",");
-			*first = false;
-
-			sz line = lo.find_line(tok.offset);
-			sz col = tok.offset - lo.entries[line];
-			sz end_col = col + tok.len;
-
-			Location loc = {
-				.uri = uri,
-				.range = {
-					.start = {.line = line, .character = col},
-					.end = {.line = line, .character = end_col},
-				},
-			};
-			loc.encode(out);
+			append_ref_location(uri, tok, &lo, out, first);
 		}
 	}
+}
+
+// The type that owns the member named at `idx`, or "" when it cannot be resolved.
+// A method declaration writes its receiver outright (`fn void Shape.run(&self)`), as
+// does a namespaced access (`Color.RED`); anything else is an expression whose type
+// has to be inferred.
+fn String TokenList.member_owner_type(&self, sz idx, String uri, DocumentList* docs, String stdlib_path)
+{
+	if (idx < 2 || self.entries[idx - 1].type != DOT) return "";
+	if (self.entries[idx - 2].type == TYPE_IDENT) return self.entries[idx - 2].text;
+	return self.resolve_receiver_type(idx, uri, docs, stdlib_path);
+}
+
+// Occurrences of `target` that are members of `owner_type` — the declaration
+// `fn void Shape.run(&self)` together with every `x.run()` whose receiver resolves to
+// Shape. Same-file only: resolving a receiver in another file needs that file's own
+// scope, which this pass does not carry.
+fn void TokenList.collect_member_refs(
+	&self,
+	String uri,
+	String content,
+	Token target,
+	String owner_type,
+	DocumentList* docs,
+	String stdlib_path,
+	DString* out,
+	bool* first
+)
+{
+	LineOffsets lo;
+	lo.init(mem);
+	defer lo.free();
+	lo.build(content);
+
+	for (sz i = 0; i < self.size; i++)
+	{
+		Token tok = self.entries[i];
+		if (tok.type != target.type || tok.text != target.text) continue;
+		if (i == 0 || self.entries[i - 1].type != DOT) continue;
+		if (self.member_owner_type(i, uri, docs, stdlib_path) != owner_type) continue;
+		append_ref_location(uri, tok, &lo, out, first);
+	}
+}
+
+// Append one Location, handling the JSON comma between entries.
+fn void append_ref_location(String uri, Token tok, LineOffsets* lo, DString* out, bool* first) @private
+{
+	if (!*first) out.append(",");
+	*first = false;
+
+	sz line = lo.find_line(tok.offset);
+	sz col = tok.offset - lo.entries[line];
+
+	Location loc = {
+		.uri = uri,
+		.range = {
+			.start = {.line = line, .character = col},
+			.end = {.line = line, .character = col + tok.len},
+		},
+	};
+	loc.encode(out);
 }
 
 // Returns the byte offset range (start, end) of the function scope containing `offset`,
