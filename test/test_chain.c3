@@ -290,3 +290,120 @@ fn void test_hover_cross_file_field() @test {
 
     docs.close("file:///stream.c3");
 }
+
+// --- range slices and chains through the standard library ---
+
+// `xs[a..b]` is a slice of the same thing, not one element of it, so the members
+// reached through it are the collection's. Before this, `line[p..].trim()` looked
+// `trim` up on `char` and found nothing.
+fn void test_chain_range_slice_keeps_the_slice_type() @test {
+    String content = `fn void test() {
+    String line;
+    line[3..].trim();
+}`;
+    TokenStream stream = token_stream_tokenize(content);
+    defer stream.free();
+
+    sz trim_idx = 0;
+    for (sz i = 0; i < stream.tokens.size; i++) {
+        if (stream.tokens.entries[i].text == "trim" && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
+            trim_idx = i;
+            break;
+        }
+    }
+    assert(trim_idx > 0, "couldn't find trim after DOT");
+
+    DocumentList* docs = mem::new(DocumentList);
+    defer mem::free(docs);
+    String recv_type = stream.tokens.resolve_receiver_type(trim_idx, "file:///test.c3", docs);
+    assert(recv_type == "String", "expected String, got: '%s'", recv_type);
+}
+
+// The counterpart: a single index still yields an element, so `xs[1].x` reaches
+// `Foo.x`. A `?:` inside the brackets is a ternary, not a range.
+fn void test_chain_single_index_still_yields_the_element() @test {
+    String content = `struct Foo { int x; }
+fn void test() {
+    Foo[4] xs;
+    xs[a ? b : c].x = 1;
+}`;
+    TokenStream stream = token_stream_tokenize(content);
+    defer stream.free();
+
+    sz x_idx = 0;
+    for (sz i = stream.tokens.size; i > 0; i--) {
+        if (stream.tokens.entries[i - 1].text == "x" && i >= 2 && stream.tokens.entries[i - 2].type == DOT) {
+            x_idx = i - 1;
+            break;
+        }
+    }
+    assert(x_idx > 0, "couldn't find x after DOT");
+
+    DocumentList* docs = mem::new(DocumentList);
+    defer mem::free(docs);
+    String recv_type = stream.tokens.resolve_receiver_type(x_idx, "file:///test.c3", docs);
+    assert(recv_type == "Foo", "expected Foo, got: '%s'", recv_type);
+}
+
+// A chain only continues past a call once that call's return type is known, and a
+// library call's return type is written in the stdlib — which the return-type search
+// used to stop short of. `io::stdout().write(..)` is the everyday case.
+fn void test_definition_through_a_stdlib_free_function_return() @test {
+    mkdirs("/tmp/lsp_chain_std_fn/io");
+    file::save("/tmp/lsp_chain_std_fn/io/file.c3",
+        "module std::io;\nstruct File { int fd; }\nfn File* stdout() { return null; }\nfn usz? File.write(&self, char[] bytes) { return 0; }\nfn void? File.flush(&self) {}\n")!!;
+    defer { if (catch file::delete("/tmp/lsp_chain_std_fn/io/file.c3")) {} }
+
+    String content = "fn void test() {\n\tString line;\n\tio::stdout().write(line);\n\tio::stdout().flush();\n}";
+
+    foreach (String name : {"write", "flush"}) {
+        TokenStream stream = token_stream_tokenize(content);
+        sz offset = 0;
+        for (sz i = 0; i < stream.tokens.size; i++) {
+            if (stream.tokens.entries[i].text == name && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
+                offset = stream.tokens.entries[i].offset;
+                break;
+            }
+        }
+        stream.free();
+        assert(offset > 0, "couldn't find %s call", name);
+
+        DocumentList* docs = mem::new(DocumentList);
+        defer mem::free(docs);
+        DString out = dstring::temp();
+        encode_definition("file:///test.c3", content, offset, docs, "/tmp/lsp_chain_std_fn", &out);
+        String result = out.str_view();
+        assert(result.contains("file.c3"), "expected File.%s in the stdlib, got: %s", name, result);
+    }
+}
+
+// The reported chain end to end: a range slice, a stdlib method whose return type
+// carries the chain, and a second stdlib method reached through it.
+fn void test_definition_through_a_stdlib_method_return() @test {
+    mkdirs("/tmp/lsp_chain_std_method/core");
+    file::save("/tmp/lsp_chain_std_method/core/string.c3",
+        "module std::core::string;\ntypedef String = inline char[];\nfn String String.trim(self, String to_trim = \" \") { return self; }\nfn uint? String.to_uint(self, int base = 10) { return 0; }\n")!!;
+    defer { if (catch file::delete("/tmp/lsp_chain_std_method/core/string.c3")) {} }
+
+    String content = "fn void test() {\n\tString line;\n\tusz pos;\n\tusz length = (usz)(line[pos + 15..].trim().to_uint() ?? 0);\n}";
+
+    foreach (String name : {"trim", "to_uint"}) {
+        TokenStream stream = token_stream_tokenize(content);
+        sz offset = 0;
+        for (sz i = 0; i < stream.tokens.size; i++) {
+            if (stream.tokens.entries[i].text == name && i > 0 && stream.tokens.entries[i - 1].type == DOT) {
+                offset = stream.tokens.entries[i].offset;
+                break;
+            }
+        }
+        stream.free();
+        assert(offset > 0, "couldn't find %s call", name);
+
+        DocumentList* docs = mem::new(DocumentList);
+        defer mem::free(docs);
+        DString out = dstring::temp();
+        encode_definition("file:///test.c3", content, offset, docs, "/tmp/lsp_chain_std_method", &out);
+        String result = out.str_view();
+        assert(result.contains("string.c3"), "expected String.%s in the stdlib, got: %s", name, result);
+    }
+}

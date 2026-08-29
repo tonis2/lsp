@@ -716,3 +716,84 @@ fn void test_definition_bare_try_is_not_a_binding() @test {
 	assert(result.contains(`"line":2`), "got: %s", result);
 	assert(result.contains(`"character":19`), "got: %s", result);
 }
+
+// --- initializers typed by the return declaration or a spread source ---
+
+// The reported case: `return { ...IMAGE_BARRIER, .image = image }`. Both the spread
+// source and the fields designated after it have to resolve — the source names the
+// struct, and every designator below it is a field of that struct.
+fn void test_definition_spread_initializer_fields() @test {
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///vk.c3",
+		"module vk;\nstruct Barrier { int image; int old_layout; }\nconst Barrier IMAGE_BARRIER = {};", 1);
+
+	String content = "module app;\nimport vk;\nmacro make(image) {\n\treturn { ...vk::IMAGE_BARRIER,\n\t\t.image = image,\n\t\t.old_layout = 1,\n\t};\n}";
+
+	// The spread source itself.
+	TokenStream stream = token_stream_tokenize(content);
+	sz const_off = 0;
+	sz field_off = 0;
+	for (sz i = stream.tokens.size; i > 0; i--) {
+		if (stream.tokens.entries[i - 1].text == "IMAGE_BARRIER" && const_off == 0) {
+			const_off = stream.tokens.entries[i - 1].offset;
+		}
+		if (stream.tokens.entries[i - 1].text == "old_layout" && field_off == 0 && i >= 2
+			&& stream.tokens.entries[i - 2].type == DOT) {
+			field_off = stream.tokens.entries[i - 1].offset;
+		}
+	}
+	stream.free();
+	assert(const_off > 0 && field_off > 0, "couldn't find the spread source and the designator");
+
+	DString a = dstring::temp();
+	encode_definition("file:///main.c3", content, const_off, docs, "", &a);
+	assert(a.str_view().contains(`"line":2`), "expected the const on line 2, got: %s", a.str_view());
+
+	DString b = dstring::temp();
+	encode_definition("file:///main.c3", content, field_off, docs, "", &b);
+	assert(b.str_view().contains(`"line":1`), "expected Barrier.old_layout on line 1, got: %s", b.str_view());
+
+	docs.close("file:///vk.c3");
+}
+
+// Without a spread, the enclosing `fn`'s declared return type is what types the braces.
+fn void test_definition_return_initializer_field() @test {
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "module app;\nstruct Barrier { int image; int old_layout; }\nfn Barrier make() {\n\treturn {\n\t\t.old_layout = 1,\n\t};\n}";
+
+	TokenStream stream = token_stream_tokenize(content);
+	sz field_off = 0;
+	for (sz i = stream.tokens.size; i > 0; i--) {
+		if (stream.tokens.entries[i - 1].text == "old_layout" && i >= 2
+			&& stream.tokens.entries[i - 2].type == DOT) {
+			field_off = stream.tokens.entries[i - 1].offset;
+			break;
+		}
+	}
+	stream.free();
+	assert(field_off > 0, "couldn't find the designator");
+
+	DString out = dstring::temp();
+	encode_definition("file:///main.c3", content, field_off, docs, "", &out);
+	assert(out.str_view().contains(`"line":1`), "expected Barrier.old_layout on line 1, got: %s", out.str_view());
+}
+
+// A parameter's type is not a return type: `fn make(Barrier b) { ... }` writes its
+// first TYPE_IDENT inside the parameter list, and reading that as the return type
+// would type every `return {` in a void function with the wrong struct.
+fn void test_definition_return_initializer_ignores_parameter_type() @test {
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "module app;\nstruct Barrier { int image; }\nfn void go(Barrier b) {\n\tunrelated = { .image = 1 };\n}";
+
+	TokenStream stream = token_stream_tokenize(content);
+	sz kw = 0;
+	for (sz i = 0; i < stream.tokens.size; i++) {
+		if (stream.tokens.entries[i].type == FUNC) { kw = i; break; }
+	}
+	TypeInfo ret = stream.tokens.decl_return_type(kw);
+	stream.free();
+	assert(!ret.known(), "a void fn declares no return type, got: '%s'", ret.name);
+}

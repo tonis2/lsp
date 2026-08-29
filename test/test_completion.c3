@@ -1290,3 +1290,58 @@ fn void test_completion_dot_inline_scalar_typedef_no_array_props() @test {
 	assert(!result.contains(`"label":"len"`), "scalar inline typedef should not offer len, got: %s", result);
 	assert(!result.contains(`"label":"ptr"`), "scalar inline typedef should not offer ptr, got: %s", result);
 }
+
+// `return { .` builds the enclosing function's return type, which is the only place
+// that type is written down — without reading it, the braces complete nothing.
+fn void test_completion_initializer_from_return_type() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "module app;\nstruct Barrier { int image; int old_layout; }\nfn Barrier make() {\n\treturn { .";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"image"`), "expected field image, got: %s", result);
+	assert(result.contains(`"label":"old_layout"`), "expected field old_layout, got: %s", result);
+}
+
+// A module-qualified return type (`fn vk::Barrier make()`) names the same struct — the
+// qualifier sits between `fn` and the type, where a naive read finds no type at all.
+fn void test_completion_initializer_from_qualified_return_type() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///vk.c3", "module vk;\nstruct Barrier { int image; int old_layout; }", 1);
+	String content = "module app;\nimport vk;\nfn vk::Barrier make() {\n\treturn { .";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"image"`), "expected field image, got: %s", result);
+	docs.close("file:///vk.c3");
+}
+
+// `{ ...BASE, .field }` copies BASE and overrides fields, so BASE is a value of the
+// very type the braces build. In a macro body — which declares no return type — that
+// spread is the only thing naming it.
+fn void test_completion_initializer_from_spread_source() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "module app;\nstruct Barrier { int image; int old_layout; }\nconst Barrier BASE = {};\nmacro make() {\n\treturn { ...BASE, .";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"image"`), "expected field image, got: %s", result);
+	assert(result.contains(`"label":"old_layout"`), "expected field old_layout, got: %s", result);
+}
+
+// The spread source is usually a shared constant declared alongside the struct it
+// seeds, so the search for it has to leave the file being edited.
+fn void test_completion_initializer_from_cross_file_spread_source() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	docs.open("file:///vk.c3", "module vk;\nstruct Barrier { int image; int old_layout; }\nconst Barrier IMAGE_BARRIER = {};", 1);
+	String content = "module app;\nimport vk;\nfn void go() {\n\tunknown_fn({ ...vk::IMAGE_BARRIER, .";
+	encode_completions("file:///main.c3", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"image"`), "expected field image, got: %s", result);
+	docs.close("file:///vk.c3");
+}

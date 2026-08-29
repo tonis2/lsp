@@ -722,14 +722,33 @@ fn String TokenList.resolve_initializer_type(
 	return t.name;
 }
 
-// Determine the type of the initializer list whose opening '{' is at index lb, from
-// what precedes the brace. The result is flagged as an array (`Opt[4] v = {`) when the
-// braces initialize elements rather than fields — designators are `[index] =` there,
-// not `.field`, so callers treat that as "not a struct initializer".
+// Determine the type of the initializer list whose opening '{' is at index lb. What
+// precedes the brace answers it in almost every case; when it does not, the braces
+// themselves may say so through a spread element. The result is flagged as an array
+// (`Opt[4] v = {`) when the braces initialize elements rather than fields —
+// designators are `[index] =` there, not `.field`, so callers treat that as "not a
+// struct initializer".
 fn TypeInfo TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList* docs, String stdlib_path, int depth)
+{
+	TypeInfo t = self.initializer_type_from_context(lb, uri, docs, stdlib_path, depth);
+	if (t.known()) return t;
+	return self.spread_source_type(lb, uri, docs, stdlib_path, depth);
+}
+
+// The initializer's type as told by what precedes its opening brace.
+fn TypeInfo TokenList.initializer_type_from_context(&self, sz lb, String uri, DocumentList* docs, String stdlib_path, int depth)
 {
 	if (depth > 8 || lb < 1) return {};
 	Token before = self.entries[lb - 1];
+
+	if (before.type == RETURN)
+	{
+		// `return { .field = ... }` — the braces build the enclosing function's
+		// return type, and that declaration is the only place it is written down.
+		sz kw = self.enclosing_decl_start(lb);
+		if (kw == 0 || self.entries[kw].type != FUNC) return {};
+		return self.decl_return_type(kw);
+	}
 
 	if (before.type == RPAREN)
 	{
@@ -828,6 +847,128 @@ fn TypeInfo TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList
 	}
 
 	return {};
+}
+
+// The declared return type of the `fn` whose keyword is at `kw` — `Foo` for
+// `fn Foo make()` and `fn vk::Foo Bar.make()`. Only a named type counts: a builtin
+// return has no fields to designate, and a macro usually writes no return type at all.
+fn TypeInfo TokenList.decl_return_type(&self, sz kw)
+{
+	sz j = kw + 1;
+	// Step over a `mod::` qualifier written on the return type.
+	while (j + 1 < self.size && is_ident(self.entries[j].type) && self.entries[j + 1].type == SCOPE) j += 2;
+	if (j >= self.size || self.entries[j].type != TYPE_IDENT) return {};
+
+	TypeInfo t;
+	sz after;
+	if (!self.read_type_at(j, &t, &after)) return {};
+	// The declarator has to follow, so `fn foo(Bar b)` — where the first TYPE_IDENT
+	// is a parameter's — is not read as a return type.
+	if (after >= self.size || self.entries[after].type == LPAREN) return {};
+	if (t.mod.len == 0) t.mod = self.module_of_decl(kw);
+	return t;
+}
+
+// The type named by a spread element inside the initializer list opening at `lb`:
+// `{ ...BASE, .field = x }` copies BASE and overrides fields, so BASE is a value of
+// exactly the type the braces build. It is often the only type written down — the
+// initializer may sit in a macro body or an argument position nothing else can type.
+fn TypeInfo TokenList.spread_source_type(&self, sz lb, String uri, DocumentList* docs, String stdlib_path, int depth)
+{
+	if (depth > 8 || lb >= self.size) return {};
+	// The brace is still open while the initializer is being typed, which is exactly
+	// when completion asks — so the end of the list stands in for the missing `}`,
+	// and the scan stops at whatever closes or ends the initializer instead.
+	sz close = self.match_rbrace(lb);
+	if (close > self.size) close = self.size;
+
+	sz d = 0;
+	for (sz j = lb + 1; j < close; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == LPAREN || t == LBRACKET || t == LBRACE || t == LVEC)
+		{
+			d++;
+			continue;
+		}
+		if (t == RPAREN || t == RBRACKET || t == RBRACE || t == RVEC)
+		{
+			if (d == 0) break; // past the end of this initializer
+			d--;
+			continue;
+		}
+		if (d == 0 && t == EOS) break;
+		if (d != 0 || t != ELLIPSIS) continue;
+
+		// The operand runs to the `,` closing this element, or to the `}`.
+		sz last = j;
+		sz od   = 0;
+		for (sz k = j + 1; k < close; k++)
+		{
+			TokenType u = self.entries[k].type;
+			if (u == LPAREN || u == LBRACKET || u == LBRACE || u == LVEC)
+			{
+				od++;
+			}
+			else if (u == RPAREN || u == RBRACKET || u == RBRACE || u == RVEC)
+			{
+				if (od == 0) break;
+				od--;
+			}
+			else if (od == 0 && (u == COMMA || u == EOS))
+			{
+				break;
+			}
+			last = k;
+		}
+		if (last == j) continue;
+
+		TypeInfo src = self.expr_type(last, uri, docs, stdlib_path, depth + 1);
+		if (src.known()) return src;
+
+		// A spread source is usually a shared constant declared alongside the struct,
+		// which is rarely the file being edited — and `expr_type` only reaches
+		// file-scope declarations in this file.
+		if (is_ident(self.entries[last].type) || self.entries[last].type == CONST_IDENT)
+		{
+			return self.global_var_type_across(self.entries[last].text, uri, docs, stdlib_path);
+		}
+	}
+	return {};
+}
+
+// The declared type of a file-scope variable or constant named `name`, searched the
+// way every other declaration lookup is: current file, open documents, the project,
+// then the stdlib.
+fn TypeInfo TokenList.global_var_type_across(&self, String name, String uri, DocumentList* docs, String stdlib_path)
+{
+	TypeInfo t = self.file_var_type(name);
+	if (t.known()) return t;
+
+	for (sz d = 0; d < docs.size; d++)
+	{
+		TokenStream* doc_stream = docs.entries[d].get_tokens();
+		t                       = doc_stream.tokens.file_var_type(name);
+		if (t.known()) return t;
+	}
+
+	GlobalVarScan scan = { name, {} };
+	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
+	return scan.result;
+}
+
+struct GlobalVarScan (FileVisitor) @private
+{
+	String name;
+	TypeInfo result;
+}
+
+fn bool GlobalVarScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	TypeInfo t = stream.tokens.file_var_type(self.name);
+	if (!t.known()) return false;
+	self.result = t.copy_temp();
+	return true;
 }
 
 // Find the type of the enclosing method for "self" resolution.
@@ -968,14 +1109,18 @@ fn String TokenList.find_method_return_type(&self, String type_name, String meth
 	return "";
 }
 
-// Resolve a call's return type across current file, open docs, and project files on disk.
-// When type_name is empty, `name` is a free function; otherwise a method on type_name.
+// Resolve a call's return type across the current file, open docs, project files on
+// disk, and finally the stdlib. When type_name is empty, `name` is a free function;
+// otherwise a method on type_name. The stdlib step is what lets a chain hop through a
+// library call — `io::stdout().write(..)` only reaches `File.write` once `stdout`'s
+// `File*` return is known, and `line.trim().to_uint()` only once `trim`'s is.
 fn String TokenList.resolve_call_return_type_across(
 	&self,
 	String type_name,
 	String name,
 	String uri,
-	DocumentList* docs
+	DocumentList* docs,
+	String stdlib_path = ""
 )
 {
 	// 1. Current file
@@ -992,14 +1137,9 @@ fn String TokenList.resolve_call_return_type_across(
 		if (result.len > 0) return result;
 	}
 
-	// 3. Project files on disk
+	// 3 + 4. Project files on disk, then the stdlib
 	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		result = resolve_return_type_in_project(file_path, type_name, name);
-		if (result.len > 0) return result;
-	}
-	return "";
+	return resolve_return_type_in_project(file_path, stdlib_path, type_name, name);
 }
 
 // type_name empty = free function lookup, otherwise a method on type_name.
@@ -1008,10 +1148,10 @@ fn String query_return_type(TokenList* tokens, String type_name, String name) @p
 	return type_name.len > 0 ? tokens.find_method_return_type(type_name, name) : tokens.find_function_return_type(name);
 }
 
-fn String resolve_return_type_in_project(String file_path, String type_name, String name) @private
+fn String resolve_return_type_in_project(String file_path, String stdlib_path, String type_name, String name) @private
 {
 	StringScan scan = { &query_return_type, type_name, name, "" };
-	scan_project_dirs(file_path, &scan);
+	scan_project_then_stdlib(file_path, stdlib_path, &scan);
 	return scan.result;
 }
 

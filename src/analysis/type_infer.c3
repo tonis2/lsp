@@ -554,6 +554,50 @@ fn TypeInfo TokenList.element_type_of(
 	return {};
 }
 
+// The type of a range-slice expression `xs[a..b]`. Slicing yields another slice of
+// the same element type, so a named slice type (`String`) slices to itself and the
+// members reached through it are still the collection's. A pointer is the one shape
+// that changes: `Foo* p` slices to `Foo[]`.
+fn TypeInfo slice_of(TypeInfo t)
+{
+	if (!t.is_pointer) return t;
+	TypeInfo out   = t;
+	out.is_pointer = false;
+	out.is_array   = true;
+	out.is_slice   = true;
+	return out;
+}
+
+// Whether the bracket pair `lbracket`..`rbracket` holds a range rather than a single
+// index — `[a..b]`, `[a:n]`, `[..b]`, `[a..]`, `[..]`. Only the top level counts, so a
+// nested index (`xs[ys[a..b].len]`) does not make the outer pair a range. A `:` is
+// read as a range separator only when no `?` precedes it at the same level, which
+// leaves a ternary index (`xs[c ? a : b]`) reading as the single index it is.
+fn bool TokenList.brackets_hold_range(&self, sz lbracket, sz rbracket)
+{
+	bool ternary = false;
+	sz depth     = 0;
+	for (sz j = lbracket + 1; j < rbracket; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == LPAREN || t == LBRACKET || t == LBRACE || t == LVEC)
+		{
+			depth++;
+			continue;
+		}
+		if (t == RPAREN || t == RBRACKET || t == RBRACE || t == RVEC)
+		{
+			if (depth > 0) depth--;
+			continue;
+		}
+		if (depth != 0) continue;
+		if (t == DOTDOT) return true;
+		if (t == QUESTION) ternary = true;
+		if (t == COLON && !ternary) return true;
+	}
+	return false;
+}
+
 // The declared type of `field` on `parent`, following `parent`'s aliases when the
 // name itself carries no fields. Arrays have no named members, so they yield nothing.
 fn TypeInfo TokenList.field_type_of(&self, TypeInfo parent, String field, String uri, DocumentList* docs, String stdlib_path)
@@ -728,17 +772,14 @@ fn TypeInfo TokenList.expr_type(&self, sz last, String uri, DocumentList* docs, 
 		case RPAREN:
 			return self.paren_expr_type(last, uri, docs, stdlib_path, depth);
 		case RBRACKET:
-			// `xs[i]` and `xs[a..b]` — either way the members reached through it are
-			// the element's.
+			// `xs[i]` yields an element, but `xs[a..b]` / `xs[a:n]` yields another
+			// slice of the same thing — `line[p..].trim()` calls String.trim, not
+			// char.trim, so the two cases cannot share an answer.
 			sz open = self.match_lbracket_back(last);
 			if (open >= self.size || open == 0) return {};
-			return self.element_type_of(
-				self.expr_type(open - 1, uri, docs, stdlib_path, depth + 1),
-				uri,
-				docs,
-				stdlib_path,
-				depth
-			);
+			TypeInfo indexed = self.expr_type(open - 1, uri, docs, stdlib_path, depth + 1);
+			if (self.brackets_hold_range(open, last)) return slice_of(indexed);
+			return self.element_type_of(indexed, uri, docs, stdlib_path, depth);
 		case TYPE_IDENT:
 			// A type name used as a namespace: `Color.RED`, `Foo.static_method()`.
 			TypeInfo named = { .name = t.text };
@@ -853,11 +894,11 @@ fn TypeInfo TokenList.paren_expr_type(
 // underlying type as often as on the alias.
 fn TypeInfo TokenList.call_return_type(&self, TypeInfo recv, String name, String uri, DocumentList* docs, String stdlib_path)
 {
-	String ret = self.resolve_call_return_type_across(recv.name, name, uri, docs);
+	String ret = self.resolve_call_return_type_across(recv.name, name, uri, docs, stdlib_path);
 	if (ret.len == 0 && recv.known())
 	{
 		TypeInfo base = self.canonical_type(recv.name, uri, docs, stdlib_path);
-		if (base.name != recv.name) ret = self.resolve_call_return_type_across(base.name, name, uri, docs);
+		if (base.name != recv.name) ret = self.resolve_call_return_type_across(base.name, name, uri, docs, stdlib_path);
 	}
 	if (ret.len == 0) return {};
 	return { .name = ret };
