@@ -660,3 +660,59 @@ fn void test_definition_module_full_qualifier() @test {
 	assert(result.contains(`"line":0`), "got: %s", result);
 	ds.close("file:///io.c3");
 }
+
+// A `try` binding declares a name without writing a type, so the type-adjacency
+// check never saw it — issue #16, sub-issue 7.
+fn void test_definition_try_binding() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Obj {}\nfn Obj? get() { return (Obj){}; }\nfn void t() { if (try id_obj = get()) { Obj x = id_obj; } }";
+	sz offset = 108;
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":3`), "got: %s", result);
+	assert(result.contains(`"character":22`), "got: %s", result);
+}
+
+// A method on a `try`-bound local: the binding's type is the success type of the
+// optional on the right of the `=`.
+fn void test_definition_try_binding_member() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Obj {}\nfn void Obj.close(&self) {}\nfn Obj? get() { return (Obj){}; }\nfn void t() { if (try id_obj = get()) { id_obj.close(); } }";
+	sz offset = 135;
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":2`), "got: %s", result);
+	assert(result.contains(`"character":12`), "got: %s", result);
+}
+
+// `catch` binds a name the same way `try` does.
+fn void test_definition_catch_binding() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nfn int? get() { return 1; }\nfn void t() { if (catch err = get()) { fault f = err; } }";
+	sz offset = 89;
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":2`), "got: %s", result);
+	assert(result.contains(`"character":24`), "got: %s", result);
+}
+
+// `if (try x)` tests an optional declared elsewhere rather than binding a new
+// name, so it must not claim to be x's declaration. The `=` is what distinguishes
+// the two.
+fn void test_definition_bare_try_is_not_a_binding() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "module app;\nstruct Obj {}\nfn void t() { Obj? x = (Obj){}; if (try x) { } Obj y = x; }";
+	sz offset = 81;
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":2`), "got: %s", result);
+	assert(result.contains(`"character":19`), "got: %s", result);
+}

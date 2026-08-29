@@ -1763,6 +1763,13 @@ fn sz? TokenList.find_local_declaration(&self, String name, sz target_idx)
 		TokenType next = self.entries[i + 1].type;
 		if (next != EOS && next != EQ && next != COMMA && next != RPAREN) continue;
 
+		// `try name = ...` / `catch name = ...` bind a name without writing a
+		// type. The `=` is what makes it a binding: bare `if (try x)` tests an
+		// optional that was declared elsewhere, and must not claim to be x's
+		// declaration.
+		TokenType lead = self.entries[i - 1].type;
+		if ((lead == TRY || lead == CATCH) && next == EQ) return i;
+
 		// The left side must be a type, across `?`/`*` suffixes and a generic
 		// `{...}` block — exactly the declaration shapes the file-global loops
 		// cannot see (io.c3: `sz? len`).

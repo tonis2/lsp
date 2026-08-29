@@ -294,6 +294,53 @@ fn TypeInfo TokenList.foreach_binding_type(
 	return decl;
 }
 
+// The type `try name = <expr>` at `try_idx` binds — the success type of the optional
+// on the right, which is what `expr_type` already reports for a call to `fn Foo? f()`.
+//
+// Only the `=` form binds: bare `if (try x)` tests an optional declared elsewhere.
+// `catch` is not read here because it binds a fault rather than a value.
+fn TypeInfo TokenList.try_binding_type(
+	&self,
+	sz try_idx,
+	String var_name,
+	String uri,
+	DocumentList* docs,
+	String stdlib_path,
+	int depth
+)
+{
+	TypeInfo none;
+	sz name_idx = try_idx + 1;
+	if (name_idx + 1 >= self.size) return none;
+	if (!is_ident(self.entries[name_idx].type) || self.entries[name_idx].text != var_name) return none;
+	if (self.entries[name_idx + 1].type != EQ) return none;
+
+	// The initialiser runs to the end of the condition: the `)` that closes the
+	// enclosing `if (`/`while (`, or a `,` separating further bindings.
+	sz d    = 0;
+	sz last = name_idx + 1;
+	for (sz j = name_idx + 2; j < self.size; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == LPAREN || t == LBRACKET || t == LBRACE || t == LVEC)
+		{
+			d++;
+		}
+		else if (t == RPAREN || t == RBRACKET || t == RBRACE || t == RVEC)
+		{
+			if (d == 0) break;
+			d--;
+		}
+		else if (d == 0 && (t == EOS || t == COMMA))
+		{
+			break;
+		}
+		last = j;
+	}
+	if (last <= name_idx + 1) return none;
+	return self.expr_type(last, uri, docs, stdlib_path, depth + 1);
+}
+
 // The type bound to `var_name` at token `before_idx`, searched within the enclosing
 // function only. The nearest preceding binding wins, so a shadowing local beats the
 // parameter it shadows and a `foreach` variable beats a same-named one declared above
@@ -319,6 +366,12 @@ fn TypeInfo TokenList.scoped_var_type(
 		{
 			TypeInfo fe = self.foreach_binding_type(i, var_name, uri, docs, stdlib_path, depth);
 			if (fe.known()) best = fe;
+			continue;
+		}
+		if (lead == TRY)
+		{
+			TypeInfo tb = self.try_binding_type(i, var_name, uri, docs, stdlib_path, depth);
+			if (tb.known()) best = tb;
 			continue;
 		}
 		if (lead != TYPE_IDENT && !is_builtin_type_token(lead)) continue;
