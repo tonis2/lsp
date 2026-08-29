@@ -144,17 +144,14 @@ fn void encode_signature_help(
 	sz mt_count = 0;
 	if (is_method && docs != null)
 	{
-		String recv = stream.tokens.resolve_receiver_type(call_name_idx, uri, docs);
+		String recv = stream.tokens.resolve_receiver_type(call_name_idx, uri, docs, stdlib_path);
 		if (recv.len > 0)
 		{
 			method_types[mt_count++] = recv;
-			String resolved = stream.tokens.resolve_type_alias_across(recv, docs);
-			if (resolved.len == 0 && uri.len > 0)
-			{
-				String fp = uri_to_path(uri);
-				if (fp.len > 0) resolved = resolve_alias_in_project(fp, recv);
-			}
-			if (resolved.len > 0 && resolved != recv) method_types[mt_count++] = resolved;
+			// Follow the alias chain, stdlib included — methods are declared on the
+			// underlying type as often as on the alias.
+			TypeInfo base = stream.tokens.canonical_type(recv, uri, docs, stdlib_path);
+			if (base.name != recv) method_types[mt_count++] = base.name;
 		}
 	}
 	if (mt_count == 0) method_types[mt_count++] = "";

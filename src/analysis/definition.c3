@@ -254,6 +254,19 @@ fn bool ProjectDirs.is_vendored_lib(&self, String lib_name, sz limit)
 
 // Find project root and collect all search directories from project.json.
 // Includes dependency-search-paths, sources dirs, and build/unpacked_c3l.
+// Add the directory `file_path` lives in, expressed relative to the project root.
+// Does nothing when the file is outside the project root (it is then reached through
+// a search dir already, or not at all).
+fn void ProjectDirs.add_own_dir(&self, String file_path)
+{
+	String own = parent_dir(file_path);
+	if (own.len <= self.project_root.len || !own.starts_with(self.project_root)) return;
+
+	String rel = own[self.project_root.len..];
+	while (rel.len > 0 && is_path_separator(rel[0])) rel = rel[1..];
+	if (rel.len > 0) self.add_search_dir(rel);
+}
+
 fn void ProjectDirs.get_search_dirs(&self, String file_path)
 {
 	self.project_root = "";
@@ -336,6 +349,14 @@ fn void ProjectDirs.get_search_dirs(&self, String file_path)
 		self.add_search_dir("src");
 		self.add_search_dir("lib");
 	}
+
+	// The directory holding the file being edited. A manifest names the directories
+	// the *build* compiles, which is not the same set as the directories a developer
+	// edits: tests, examples and scratch programs live outside `sources` and would
+	// otherwise resolve nothing declared beside them. add_search_dir drops it again
+	// when an existing entry already covers it, so this costs nothing for a file that
+	// is part of the build.
+	self.add_own_dir(file_path);
 
 	// Always include unpacked c3l libraries, minus the ones already vendored above.
 	self.add_unpacked_c3l_dirs();
@@ -480,71 +501,12 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 // fixed-size array or vector — the distinction that decides whether `.ptr` is valid.
 fn String TokenList.find_variable_type(&self, String var_name, bool* is_array = null, bool* is_slice = null)
 {
-	for (sz i = 0; i + 1 < self.size; i++)
-	{
-		TokenType lead = self.get(i).type;
-		if (lead != TYPE_IDENT && !is_builtin_type_token(lead)) continue;
-
-		// Skip an optional generic instantiation block: TYPE_IDENT{...}
-		sz after = i + 1;
-		if (self.entries[after].type == LBRACE)
-		{
-			after = self.match_rbrace(after);
-			if (after >= self.size) continue;
-			after++; // position just past the closing '}'
-		}
-
-		// Pointer/optional/array suffixes in any combination: TYPE_IDENT{...}[*][?][[N]] var
-		bool arr = false;
-		bool slice = false;
-		while (after < self.size)
-		{
-			TokenType at = self.entries[after].type;
-			if (at == STAR || at == QUESTION)
-			{
-				after++;
-				continue;
-			}
-			if (at == LBRACKET)
-			{
-				sz close = self.match_rbracket(after);
-				if (close >= self.size) break;
-				if (!arr) slice = (after + 1 == close); // classify by the first bracket pair
-				arr = true;
-				after = close + 1;
-				continue;
-			}
-			if (at == LVEC)
-			{
-				// Vector suffix `[<N>]` — lexed as its own LVEC/RVEC pair, distinct
-				// from LBRACKET/RBRACKET, and never a slice.
-				sz close = after + 1;
-				while (close < self.size && self.entries[close].type != RVEC) close++;
-				if (close >= self.size) break;
-				if (!arr) slice = false;
-				arr = true;
-				after = close + 1;
-				continue;
-			}
-			break;
-		}
-
-		if (after < self.size && is_ident(self.entries[after].type) && self.entries[after].text == var_name)
-		{
-			if (arr && is_array == null) continue;
-			if (after + 1 < self.size)
-			{
-				TokenType next = self.entries[after + 1].type;
-				if (next == EOS || next == EQ || next == COMMA || next == DOT || next == RPAREN)
-				{
-					if (is_array) *is_array = arr;
-					if (is_slice) *is_slice = slice;
-					return self.get(i).text;
-				}
-			}
-		}
-	}
-	return "";
+	TypeInfo t = self.file_var_type(var_name);
+	if (!t.known()) return "";
+	if (t.is_array && is_array == null) return ""; // caller cannot handle arrays
+	if (is_array) *is_array = t.is_array;
+	if (is_slice) *is_slice = t.is_slice;
+	return t.name;
 }
 
 // Resolve a type alias to its base type name.
@@ -560,21 +522,6 @@ fn String TokenList.resolve_type_alias(&self, String type_name)
 		{
 			return self.entries[i + 3].text;
 		}
-	}
-	return "";
-}
-
-// Resolve a type alias searching current tokens + all open documents.
-fn String TokenList.resolve_type_alias_across(&self, String type_name, DocumentList* docs)
-{
-	String resolved = self.resolve_type_alias(type_name);
-	if (resolved.len > 0) return resolved;
-
-	for (sz d = 0; d < docs.size; d++)
-	{
-		TokenStream* doc_stream = docs.entries[d].get_tokens();
-		resolved = doc_stream.tokens.resolve_type_alias(type_name);
-		if (resolved.len > 0) return resolved;
 	}
 	return "";
 }
@@ -605,14 +552,6 @@ fn bool StringScan.visit(&self, String path, String content, TokenStream* stream
 fn String query_type_alias(TokenList* tokens, String type_name, String unused) @private
 {
 	return tokens.resolve_type_alias(type_name);
-}
-
-// Resolve alias by scanning project files on disk.
-fn String resolve_alias_in_project(String file_path, String type_name)
-{
-	StringScan scan = { &query_type_alias, type_name, "", "" };
-	scan_project_dirs(file_path, &scan);
-	return scan.result;
 }
 
 <*
@@ -651,90 +590,34 @@ fn String resolve_alias_anywhere(String type_name, DocumentList* docs, String an
 // Handles chained access: for stream.tokens.method(), resolves stream→TokenStream,
 // then TokenStream.tokens→TokenList, returning "TokenList".
 // Returns the type name (e.g. "TokenStream"), or empty string if not resolvable.
-fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, DocumentList* docs, int depth = 0)
+fn String TokenList.resolve_receiver_type(
+	&self,
+	sz cursor_idx,
+	String uri,
+	DocumentList* docs,
+	String stdlib_path = "",
+	int depth = 0
+)
 {
 	if (cursor_idx < 2) return "";
-	if (depth > 32) return ""; // bound recursion on pathological chains
 	if (self.entries[cursor_idx - 1].type != DOT) return "";
 
-	Token recv = self.entries[cursor_idx - 2];
+	TypeInfo t = self.expr_type(cursor_idx - 2, uri, docs, stdlib_path, depth);
+	// An array receiver carries no named declarations of its own — only the
+	// compiler-builtin `.len`/`.ptr` — so callers must not be handed its element
+	// type as though members could be looked up on it.
+	if (t.is_array) return "";
+	return t.name;
+}
 
-	// Receiver is a call expression: `foo(...).` or `recv.method(...).`. Resolve the
-	// call's return type and use it as the receiver type. The recursion below walks
-	// fluent builder chains (`builder().setA(..).setB(..).build(..)`) link by link.
-	if (recv.type == RPAREN)
-	{
-		if (try lparen = self.match_paren_backward(cursor_idx - 2))
-		{
-			if (lparen == 0) return "";
-			sz name_idx = lparen - 1;
-			// Generic function call `name{Args}(...)`: step back over the `{...}`
-			// block so the callee name (before `{`), not the closing brace, is used.
-			if (self.entries[name_idx].type == RBRACE)
-			{
-				sz lbrace = self.match_lbrace_back(name_idx);
-				if (lbrace >= self.size || lbrace == 0) return "";
-				name_idx = lbrace - 1;
-			}
-			Token callee = self.entries[name_idx];
-			if (!is_ident(callee.type)) return "";
-			if (name_idx >= 1 && self.entries[name_idx - 1].type == DOT)
-			{
-				// Method call — resolve the method's own receiver type first, then its return type.
-				String inner = self.resolve_receiver_type(name_idx, uri, docs, depth + 1);
-				if (inner.len == 0) return "";
-				return self.resolve_call_return_type_across(inner, callee.text, uri, docs);
-			}
-			// Free function call (possibly module-qualified, e.g. `mod::fn(..)`).
-			return self.resolve_call_return_type_across("", callee.text, uri, docs);
-		}
-		return "";
-	}
-
-	if (!is_ident(recv.type) && recv.type != TYPE_IDENT && recv.type != CONST_IDENT) return "";
-
-	// If receiver is a TYPE_IDENT, it IS the type (e.g. Type.CONSTANT)
-	if (recv.type == TYPE_IDENT) return recv.text;
-
-	String type_name;
-
-	// Check if receiver is itself a chained access (e.g. stream.tokens in stream.tokens.method)
-	if (cursor_idx >= 4 && self.entries[cursor_idx - 3].type == DOT)
-	{
-		// Recursively resolve the chain
-		String parent_type = self.resolve_receiver_type(cursor_idx - 2, uri, docs, depth + 1);
-		if (parent_type.len > 0)
-		{
-			// For struct field lookup, resolve aliases (e.g. LineOffsets → List)
-			String resolved_parent = self.resolve_type_alias_across(parent_type, docs);
-			if (resolved_parent.len == 0)
-			{
-				String file_path = uri_to_path(uri);
-				if (file_path.len > 0)
-				{
-					resolved_parent = resolve_alias_in_project(file_path, parent_type);
-				}
-			}
-			String lookup_type = resolved_parent.len > 0 ? resolved_parent : parent_type;
-			type_name = self.resolve_field_type_across(lookup_type, recv.text, uri, docs);
-		}
-	}
-
-	// If chain resolution didn't work, try as a local variable
-	if (type_name.len == 0)
-	{
-		type_name = self.find_variable_type(recv.text);
-	}
-
-	// Handle "self" — find enclosing fn Type.method(&self) and extract Type
-	if (type_name.len == 0 && recv.text == "self")
-	{
-		type_name = self.find_enclosing_method_type(recv.offset);
-	}
-
-	if (type_name.len == 0) return "";
-
-	return type_name;
+// The full inferred type of the dot-completion receiver at cursor_idx, including the
+// array/generic facts `resolve_receiver_type` drops. Callers that need to know the
+// receiver is a collection (or which module its type came from) use this instead.
+fn TypeInfo TokenList.receiver_type_info(&self, sz cursor_idx, String uri, DocumentList* docs, String stdlib_path = "")
+{
+	if (cursor_idx < 2) return {};
+	if (self.entries[cursor_idx - 1].type != DOT) return {};
+	return self.expr_type(cursor_idx - 2, uri, docs, stdlib_path);
 }
 
 // Whether the dot-completion receiver at cursor_idx (the token AFTER the DOT) is
@@ -747,39 +630,19 @@ fn String TokenList.resolve_receiver_type(&self, sz cursor_idx, String uri, Docu
 // find_variable_type/find_struct_field_type's `is_array == null` guards). Only the
 // current file's tokens are consulted — a struct defined in another file with an
 // array field is not detected, so completions may be missing (never wrong) there.
-fn bool TokenList.is_receiver_array(&self, sz cursor_idx, String uri, DocumentList* docs, bool* is_slice)
+fn bool TokenList.is_receiver_array(
+	&self,
+	sz cursor_idx,
+	String uri,
+	DocumentList* docs,
+	bool* is_slice,
+	String stdlib_path = ""
+)
 {
-	if (cursor_idx < 2) return false;
-	if (self.entries[cursor_idx - 1].type != DOT) return false;
-	Token recv = self.entries[cursor_idx - 2];
-	if (!is_ident(recv.type)) return false;
-
-	bool is_array;
-	bool slice;
-
-	// Chained: `a.b.` (including `self.b.`) — resolve a's type, then look up b as a field.
-	if (cursor_idx >= 4 && self.entries[cursor_idx - 3].type == DOT)
-	{
-		String parent_type = self.resolve_receiver_type(cursor_idx - 2, uri, docs);
-		if (parent_type.len == 0) return false;
-		String resolved_parent = self.resolve_type_alias_across(parent_type, docs);
-		String lookup_type = resolved_parent.len > 0 ? resolved_parent : parent_type;
-
-		String field_type = self.find_struct_field_type(lookup_type, recv.text, &is_array, &slice);
-		if (field_type.len == 0 && lookup_type != parent_type)
-		{
-			field_type = self.find_struct_field_type(parent_type, recv.text, &is_array, &slice);
-		}
-		if (field_type.len == 0) return false;
-		if (is_slice) *is_slice = slice;
-		return is_array;
-	}
-
-	// Plain local variable or parameter declared in this file.
-	String type_name = self.find_variable_type(recv.text, &is_array, &slice);
-	if (type_name.len == 0) return false;
-	if (is_slice) *is_slice = slice;
-	return is_array;
+	TypeInfo t = self.receiver_type_info(cursor_idx, uri, docs, stdlib_path);
+	if (!t.is_array) return false;
+	if (is_slice) *is_slice = t.is_slice;
+	return true;
 }
 
 // Walk backward from token index `start` (inclusive) to the '{' that opens the
@@ -842,7 +705,8 @@ fn String TokenList.resolve_initializer_type(
 	String uri,
 	DocumentList* docs,
 	sz* lbrace_out = null,
-	int depth = 0
+	int depth = 0,
+	String stdlib_path = ""
 )
 {
 	if (cursor_idx < 2) return "";
@@ -852,20 +716,19 @@ fn String TokenList.resolve_initializer_type(
 	sz lb = self.enclosing_lbrace_back(cursor_idx - 2);
 	if (lb >= self.size) return "";
 
-	bool is_array;
-	String type_name = self.initializer_type_at(lb, uri, docs, &is_array, depth);
-	if (type_name.len == 0 || is_array) return "";
+	TypeInfo t = self.initializer_type_at(lb, uri, docs, stdlib_path, depth);
+	if (!t.known() || t.is_array) return "";
 	if (lbrace_out) *lbrace_out = lb;
-	return type_name;
+	return t.name;
 }
 
 // Determine the type of the initializer list whose opening '{' is at index lb, from
-// what precedes the brace. *is_array is set when that type is an array (`Opt[4] v = {`),
-// whose elements — not fields — the braces initialize.
-fn String TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList* docs, bool* is_array, int depth)
+// what precedes the brace. The result is flagged as an array (`Opt[4] v = {`) when the
+// braces initialize elements rather than fields — designators are `[index] =` there,
+// not `.field`, so callers treat that as "not a struct initializer".
+fn TypeInfo TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList* docs, String stdlib_path, int depth)
 {
-	*is_array = false;
-	if (depth > 8 || lb < 1) return "";
+	if (depth > 8 || lb < 1) return {};
 	Token before = self.entries[lb - 1];
 
 	if (before.type == RPAREN)
@@ -873,78 +736,69 @@ fn String TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList* 
 		// Compound literal `(Type){ .field`, optionally module-qualified and/or an
 		// array: `(mod::Type[4]){`. Nothing else may appear inside the parens, so a
 		// function-body brace after a parameter list (`fn void f(Foo x) { .`) never matches.
-		if (try lparen = self.match_paren_backward(lb - 1))
+		sz? matched = self.match_paren_backward(lb - 1);
+		if (catch matched) return {};
+		sz lparen = matched;
+		if (lparen == 0) return {};
+		sz last = lb - 2; // last token inside the parens
+		if (last <= lparen) return {};
+		bool arr = false;
+		if (self.entries[last].type == RBRACKET)
 		{
-			if (lparen == 0) return "";
-			sz last = lb - 2; // last token inside the parens
-			if (last <= lparen) return "";
-			bool arr = false;
-			if (self.entries[last].type == RBRACKET)
-			{
-				sz lbk = self.match_lbracket_back(last);
-				if (lbk >= self.size || lbk <= lparen + 1) return "";
-				arr = true;
-				last = lbk - 1;
-			}
-			if (self.entries[last].type != TYPE_IDENT) return "";
-			// Only `mod::` qualifier segments may precede the type name.
-			if ((last - (lparen + 1)) % 2 != 0) return "";
-			for (sz q = lparen + 1; q < last; q += 2)
-			{
-				if (self.entries[q].type != IDENT || self.entries[q + 1].type != SCOPE) return "";
-			}
-			*is_array = arr;
-			return self.entries[last].text;
+			sz lbk = self.match_lbracket_back(last);
+			if (lbk >= self.size || lbk <= lparen + 1) return {};
+			arr  = true;
+			last = lbk - 1;
 		}
-		return "";
+		if (self.entries[last].type != TYPE_IDENT) return {};
+		// Only `mod::` qualifier segments may precede the type name.
+		if ((last - (lparen + 1)) % 2 != 0) return {};
+		for (sz q = lparen + 1; q < last; q += 2)
+		{
+			if (self.entries[q].type != IDENT || self.entries[q + 1].type != SCOPE) return {};
+		}
+		return { .name = self.entries[last].text, .is_array = arr };
 	}
 
 	if (before.type == TYPE_IDENT)
 	{
 		// `Type { .field }` compound-literal form.
-		return before.text;
+		return { .name = before.text };
 	}
 
 	if (before.type == RBRACKET)
 	{
 		// `Type[4] { ... }` — array compound-literal form.
 		sz lbk = self.match_lbracket_back(lb - 1);
-		if (lbk >= self.size || lbk == 0) return "";
-		if (self.entries[lbk - 1].type != TYPE_IDENT) return "";
-		*is_array = true;
-		return self.entries[lbk - 1].text;
+		if (lbk >= self.size || lbk == 0) return {};
+		if (self.entries[lbk - 1].type != TYPE_IDENT) return {};
+		return { .name = self.entries[lbk - 1].text, .is_array = true };
 	}
 
 	if (before.type == EQ && lb >= 2)
 	{
 		// `= { .field` — variable initializer, assignment, or nested designator.
 		Token target = self.entries[lb - 2];
-		if (!is_ident(target.type) && target.type != CONST_IDENT) return "";
+		if (!is_ident(target.type) && target.type != CONST_IDENT) return {};
 
 		if (lb >= 3 && self.entries[lb - 3].type == DOT)
 		{
 			// Nested designator `.outer = { .inner` — resolve the enclosing
 			// initializer's type, then the designated field's type within it.
-			String outer = self.resolve_initializer_type(lb - 2, uri, docs, null, depth + 1);
-			if (outer.len == 0) return "";
-			String resolved = self.resolve_type_alias_across(outer, docs);
-			if (resolved.len == 0)
-			{
-				String file_path = uri_to_path(uri);
-				if (file_path.len > 0) resolved = resolve_alias_in_project(file_path, outer);
-			}
-			String lookup = resolved.len > 0 ? resolved : outer;
-			return self.resolve_field_type_across(lookup, target.text, uri, docs, is_array);
+			String outer = self.resolve_initializer_type(lb - 2, uri, docs, null, depth + 1, stdlib_path);
+			if (outer.len == 0) return {};
+			return self.field_type_of({ .name = outer }, target.text, uri, docs, stdlib_path);
 		}
 
-		// `Type var = { .field` / `var = { .field` — find the declared type.
-		String type_name = self.find_variable_type(target.text, is_array);
-		// Declarations find_variable_type misses (e.g. `const Foo BAR = {`).
-		if (type_name.len == 0 && lb >= 3 && self.entries[lb - 3].type == TYPE_IDENT)
-		{
-			type_name = self.entries[lb - 3].text;
-		}
-		return type_name;
+		// `Type var = { .field` / `var = { .field` — find the declared type. The
+		// assigned-to variable may also be an element or field expression
+		// (`xs[i] = { .field`, `self.thing = { .field`).
+		TypeInfo declared = self.expr_type(lb - 2, uri, docs, stdlib_path, depth + 1);
+		if (declared.known()) return declared;
+
+		// Declarations expr_type misses (e.g. `const Foo BAR = {`).
+		if (lb >= 3 && self.entries[lb - 3].type == TYPE_IDENT) return { .name = self.entries[lb - 3].text };
+		return {};
 	}
 
 	if (before.type == LBRACE || before.type == COMMA)
@@ -955,14 +809,25 @@ fn String TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList* 
 		// initializer is not resolvable without field-ordinal tracking — skip it
 		// rather than offer the wrong struct's fields.
 		sz outer = self.enclosing_lbrace_back(lb - 1);
-		if (outer >= self.size) return "";
-		bool outer_is_array;
-		String outer_type = self.initializer_type_at(outer, uri, docs, &outer_is_array, depth + 1);
-		if (outer_type.len == 0 || !outer_is_array) return "";
-		return outer_type;
+		if (outer < self.size)
+		{
+			TypeInfo outer_type = self.initializer_type_at(outer, uri, docs, stdlib_path, depth + 1);
+			if (outer_type.known() && outer_type.is_array) return { .name = outer_type.name };
+			return {};
+		}
+		// No enclosing initializer — a `{` after a comma is then a later argument of
+		// a call, e.g. `f(a, { .field = 1 })`.
 	}
 
-	return "";
+	// An initializer written straight as a call argument (`out.push({ .name = ... })`)
+	// takes its type from the parameter it is passed to, which is where most struct
+	// literals in real code appear.
+	if (before.type == LPAREN || before.type == COMMA)
+	{
+		return self.call_argument_init_type(lb, uri, docs, stdlib_path, depth + 1);
+	}
+
+	return {};
 }
 
 // Find the type of the enclosing method for "self" resolution.
@@ -1001,78 +866,11 @@ fn String TokenList.find_enclosing_method_type(&self, sz offset)
 	return "";
 }
 
-// Resolve the type of a struct field across current file, open docs, and project files.
-fn String TokenList.resolve_field_type_across(
-	&self,
-	String struct_type,
-	String field_name,
-	String uri,
-	DocumentList* docs,
-	bool* is_array = null
-)
-{
-	if (is_array) *is_array = false;
-
-	// 1. Current file
-	String result = self.find_struct_field_type(struct_type, field_name, is_array);
-	if (result.len > 0) return result;
-
-	// 2. Open documents
-	for (sz d = 0; d < docs.size; d++)
-	{
-		TokenStream* doc_stream = docs.entries[d].get_tokens();
-		result = doc_stream.tokens.find_struct_field_type(struct_type, field_name, is_array);
-		if (result.len > 0) return result;
-	}
-
-	// 3. Project files on disk
-	String file_path = uri_to_path(uri);
-	if (file_path.len > 0)
-	{
-		result = resolve_field_type_in_project(file_path, struct_type, field_name);
-		if (result.len > 0) return result;
-		// The scan query cannot carry the array flag, so array fields need a
-		// second, array-only pass.
-		if (is_array)
-		{
-			StringScan scan = { &query_field_type_array, struct_type, field_name, "" };
-			scan_project_dirs(file_path, &scan);
-			if (scan.result.len > 0)
-			{
-				*is_array = true;
-				return scan.result;
-			}
-		}
-	}
-
-	return "";
-}
-
-fn String query_field_type(TokenList* tokens, String struct_type, String field_name) @private
-{
-	return tokens.find_struct_field_type(struct_type, field_name);
-}
-
-// Matches only array-typed fields — the non-array query skips them.
-fn String query_field_type_array(TokenList* tokens, String struct_type, String field_name) @private
-{
-	bool arr;
-	String result = tokens.find_struct_field_type(struct_type, field_name, &arr);
-	return arr ? result : "";
-}
-
-fn String resolve_field_type_in_project(String file_path, String struct_type, String field_name) @private
-{
-	StringScan scan = { &query_field_type, struct_type, field_name, "" };
-	scan_project_dirs(file_path, &scan);
-	return scan.result;
-}
-
 // Detect method call context (IDENT DOT IDENT) and resolve the receiver type.
 // Returns the resolved type name (e.g. "List"), or empty string if not a method call.
-fn String TokenList.resolve_method_type(&self, sz cursor_idx, String uri, DocumentList* docs)
+fn String TokenList.resolve_method_type(&self, sz cursor_idx, String uri, DocumentList* docs, String stdlib_path = "")
 {
-	return self.resolve_receiver_type(cursor_idx, uri, docs);
+	return self.resolve_receiver_type(cursor_idx, uri, docs, stdlib_path);
 }
 
 // Find the matching '(' for the ')' at rparen_idx by scanning left with paren depth.
@@ -1227,76 +1025,12 @@ fn String resolve_return_type_in_project(String file_path, String type_name, Str
 // or vector — the distinction that decides whether `.ptr` is valid.
 fn String TokenList.find_struct_field_type(&self, String type_name, String field_name, bool* is_array = null, bool* is_slice = null)
 {
-	for (sz i = 0; i + 1 < self.size; i++)
-	{
-		TokenType kw = self.entries[i].type;
-		if (kw != STRUCT && kw != BITSTRUCT && kw != UNION) continue;
-		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
-
-		sz brace = i + 2;
-		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
-		if (brace >= self.size) continue;
-
-		sz depth = 1;
-		for (sz j = brace + 1; j < self.size && depth > 0; j++)
-		{
-			if (self.entries[j].type == LBRACE)
-			{
-				depth++;
-				continue;
-			}
-			if (self.entries[j].type == RBRACE)
-			{
-				depth--;
-				continue;
-			}
-			if (depth == 1 && is_ident(self.entries[j].type) && self.entries[j].text == field_name)
-			{
-				if (j == 0) continue;
-				// The type sits just before the field name; step over an optional
-				// pointer `*`, an optional array suffix `[4]`, and an optional
-				// generic block `{...}` (e.g. List{int} lst).
-				sz prev  = j - 1;
-				bool arr = false;
-				bool slice = false;
-				if (prev > 0 && self.entries[prev].type == STAR) prev--;
-				if (prev > 0 && self.entries[prev].type == RBRACKET)
-				{
-					sz lbk = self.match_lbracket_back(prev);
-					if (lbk >= self.size || lbk == 0) continue;
-					arr = true;
-					slice = (lbk + 1 == prev);
-					prev = lbk - 1;
-				}
-				else if (prev > 0 && self.entries[prev].type == RVEC)
-				{
-					// Vector suffix `[<N>]` — lexed as its own LVEC/RVEC pair,
-					// distinct from LBRACKET/RBRACKET, and never a slice.
-					sz lv = prev;
-					while (lv > 0 && self.entries[lv].type != LVEC) lv--;
-					if (self.entries[lv].type != LVEC) continue;
-					arr = true;
-					prev = lv - 1;
-				}
-				if (prev > 0 && self.entries[prev].type == STAR) prev--;
-				if (arr && is_array == null) continue; // caller cannot handle array fields
-				if (prev > 0 && self.entries[prev].type == RBRACE)
-				{
-					sz lbrace = self.match_lbrace_back(prev);
-					if (lbrace >= self.size || lbrace == 0) continue;
-					prev = lbrace - 1;
-				}
-				TokenType lead = self.entries[prev].type;
-				if (lead == TYPE_IDENT || is_builtin_type_token(lead))
-				{
-					if (is_array) *is_array = arr;
-					if (is_slice) *is_slice = slice;
-					return self.entries[prev].text;
-				}
-			}
-		}
-	}
-	return "";
+	TypeInfo t = self.field_decl_type(type_name, field_name);
+	if (!t.known()) return "";
+	if (t.is_array && is_array == null) return ""; // caller cannot handle array fields
+	if (is_array) *is_array = t.is_array;
+	if (is_slice) *is_slice = t.is_slice;
+	return t.name;
 }
 
 // Whether `type_name` is declared as a typedef of an inline builtin slice
@@ -1348,37 +1082,10 @@ fn bool TokenList.find_inline_slice_typedef(&self, String type_name, bool* is_sl
 // Find a struct field declaration: struct/bitstruct/union TypeName { ... field_name ... }
 fn sz? TokenList.find_struct_field(&self, String type_name, String field_name)
 {
-	for (sz i = 0; i + 1 < self.size; i++)
+	self.@each_struct_member(type_name, null; sz j)
 	{
-		TokenType kw = self.entries[i].type;
-		if (kw != STRUCT && kw != BITSTRUCT && kw != UNION) continue;
-		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
-
-		// Find opening brace
-		sz brace = i + 2;
-		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
-		if (brace >= self.size) continue;
-
-		// Scan struct body for the field name (depth 1 only)
-		sz depth = 1;
-		for (sz j = brace + 1; j < self.size && depth > 0; j++)
-		{
-			if (self.entries[j].type == LBRACE)
-			{
-				depth++;
-				continue;
-			}
-			if (self.entries[j].type == RBRACE)
-			{
-				depth--;
-				continue;
-			}
-			if (depth == 1 && is_ident(self.entries[j].type) && self.entries[j].text == field_name)
-			{
-				return j;
-			}
-		}
-	}
+		if (self.entries[j].text == field_name) return j;
+	};
 	return TOKEN_NOT_FOUND~;
 }
 
@@ -1546,11 +1253,12 @@ fn bool TokenList.try_find_definition(
 	DString* out,
 	String method_type = "",
 	String module_filter = "",
-	ModuleCtx* ctx = null
+	ModuleCtx* ctx = null,
+	bool method_recv_array = false
 )
 {
 	// 1. Search current file (its declarations are always visible to itself)
-	if (try decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type, module_filter))
+	if (try decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type, module_filter, method_recv_array))
 	{
 		if (decl_idx != cursor_idx)
 		{
@@ -1573,7 +1281,12 @@ fn bool TokenList.try_find_definition(
 
 		TokenStream* other_stream = docs.entries[d].get_tokens();
 
-		if (try found = other_stream.tokens.find_declaration_in(cursor_tok, method_type, module_filter))
+		if (try found = other_stream.tokens.find_declaration_in(
+			cursor_tok,
+			method_type,
+			module_filter,
+			method_recv_array
+		))
 		{
 			if (ctx == null || ctx.can_see(other_stream.tokens.module_of_decl(found)))
 			{
@@ -1595,7 +1308,7 @@ fn bool TokenList.try_find_definition(
 
 	// 3 + 4. Scan project files on disk (src/ and lib/ relative to file), then stdlib
 	String file_path = uri_to_path(uri);
-	DeclScan scan    = { cursor_tok, method_type, module_filter, out, ctx, &fallback, &have_fallback };
+	DeclScan scan    = { cursor_tok, method_type, module_filter, out, ctx, &fallback, &have_fallback, method_recv_array };
 	if (scan_project_then_stdlib(file_path, stdlib_path, &scan)) return true;
 
 	// Nothing visible anywhere — fall back to the first module-blind match.
@@ -1617,11 +1330,17 @@ struct DeclScan (FileVisitor) @private
 	ModuleCtx* ctx;
 	DString* fallback;
 	bool* have_fallback;
+	bool method_recv_array;
 }
 
 fn bool DeclScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (try found = stream.tokens.find_declaration_in(self.target, self.method_type, self.module_filter))
+	if (try found = stream.tokens.find_declaration_in(
+		self.target,
+		self.method_type,
+		self.module_filter,
+		self.method_recv_array
+	))
 	{
 		DString uri = dstring::temp();
 		append_file_uri(&uri, path);
@@ -1761,19 +1480,47 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 	// to avoid jumping to unrelated declarations with the same name.
 	if (cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT)
 	{
-		String recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs);
+		// A designator in a struct initializer (`Foo v = { .field = 1 }`, `, .field =`)
+		// names a field of the type being initialized, not a member of whatever token
+		// happens to sit before the dot — there is no receiver expression there at all.
+		if (cursor_idx >= 2)
+		{
+			TokenType before_dot = stream.tokens.entries[cursor_idx - 2].type;
+			if (before_dot == LBRACE || before_dot == COMMA || before_dot == LPAREN)
+			{
+				String init_type = stream.tokens.resolve_initializer_type(cursor_idx, uri, docs, null, 0, stdlib_path);
+				if (init_type.len > 0)
+				{
+					if (try_find_struct_field(init_type, cursor_tok.text, uri, content, docs, stdlib_path, out))
+					{
+						return;
+					}
+					TypeInfo init_base = stream.tokens.canonical_type(init_type, uri, docs, stdlib_path);
+					if (init_base.name != init_type && try_find_struct_field(
+						init_base.name,
+						cursor_tok.text,
+						uri,
+						content,
+						docs,
+						stdlib_path,
+						out
+					))
+					{
+						return;
+					}
+				}
+				return; // a designator is never a member of the preceding token
+			}
+		}
+
+		String recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs, stdlib_path);
 		if (recv_type.len > 0)
 		{
-			// Resolve alias for struct field lookup (e.g. LineOffsets → List)
-			String resolved_type = stream.tokens.resolve_type_alias_across(recv_type, docs);
-			if (resolved_type.len == 0)
-			{
-				String file_path = uri_to_path(uri);
-				if (file_path.len > 0)
-				{
-					resolved_type = resolve_alias_in_project(file_path, recv_type);
-				}
-			}
+			// Follow the alias chain for the struct-field lookup (LineOffsets -> List,
+			// Matrix4f -> Matrix4x4). The stdlib is searched too, so an alias declared
+			// there — which is where most of them are — resolves like a project one.
+			TypeInfo base        = stream.tokens.canonical_type(recv_type, uri, docs, stdlib_path);
+			String resolved_type = base.name == recv_type ? "" : base.name;
 
 			// Try method resolution: fn Type.name(
 			// Try with original type first (methods are usually on the alias name),
@@ -1795,6 +1542,9 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 				{
 					return;
 				}
+				// The alias may end at a builtin array or vector rather than a named
+				// type — `Vec3` is `float[<3>]`, whose members the stdlib declares on
+				// the wildcard receiver `float[<*>]`.
 				if (resolved_type.len > 0 && resolved_type != recv_type)
 				{
 					if (stream.tokens.try_find_definition(
@@ -1807,7 +1557,8 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 						out,
 						resolved_type,
 						"",
-						&visctx
+						&visctx,
+						base.is_array
 					))
 					{
 						return;
@@ -1842,7 +1593,7 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 	// Method call resolution: variable.method(
 	if (is_ident(ct))
 	{
-		String method_type = stream.tokens.resolve_method_type(cursor_idx, uri, docs);
+		String method_type = stream.tokens.resolve_method_type(cursor_idx, uri, docs, stdlib_path);
 		if (method_type.len > 0)
 		{
 			if (stream.tokens.try_find_definition(
@@ -1946,9 +1697,15 @@ fn sz? TokenList.find_enum_or_constdef_member(&self, String name)
 }
 
 // Search for a declaration in a token stream (not tied to a cursor position).
-fn sz? TokenList.find_declaration_in(&self, Token target, String method_type = "", String module_filter = "")
+fn sz? TokenList.find_declaration_in(
+	&self,
+	Token target,
+	String method_type = "",
+	String module_filter = "",
+	bool method_recv_array = false
+)
 {
-	return self.find_declaration(target, self.size, method_type, module_filter);
+	return self.find_declaration(target, self.size, method_type, module_filter, method_recv_array);
 }
 
 // Index of the parameter-list '(' of the fn/macro whose body encloses
@@ -2077,7 +1834,8 @@ fn sz? TokenList.find_declaration(
 	Token target,
 	sz target_idx,
 	String method_type = "",
-	String module_filter = ""
+	String module_filter = "",
+	bool method_recv_array = false
 )
 {
 	String name = target.text;
@@ -2151,10 +1909,11 @@ fn sz? TokenList.find_declaration(
 					{
 						if (j >= 3 && is_ident(
 							self.entries[j - 1].type
-						) && self.entries[j - 1].text
-							== name && self.entries[j - 2].type
-								== DOT && self.entries[j - 3].type
-									== TYPE_IDENT && self.entries[j - 3].text == method_type)
+						) && self.entries[j - 1].text == name && self.method_receiver_matches(
+							j - 1,
+							method_type,
+							method_recv_array
+						))
 						{
 							return j - 1;
 						}

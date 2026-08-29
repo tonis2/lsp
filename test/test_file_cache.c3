@@ -52,7 +52,7 @@ fn void test_file_cache_used_by_scan() @test {
 
 	CompletionSink* sink = mem::tnew(CompletionSink);
 	sink.init("");
-	MemberScan scan = { &TokenList.collect_enum_members_into, "Color", sink, null };
+	MemberScan scan = { &TokenList.collect_enum_members_into, { .name = "Color" }, sink, null };
 	scan_dir(dir, &scan);
 
 	DString out = dstring::temp();
