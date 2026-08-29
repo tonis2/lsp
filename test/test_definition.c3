@@ -624,3 +624,39 @@ fn void test_definition_const_pointer_suffix() @test {
 	assert(result.contains(`"line":2`), "got: %s", result);
 	assert(result.contains(`"character":15`), "got: %s", result);
 }
+
+// A module qualifier in usage position names a module, not a symbol — issue #16,
+// sub-issue 4. The location is the module declaration's first path segment, the
+// same target `import` segments already resolve to.
+// `io` is the last segment of the imported `std::io` — the shorthand C3 allows.
+fn void test_definition_module_short_qualifier() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///io.c3", "module std::io;\nfn void print() {}", 1);
+	String content = "module app;\nimport std::io;\nfn void t() { io::print(); }";
+	sz offset = 42; // on the `io` qualifier
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("file:///io.c3"), "must jump to the module declaration, got: %s", result);
+	assert(result.contains(`"line":0`), "got: %s", result);
+	ds.close("file:///io.c3");
+}
+
+// A module qualifier in usage position names a module, not a symbol — issue #16,
+// sub-issue 4. The location is the module declaration's first path segment, the
+// same target `import` segments already resolve to.
+// The path as written resolves without leaning on the import.
+fn void test_definition_module_full_qualifier() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///io.c3", "module std::io;\nfn void print() {}", 1);
+	String content = "module app;\nimport std::io;\nfn void t() { std::io::print(); }";
+	sz offset = 47; // on the `io` qualifier
+	encode_definition("file:///main.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains("file:///io.c3"), "must jump to the module declaration, got: %s", result);
+	assert(result.contains(`"line":0`), "got: %s", result);
+	ds.close("file:///io.c3");
+}

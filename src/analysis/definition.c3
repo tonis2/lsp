@@ -1476,6 +1476,30 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 		return; // import segments never resolve as ordinary symbols
 	}
 
+	// A qualifier segment in usage position — `io` in `io::print()` or in
+	// `std::io::print()` — names a module too. `::` only ever separates module path
+	// segments, so a token followed by one is never an ordinary symbol.
+	if (cursor_idx + 1 < stream.tokens.size && stream.tokens.entries[cursor_idx + 1].type == SCOPE)
+	{
+		String written = stream.tokens.join_path_segments(
+			stream.tokens.qualifier_chain_start(cursor_idx),
+			cursor_idx + 1
+		);
+		if (written.len > 0)
+		{
+			// The path as written first, so `std::io::print()` needs no import to
+			// resolve. Failing that, `io` is the last segment of an imported
+			// `std::io`, the shorthand C3 itself allows.
+			if (stream.tokens.try_find_module_definition(written, uri, content, docs, stdlib_path, out)) return;
+			String full = resolve_module_name(content, written);
+			if (full.len > 0 && full != written)
+			{
+				stream.tokens.try_find_module_definition(full, uri, content, docs, stdlib_path, out);
+			}
+		}
+		return;
+	}
+
 	// For DOT-preceded tokens (field/method access), resolve the receiver type
 	// to avoid jumping to unrelated declarations with the same name.
 	if (cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT)
