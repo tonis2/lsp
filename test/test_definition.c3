@@ -466,3 +466,119 @@ fn void test_definition_fallback_unimported_module() @test {
 
 	ds.close("file:///aaa.c3");
 }
+
+// --- Local-variable scope tests ---
+
+// Regression (io.c3 printfn): `len` in the second function must resolve to its
+// own `sz? len`, not to the first `sz len;` in the file — find_declaration
+// scans top-down with no notion of function scope.
+fn void test_definition_local_var_prefers_enclosing_function() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz? len = 0; return len + 1; }";
+	sz offset = content.len - 10; // on `len` in `return len + 1;`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "must jump to b's own `sz? len` (line 1), got: %s", result);
+	assert(result.contains(`"character":18`), "got: %s", result);
+}
+
+// A use in b still resolves to b's own declaration even though a declared the
+// same name earlier — guards a scope-aware fix against over-correcting.
+fn void test_definition_local_var_in_declaring_function() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz? len = 0; }\nfn void b() { sz len; len++; }";
+	sz offset = content.len - 8; // on `len` in `len++`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "must jump to b's own `sz len` (line 1), got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// The same scope bug with no optional types at all: a's plain `sz len` still
+// captures the use in b — the wrong jump needs no `?` to happen.
+fn void test_definition_local_var_plain_declarations() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; return len + 1; }";
+	sz offset = content.len - 10; // on `len` in `return len + 1;`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "must jump to b's own `sz len` (line 1), got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+	assert(!result.contains(`"line":0`), "must not jump to a's `sz len` (line 0), got: %s", result);
+}
+
+// A parameter resolves like a local. The LAST parameter is followed by `)`,
+// not `;`/`=`/`,` — the declaration-shape check must accept it.
+fn void test_definition_local_var_parameter() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a(int len) { return len + 1; }";
+	sz offset = content.len - 10; // on `len` in `return len + 1;`
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "must jump to the `int len` parameter, got: %s", result);
+	assert(result.contains(`"character":14`), "got: %s", result);
+}
+
+// A use nested in an `if` block still belongs to b's scope: the enclosing
+// declaration is the fn, not the block the cursor happens to sit in.
+fn void test_definition_local_var_nested_if_block() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; if (1) { return len + 1; } }";
+	sz offset = 66;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// Same through several levels of block nesting, and past the `)` that closes
+// a `for` header — which is not the fn's parameter list.
+fn void test_definition_local_var_nested_loop_block() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; for (int i = 0; i < 2; i++) { while (1) { return len + 1; } } }";
+	sz offset = 99;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// A `switch` body nests the same way.
+fn void test_definition_local_var_nested_switch_case() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a() { sz len; }\nfn void b() { sz len = 0; switch (1) { case 1: int q = len; } }";
+	sz offset = 79;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":1`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
+}
+
+// io.c3's printfn is declared `fn sz? printfn(String format, args...) @format(0)`.
+// The parenthesised attribute must not be mistaken for the parameter list, or
+// the parameters drop out of the searched range.
+fn void test_definition_local_var_parameter_with_attribute() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "fn void a(int len) @format(0) { return len + 1; }";
+	sz offset = 39;
+	encode_definition("file:///test.c3", content, offset, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":14`), "got: %s", result);
+}
