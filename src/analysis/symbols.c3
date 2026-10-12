@@ -235,7 +235,8 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 				}
 			case ENUM:
 			case FAULTDEF:
-				// enum/faultdef TYPE_IDENT
+			case CONSTSET:
+				// enum/faultdef/constset TYPE_IDENT
 				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
 				{
 					Token nt = stream.tokens.entries[i + 1];

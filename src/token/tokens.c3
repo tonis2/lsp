@@ -123,6 +123,7 @@ fn SemanticCategory map_token_type(TokenType t)
 		case BITSTRUCT:
 		case CONST:
 		case CONSTDEF:
+		case CONSTSET:
 		case ENUM:
 		case FAULTDEF:
 		case FUNC:
@@ -310,6 +311,7 @@ fn bool is_type_declaration_keyword(TokenType t)
 		case UNION:
 		case BITSTRUCT:
 		case ENUM:
+		case CONSTSET:
 		case FAULTDEF:
 		case INTERFACE:
 		case TYPEDEF:
@@ -513,6 +515,7 @@ fn String get_token_description(TokenType t, String text)
 		case CATCH: return "`catch` — Catches an optional fault value";
 		case CONST: return "`const` — Compile-time constant declaration";
 		case CONSTDEF: return "`constdef` — Defines a named constant";
+		case CONSTSET: return "`constset` — Non-sequential enumeration type definition";
 		case CONTINUE: return "`continue` — Skips to next loop iteration";
 		case DEFAULT: return "`default` — Default branch in switch";
 		case DEFER: return "`defer` — Defers statement execution to scope exit";

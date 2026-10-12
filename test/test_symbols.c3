@@ -40,6 +40,14 @@ fn void test_symbols_enum() @test {
 	assert(result.contains(`"kind":10`), "got: %s", result); // Enum
 }
 
+fn void test_symbols_constset() @test {
+	DString out = dstring::temp();
+	encode_document_symbols("constset Color { RED = 0, GREEN = 3, BLUE }", &out);
+	String result = out.str_view();
+	assert(result.contains(`"name":"Color"`), "got: %s", result);
+	assert(result.contains(`"kind":10`), "got: %s", result); // Enum
+}
+
 fn void test_symbols_method() @test {
 	DString out = dstring::temp();
 	encode_document_symbols("fn void MyType.do_thing() {}", &out);
