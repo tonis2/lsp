@@ -2,6 +2,7 @@ module lsp;
 
 import std::core::dstring;
 import std::core::mem;
+import std::collections::list;
 import std::collections::object;
 import std::time;
 
@@ -535,4 +536,67 @@ fn void LspServer.handle_rename(&self, Object* msg, String id_json)
 		encode_rename(uri, doc.content, offset, &self.documents, self.stdlib_path, new_name, &data);
 		respond_nonempty(id_json, &data, "null");
 	}
+}
+
+fn void LspServer.handle_code_action(&self, Object* msg, String id_json)
+{
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "[]"))
+	{
+		Object* context = msg.get("params")!!.get("context") ?? null;
+		if (context == null || !wants_quickfix(context))
+		{
+			send_response(id_json, "[]");
+			return;
+		}
+
+		List{ActionDiag} diags;
+		diags.tinit();
+		if (try arr = context.get("diagnostics"))
+		{
+			for (sz i = 0; i < arr.get_len(); i++)
+			{
+				Object* o = arr.get_at(i);
+				ActionDiag d = {
+					.message = o.get_string("message") ?? "",
+					.source = o.get_string("source") ?? "",
+					.severity = o.get_int("severity") ?? 0,
+				};
+				if (try r = o.get("range")) d.range = decode_range(r);
+				diags.push(d);
+			}
+		}
+
+		DString data = dstring::temp();
+		encode_code_actions(uri, doc.content, &self.documents, diags.array_view(), &data);
+		respond_nonempty(id_json, &data, "[]");
+	}
+}
+
+// A codeAction request may restrict the kinds it wants (`context.only`, e.g. the
+// `source.organizeImports` VS Code sends on save); every action here is a quickfix.
+fn bool wants_quickfix(Object* context) @private
+{
+	Object*? only = context.get("only");
+	if (catch only) return true;
+	for (sz i = 0; i < only.get_len(); i++)
+	{
+		String kind = only.get_string_at(i) ?? "";
+		if (kind == "" || kind == "quickfix") return true;
+	}
+	return false;
+}
+
+fn Range decode_range(Object* r) @private
+{
+	Range range;
+	if (try s = r.get("start"))
+	{
+		range.start = { (sz)(s.get_int("line") ?? 0), (sz)(s.get_int("character") ?? 0) };
+	}
+	if (try e = r.get("end"))
+	{
+		range.end = { (sz)(e.get_int("line") ?? 0), (sz)(e.get_int("character") ?? 0) };
+	}
+	return range;
 }

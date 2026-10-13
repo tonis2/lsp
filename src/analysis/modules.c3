@@ -36,7 +36,14 @@ fn bool module_covers(String prefix, String path)
 // Collect the module declarations and import paths of a token stream.
 fn void ModuleCtx.build(&self, TokenList* tokens)
 {
-	for (sz i = 0; i < tokens.size; i++)
+	self.build_range(tokens, 0, tokens.size);
+}
+
+// Same as build, restricted to the tokens in [from, to) — e.g. one `module` section.
+fn void ModuleCtx.build_range(&self, TokenList* tokens, sz from, sz to)
+{
+	if (to > tokens.size) to = tokens.size;
+	for (sz i = from; i < to; i++)
 	{
 		TokenType t = tokens.entries[i].type;
 		if (t == MODULE)

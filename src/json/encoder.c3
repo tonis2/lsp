@@ -245,6 +245,7 @@ fn void encode_server_capabilities(DString* out, String version)
 	out.append(`"documentHighlightProvider":true,`);
 	out.append(`"referencesProvider":true,`);
 	out.append(`"renameProvider":true,`);
+	out.append(`"codeActionProvider":{"codeActionKinds":["quickfix"]},`);
 	out.append(`"signatureHelpProvider":{"triggerCharacters":["(",",","{","}"]}`);
 	out.append(`},`);
 	out.appendf(`"serverInfo":{"name":"c3-lsp","version":"%s"}}`, version);

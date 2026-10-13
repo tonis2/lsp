@@ -150,3 +150,27 @@ fn void test_parse_ignores_non_lsperr() @test {
 	diags.parse(out, "/proj");
 	assert(diags.len() == 0);
 }
+
+// c3c reports only a start column; the published range covers the whole name there.
+fn void test_name_end_col_spans_qualified_name() @test {
+	String src = "module a;\n    io::printn(\"x\");\n@foo(1);\n  (x);\n";
+	LineOffsets lo;
+	lo.tinit();
+	lo.build(src);
+	assert(name_end_col(src, &lo, 1, 4) == 14, "all of io::printn, got %d", name_end_col(src, &lo, 1, 4));
+	assert(name_end_col(src, &lo, 2, 0) == 4, "@foo, got %d", name_end_col(src, &lo, 2, 0));
+	assert(name_end_col(src, &lo, 3, 2) == 0, "no name at '(', got %d", name_end_col(src, &lo, 3, 2));
+	assert(name_end_col(src, &lo, 9, 0) == 0, "line past the end");
+}
+
+fn void test_encode_uses_end_col_when_known() @test {
+	CompilerDiag d = { .line = 1, .col = 4, .end_col = 14, .severity = 1, .message = "m" };
+	DString out = dstring::temp();
+	d.encode(&out);
+	assert(out.str_view().contains(`"end":{"line":1,"character":14}`), "got: %s", out.str_view());
+
+	d.end_col = 0;
+	out.clear();
+	d.encode(&out);
+	assert(out.str_view().contains(`"end":{"line":1,"character":5}`), "unknown end keeps one character, got: %s", out.str_view());
+}

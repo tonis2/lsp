@@ -17,6 +17,7 @@ struct CompilerDiag
 	String file;    // resolved absolute path (separators normalized to '/')
 	int line;       // 0-indexed
 	int col;        // 0-indexed
+	int end_col;    // 0-indexed, exclusive; <= col = unknown (one-character range)
 	int severity;   // LSP DiagnosticSeverity (1=error, 2=warning, 3=info)
 	String message; // raw message text (slice into compiler output)
 }
@@ -251,12 +252,28 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 		if (current.contains(uri)) continue;
 		current.push(uri);
 
+		// c3c reports only a start column. Underline the whole name there, so the
+		// squiggle (and the quick-fix lightbulb) covers it rather than one character.
+		String content;
+		if (try doc = self.documents.find(uri))
+		{
+			content = doc.content;
+		}
+		else
+		{
+			content = (String)file::load_temp(d.file) ?? "";
+		}
+		LineOffsets lo;
+		lo.tinit();
+		lo.build(content);
+
 		DString arr = dstring::temp();
 		int n = 0;
 		foreach (d2 : *diags)
 		{
 			if (d2.file != d.file) continue;
 			if (n > 0) arr.append_char(',');
+			d2.end_col = name_end_col(content, &lo, d2.line, d2.col);
 			d2.encode(&arr);
 			n++;
 		}
@@ -278,7 +295,8 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 fn void CompilerDiag.encode(&self, DString* out)
 {
 	// line/col are clamped to >= 0 when parsed, so the sz casts are safe.
-	Range range = { { (sz)self.line, (sz)self.col }, { (sz)self.line, (sz)(self.col + 1) } };
+	int end = self.end_col > self.col ? self.end_col : self.col + 1;
+	Range range = { { (sz)self.line, (sz)self.col }, { (sz)self.line, (sz)end } };
 	out.append(`{"range":`);
 	range.encode(out);
 	out.append(`,"severity":`);
@@ -286,6 +304,24 @@ fn void CompilerDiag.encode(&self, DString* out)
 	out.append(`,"source":"c3c","message":"`);
 	json_escape_into(out, self.message);
 	out.append(`"}`);
+}
+
+// End column of the (possibly `::`-qualified) name starting at line/col of `content`,
+// e.g. all of `io::printn` or `@foo`; 0 when no name starts there.
+fn int name_end_col(String content, LineOffsets* lo, int line, int col) @private
+{
+	if ((sz)line >= lo.size) return 0;
+	sz start = lo.entries[(sz)line] + (sz)col;
+	sz i = start;
+	if (i < content.len && (content[i] == '@' || content[i] == '$' || content[i] == '#')) i++;
+	sz name_start = i;
+	while (i < content.len && is_ident_char(content[i]))
+	{
+		i++;
+		if (i + 2 < content.len && content[i] == ':' && content[i + 1] == ':' && is_ident_char(content[i + 2])) i += 2;
+	}
+	if (i == name_start) return 0;
+	return col + (int)(i - start);
 }
 
 // Send a publishDiagnostics notification for a single file URI.

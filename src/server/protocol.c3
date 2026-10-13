@@ -78,6 +78,7 @@ const MethodHandler[] HANDLERS = {
 	{ "textDocument/references",          &LspServer.handle_references },
 	{ "textDocument/signatureHelp",       &LspServer.handle_signature_help },
 	{ "textDocument/rename",              &LspServer.handle_rename },
+	{ "textDocument/codeAction",          &LspServer.handle_code_action },
 	{ "workspace/symbol",                 &LspServer.handle_workspace_symbol },
 };
 

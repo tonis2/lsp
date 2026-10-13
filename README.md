@@ -18,6 +18,7 @@ A Language Server Protocol implementation for the [C3 programming language](http
 - **Semantic Tokens** — enhanced syntax highlighting for identifiers, types, functions, macros, and attributes, including inside contract blocks (directives like `@require` and their arguments are colored as code, prose as comment)
 - **Folding Ranges** — code folding for braces, imports, and block comments
 - **Diagnostics** — instant lexer errors while typing, plus errors and warnings from the C3 compiler on save (throttled, configurable)
+- **Quick Fixes** — one-click fixes for the compiler's own suggestions
 
 > **NB!** Project-wide features (references, completion, navigation) read the `sources` list from your project's `project.json`, so make sure your project has one for the best experience.
 
