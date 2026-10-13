@@ -9,6 +9,9 @@ import c3::lexer;
 // want 'foo_bar'?"), so each action is that suggestion turned into an edit. The
 // client sends the diagnostics under the cursor with every codeAction request, so
 // nothing about compiler diagnostics has to be kept on the server.
+//
+// The cursor-based rewrites (fill a switch, fill an initializer, ...) live in
+// refactors.c3 and are encoded alongside these.
 
 // A diagnostic as the client echoes it back in codeAction's context.diagnostics.
 struct ActionDiag
@@ -19,37 +22,49 @@ struct ActionDiag
 	int severity;   // 0 = not sent
 }
 
-struct QuickFix
+struct CodeAction
 {
 	String title;
+	String kind;   // "" = quickfix
 	bool preferred;
+	bool has_diag; // the action fixes `diag`
 	ActionDiag diag;
 	TextEdit[2] edits;
 	sz edit_count;
 }
 
-alias QuickFixList = List{QuickFix};
+alias CodeActionList = List{CodeAction};
 
 const String IMPORT_HINT  = "please add 'import ";
 const String IMPORT_HINT2 = "try importing the '";
 const String PREFIX_HINT  = "must be prefixed with the module name, please use ";
 const String TYPO_HINT    = "' could not be found, did you perhaps want ";
 
-// Encode the quick fixes for `diags` in document `uri` as a JSON CodeAction[] array.
-fn void encode_code_actions(String uri, String content, DocumentList* docs, ActionDiag[] diags, DString* out)
+// Encode the quick fixes for `diags` in document `uri` as a JSON CodeAction[] array,
+// followed by the rewrites available at byte offset `cursor` when `refactors` is set.
+fn void encode_code_actions(String uri, String content, DocumentList* docs, ActionDiag[] diags, DString* out,
+	String stdlib_path = "", bool refactors = false, sz cursor = 0)
 {
 	TokenStream owned;
 	bool owns;
 	TokenStream* stream = token_stream_for_doc(uri, content, docs, &owned, &owns);
 	defer { if (owns) owned.free(); }
 
-	QuickFixList fixes;
+	CodeActionList fixes;
 	fixes.tinit();
 	foreach (d : diags)
 	{
 		stream.add_import_fixes(d, &fixes);
 		stream.add_prefix_fix(d, &fixes);
 		stream.add_typo_fixes(d, &fixes);
+	}
+	if (refactors)
+	{
+		RefactorCtx ctx = { stream, uri, docs, stdlib_path, cursor };
+		ctx.add_fill_switch(&fixes);
+		ctx.add_fill_fields(&fixes);
+		ctx.add_contract(&fixes);
+		ctx.add_toggle_body(&fixes);
 	}
 
 	out.append_char('[');
@@ -62,7 +77,7 @@ fn void encode_code_actions(String uri, String content, DocumentList* docs, Acti
 }
 
 // Keep the first fix per title: one missing import is reported at every use.
-fn void QuickFixList.add_unique(&self, QuickFix fix)
+fn void CodeActionList.add_unique(&self, CodeAction fix)
 {
 	foreach (f : *self)
 	{
@@ -74,7 +89,7 @@ fn void QuickFixList.add_unique(&self, QuickFix fix)
 // "Did you mean the macro 'printn' in module std::io? If so please add 'import std::io'."
 // → add the import; for a function/macro/global/constant also add the `io::` prefix the
 // name will need once imported (types are used unprefixed).
-fn void TokenStream.add_import_fixes(&self, ActionDiag d, QuickFixList* fixes)
+fn void TokenStream.add_import_fixes(&self, ActionDiag d, CodeActionList* fixes)
 {
 	String path = quoted_after(d.message, IMPORT_HINT) ?? quoted_after(d.message, IMPORT_HINT2) ?? "";
 	if (path.len == 0) return;
@@ -83,7 +98,7 @@ fn void TokenStream.add_import_fixes(&self, ActionDiag d, QuickFixList* fixes)
 	TextEdit? import_edit = self.import_edit(path, line);
 	if (catch import_edit) return;
 
-	QuickFix plain = { .title = string::tformat("Add 'import %s;'", path), .preferred = true, .diag = d, .edit_count = 1 };
+	CodeAction plain = { .title = string::tformat("Add 'import %s;'", path), .preferred = true, .has_diag = true, .diag = d, .edit_count = 1 };
 	plain.edits[0] = import_edit;
 
 	String name = first_quoted(d.message) ?? "";
@@ -95,7 +110,7 @@ fn void TokenStream.add_import_fixes(&self, ActionDiag d, QuickFixList* fixes)
 		{
 			if (!is_scoped_at(text, col))
 			{
-				QuickFix both = { .title = string::tformat("Add 'import %s;' and use '%s::%s'", path, prefix, name), .preferred = true, .diag = d, .edit_count = 2 };
+				CodeAction both = { .title = string::tformat("Add 'import %s;' and use '%s::%s'", path, prefix, name), .preferred = true, .has_diag = true, .diag = d, .edit_count = 2 };
 				both.edits[0] = import_edit;
 				both.edits[1] = { .range = { { line, col }, { line, col } }, .new_text = string::tformat("%s::", prefix) };
 				fixes.add_unique(both);
@@ -107,7 +122,7 @@ fn void TokenStream.add_import_fixes(&self, ActionDiag d, QuickFixList* fixes)
 }
 
 // "Macros from other modules must be prefixed with the module name, please use io::printn instead."
-fn void TokenStream.add_prefix_fix(&self, ActionDiag d, QuickFixList* fixes)
+fn void TokenStream.add_prefix_fix(&self, ActionDiag d, CodeActionList* fixes)
 {
 	sz? at = d.message.index_of(PREFIX_HINT);
 	if (catch at) return;
@@ -128,14 +143,14 @@ fn void TokenStream.add_prefix_fix(&self, ActionDiag d, QuickFixList* fixes)
 	if (catch col) return;
 	if (is_scoped_at(text, col)) return;
 
-	QuickFix fix = { .title = string::tformat("Use '%s'", qualified), .preferred = true, .diag = d, .edit_count = 1 };
+	CodeAction fix = { .title = string::tformat("Use '%s'", qualified), .preferred = true, .has_diag = true, .diag = d, .edit_count = 1 };
 	fix.edits[0] = { .range = { { line, col }, { line, col } }, .new_text = string::tformat("%s::", prefix) };
 	fixes.add_unique(fix);
 }
 
 // "'foo_baz' could not be found, did you perhaps want 'foo_bar'?" (up to three
 // candidates, possibly qualified: 'io::prinn' → 'io::print' or 'io::printn').
-fn void TokenStream.add_typo_fixes(&self, ActionDiag d, QuickFixList* fixes)
+fn void TokenStream.add_typo_fixes(&self, ActionDiag d, CodeActionList* fixes)
 {
 	String msg = d.message;
 	if (!msg.starts_with("'")) return;
@@ -163,7 +178,7 @@ fn void TokenStream.add_typo_fixes(&self, ActionDiag d, QuickFixList* fixes)
 
 	foreach (cand : candidates[:count])
 	{
-		QuickFix fix = { .title = string::tformat("Change to '%s'", cand), .preferred = count == 1, .diag = d, .edit_count = 1 };
+		CodeAction fix = { .title = string::tformat("Change to '%s'", cand), .preferred = count == 1, .has_diag = true, .diag = d, .edit_count = 1 };
 		fix.edits[0] = { .range = { { line, col }, { line, col + wrong.len } }, .new_text = cand };
 		fixes.add_unique(fix);
 	}
@@ -230,15 +245,21 @@ fn String TokenStream.line_text(&self, sz line)
 	return self.content[start:end - start];
 }
 
-fn void QuickFix.encode(&self, String uri, DString* out)
+fn void CodeAction.encode(&self, String uri, DString* out)
 {
 	out.append(`{"title":"`);
 	json_escape_into(out, self.title);
-	out.append(`","kind":"quickfix"`);
+	out.append(`","kind":"`);
+	out.append(self.kind.len > 0 ? self.kind : "quickfix");
+	out.append_char('"');
 	if (self.preferred) out.append(`,"isPreferred":true`);
-	out.append(`,"diagnostics":[`);
-	self.diag.encode(out);
-	out.append(`],"edit":{"changes":{"`);
+	if (self.has_diag)
+	{
+		out.append(`,"diagnostics":[`);
+		self.diag.encode(out);
+		out.append_char(']');
+	}
+	out.append(`,"edit":{"changes":{"`);
 	json_escape_into(out, uri);
 	out.append(`":[`);
 	foreach (i, e : self.edits[:self.edit_count])

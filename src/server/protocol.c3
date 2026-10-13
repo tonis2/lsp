@@ -31,11 +31,13 @@ struct LspServer
 	Time last_lex_diag_time;
 	// Persistent cache of tokenized on-disk files (project + stdlib), keyed by path+mtime.
 	FileCache fcache;
+	// The client accepts snippet syntax in completion items (see handle_initialize).
+	bool snippet_support;
 }
 
 fn void LspServer.init(&self, String stdlib_path, String compiler_path, long diag_delay_ms)
 {
-	*self = { .running = true, .stdlib_path = stdlib_path, .compiler_path = compiler_path, .diag_delay_ms = diag_delay_ms, };
+	*self = { .running = true, .snippet_support = true, .stdlib_path = stdlib_path, .compiler_path = compiler_path, .diag_delay_ms = diag_delay_ms, };
 	self.documents.init(mem);
 	self.diag_state.init(mem);
 	self.fcache.init(mem);

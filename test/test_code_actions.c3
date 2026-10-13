@@ -168,15 +168,22 @@ fn void test_code_action_dedupes_same_fix() @test {
 
 fn void test_code_action_respects_only_filter() @test {
 	Object* ctx = json::tparse(`{"diagnostics":[],"only":["source.organizeImports"]}`)!!;
-	assert(!wants_quickfix(ctx), "source-only requests get no quick fixes");
+	assert(!wants_kind(ctx, "quickfix"), "source-only requests get no quick fixes");
+	assert(!wants_kind(ctx, REWRITE), "nor rewrites");
 	ctx = json::tparse(`{"diagnostics":[],"only":["quickfix"]}`)!!;
-	assert(wants_quickfix(ctx));
+	assert(wants_kind(ctx, "quickfix"));
+	assert(!wants_kind(ctx, REWRITE));
+	ctx = json::tparse(`{"diagnostics":[],"only":["refactor"]}`)!!;
+	assert(wants_kind(ctx, REWRITE), "refactor includes refactor.rewrite");
+	assert(!wants_kind(ctx, "quickfix"));
+	ctx = json::tparse(`{"diagnostics":[],"only":["refactor.rewrite.extra"]}`)!!;
+	assert(!wants_kind(ctx, REWRITE), "a narrower kind does not include the wider one");
 	ctx = json::tparse(`{"diagnostics":[]}`)!!;
-	assert(wants_quickfix(ctx), "no filter means every kind");
+	assert(wants_kind(ctx, "quickfix") && wants_kind(ctx, REWRITE), "no filter means every kind");
 }
 
 fn void test_code_action_capability_is_advertised() @test {
 	DString out = dstring::temp();
 	encode_server_capabilities(&out, "0.0.0");
-	assert(out.str_view().contains(`"codeActionProvider":{"codeActionKinds":["quickfix"]}`), "got: %s", out.str_view());
+	assert(out.str_view().contains(`"codeActionProvider":{"codeActionKinds":["quickfix","refactor.rewrite"]}`), "got: %s", out.str_view());
 }

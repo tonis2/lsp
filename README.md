@@ -10,7 +10,7 @@ A Language Server Protocol implementation for the [C3 programming language](http
 - **Go to Implementation** — from an interface name to the types whose conformance clause lists it (`struct Foo (Printable)`), and from a method to the `@dynamic` bodies that provide it
 - **Call Hierarchy** — incoming calls (which functions call this one, with every call site) and outgoing calls (what this function calls), for functions and macros
 - **Hover** — type signatures and doc comments (`<* ... *>`) for functions, macros, types, and struct fields
-- **Completion** — keywords, types, identifiers, compile-time builtins (`$if`, `@sizeof`, …), and attribute names; member completion after `.` for struct fields, methods, and enum values.
+- **Completion** — keywords, types, identifiers, compile-time builtins (`$if`, `@sizeof`, …), and attribute names; member completion after `.` for struct fields, methods, and enum values; snippet templates (`for`, `foreach`, `switch`, `fn`, `struct`, `$if`, …) where a statement or declaration can start
 - **Signature Help** — parameter hints when calling functions and macros, with the active parameter highlighted
 - **Document Symbols** — outline of modules, functions, structs, enums, macros, and constants
 - **Workspace Symbols** — search declarations across the project *and the standard library* by name, each labelled with the module that declares it; queries may narrow by module or list one type's methods (see below)

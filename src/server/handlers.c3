@@ -107,6 +107,13 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 		}
 	}
 
+	// A client that describes its completion items without claiming snippet support
+	// would insert `$0` and `${1:...}` literally.
+	if (try item = completion_item_capabilities(msg))
+	{
+		self.snippet_support = item.get_bool("snippetSupport") ?? false;
+	}
+
 	// If no stdlib path was supplied (via CLI or client settings), ask the resolved
 	// compiler where it is installed and derive <install dir>/lib/std. Runs after the
 	// overrides above so a client-configured compiler-path is honored. detect_stdlib_path
@@ -120,6 +127,12 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 	DString result = dstring::temp();
 	encode_server_capabilities(&result, VERSION);
 	send_response(id_json, result.str_view());
+}
+
+// params.capabilities.textDocument.completion.completionItem, when the client sent it.
+fn Object*? completion_item_capabilities(Object* msg) @private
+{
+	return msg.get("params")!.get("capabilities")!.get("textDocument")!.get("completion")!.get("completionItem");
 }
 
 fn void LspServer.handle_shutdown(&self, Object* msg, String id_json)
@@ -365,7 +378,7 @@ fn void LspServer.handle_completion(&self, Object* msg, String id_json)
 		}
 
 		DString data = dstring::temp();
-		encode_completions(uri, doc.content, offset, &self.documents, self.stdlib_path, &data);
+		encode_completions(uri, doc.content, offset, &self.documents, self.stdlib_path, &data, self.snippet_support);
 		respond_nonempty(id_json, &data, `{"isIncomplete":false,"items":[]}`);
 	}
 }
@@ -544,7 +557,9 @@ fn void LspServer.handle_code_action(&self, Object* msg, String id_json)
 	if (try doc = self.doc_or_respond(uri, id_json, "[]"))
 	{
 		Object* context = msg.get("params")!!.get("context") ?? null;
-		if (context == null || !wants_quickfix(context))
+		bool fixes = context == null || wants_kind(context, "quickfix");
+		bool rewrites = context == null || wants_kind(context, REWRITE);
+		if (!fixes && !rewrites)
 		{
 			send_response(id_json, "[]");
 			return;
@@ -552,7 +567,8 @@ fn void LspServer.handle_code_action(&self, Object* msg, String id_json)
 
 		List{ActionDiag} diags;
 		diags.tinit();
-		if (try arr = context.get("diagnostics"))
+		Object*? arr = fixes && context != null ? context.get("diagnostics") : TOKEN_NOT_FOUND~;
+		if (try arr)
 		{
 			for (sz i = 0; i < arr.get_len(); i++)
 			{
@@ -567,22 +583,32 @@ fn void LspServer.handle_code_action(&self, Object* msg, String id_json)
 			}
 		}
 
+		// The rewrites look at where the selection starts.
+		sz cursor = 0;
+		if (try r = msg.get("params")!!.get("range"))
+		{
+			Range range = decode_range(r);
+			cursor = position_to_offset(doc.content, (int)range.start.line, (int)range.start.character);
+		}
+
 		DString data = dstring::temp();
-		encode_code_actions(uri, doc.content, &self.documents, diags.array_view(), &data);
+		encode_code_actions(uri, doc.content, &self.documents, diags.array_view(), &data, self.stdlib_path, rewrites, cursor);
 		respond_nonempty(id_json, &data, "[]");
 	}
 }
 
 // A codeAction request may restrict the kinds it wants (`context.only`, e.g. the
-// `source.organizeImports` VS Code sends on save); every action here is a quickfix.
-fn bool wants_quickfix(Object* context) @private
+// `source.organizeImports` VS Code sends on save). Kinds are hierarchical: asking for
+// `refactor` includes `refactor.rewrite`.
+fn bool wants_kind(Object* context, String kind) @private
 {
 	Object*? only = context.get("only");
 	if (catch only) return true;
 	for (sz i = 0; i < only.get_len(); i++)
 	{
-		String kind = only.get_string_at(i) ?? "";
-		if (kind == "" || kind == "quickfix") return true;
+		String want = only.get_string_at(i) ?? "";
+		if (want == "" || want == kind) return true;
+		if (kind.len > want.len && kind.starts_with(want) && kind[want.len] == '.') return true;
 	}
 	return false;
 }

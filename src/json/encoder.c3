@@ -58,6 +58,7 @@ struct CompletionItem
 	String insert_text;
 	String sort_text;            // fuzzy rank key; empty = let the client sort by label
 	int insert_text_format;      // 0 = unset, 1 = PlainText, 2 = Snippet
+	int insert_text_mode;        // 0 = unset, 1 = asIs, 2 = adjustIndentation
 	bool trigger_signature_help; // emit editor.action.triggerParameterHints command
 }
 
@@ -199,6 +200,10 @@ fn void CompletionItem.encode(&self, DString* out)
 	{
 		out.appendf(",\"insertTextFormat\":%d", self.insert_text_format);
 	}
+	if (self.insert_text_mode != 0)
+	{
+		out.appendf(",\"insertTextMode\":%d", self.insert_text_mode);
+	}
 	if (self.trigger_signature_help)
 	{
 		out.append(`,"command":{"title":"Trigger Parameter Hints","command":"editor.action.triggerParameterHints"}`);
@@ -245,7 +250,7 @@ fn void encode_server_capabilities(DString* out, String version)
 	out.append(`"documentHighlightProvider":true,`);
 	out.append(`"referencesProvider":true,`);
 	out.append(`"renameProvider":true,`);
-	out.append(`"codeActionProvider":{"codeActionKinds":["quickfix"]},`);
+	out.append(`"codeActionProvider":{"codeActionKinds":["quickfix","refactor.rewrite"]},`);
 	out.append(`"signatureHelpProvider":{"triggerCharacters":["(",",","{","}"]}`);
 	out.append(`},`);
 	out.appendf(`"serverInfo":{"name":"c3-lsp","version":"%s"}}`, version);

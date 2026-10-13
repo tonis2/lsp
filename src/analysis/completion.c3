@@ -143,6 +143,7 @@ struct CompletionCandidate
 {
 	String label;
 	String detail;
+	String insert_text; // a snippet body (kind 15); empty for everything else
 	int kind;
 	FuzzyRank rank;
 }
@@ -170,13 +171,17 @@ struct CompletionSink
 
 	String pattern;
 	bool ranked;
+	// The client accepts snippet syntax. Without it, call snippets and keyword
+	// templates would insert their `$0` / `${1:...}` markup literally.
+	bool snippets;
 }
 
-fn void CompletionSink.init(&self, String pattern)
+fn void CompletionSink.init(&self, String pattern, bool snippets = true)
 {
 	self.count = 0;
 	self.seen_count = 0;
 	self.pattern = pattern;
+	self.snippets = snippets;
 	// Nothing typed means nothing to rank against, so keep insertion order and let the
 	// client sort by label — the behaviour before ranking existed.
 	self.ranked = pattern.len > 0;
@@ -214,8 +219,7 @@ fn void CompletionSink.suppress(&self, String name)
 }
 
 // Offer a candidate. Names that do not match the pattern, and names already seen, are
-// dropped. The rest are kept in rank order; once the buffer is full a candidate has to
-// beat the weakest kept item to get in.
+// dropped. The rest are kept in rank order (see insert).
 fn void CompletionSink.add(&self, String label, int kind, String detail = "")
 {
 	if (label.len == 0) return;
@@ -226,8 +230,25 @@ fn void CompletionSink.add(&self, String label, int kind, String detail = "")
 	String interned = self.record(label);
 	if (interned.len == 0) return;
 
-	CompletionCandidate cand = { .label = interned, .detail = detail.len > 0 ? completion_intern(detail) : "", .kind = kind, .rank = rank, };
+	self.insert({ .label = interned, .detail = detail.len > 0 ? completion_intern(detail) : "", .kind = kind, .rank = rank, });
+}
 
+// Offer a keyword template. It shares its label with the plain keyword (`for` the
+// keyword and `for` the loop template), so it bypasses the by-name dedup; the table
+// it comes from has no repeats.
+fn void CompletionSink.add_snippet(&self, String label, String detail, String body)
+{
+	if (!self.snippets) return;
+	FuzzyRank rank = fuzzy_rank_ci(label, self.pattern);
+	if (!rank.matched) return;
+	self.insert({ .label = label, .detail = detail, .insert_text = body, .kind = 15, .rank = rank, }); // 15 = Snippet
+}
+
+// Keep `cand` in rank order. Once the buffer is full a candidate has to beat the
+// weakest kept item to get in.
+fn void CompletionSink.insert(&self, CompletionCandidate cand)
+{
+	FuzzyRank rank = cand.rank;
 	if (!self.ranked)
 	{
 		if (self.count < MAX_COMPLETION_ITEMS) self.items[self.count++] = cand;
@@ -270,7 +291,13 @@ fn void CompletionSink.flush(&self, DString* out)
 		// would present an arbitrary alphabetical slice of the top N as if it were the whole set.
 		if (self.ranked) item.sort_text = completion_order_key(i);
 
-		if (cand.kind == 2 || cand.kind == 3) // Method / Function (incl. macros)
+		if (cand.kind == 15) // Snippet
+		{
+			item.insert_text = cand.insert_text;
+			item.insert_text_format = 2;
+			item.insert_text_mode = 2; // adjustIndentation: continuation lines follow the cursor's line
+		}
+		else if (self.snippets && (cand.kind == 2 || cand.kind == 3)) // Method / Function (incl. macros)
 		{
 			// Insert "label($0)" as a snippet and trigger the parameter-hints popup so
 			// accepting a callable drops the cursor inside the parens with signatures shown.
@@ -315,7 +342,7 @@ fn uint completion_hash(String s) @private
 	return hash;
 }
 
-fn void encode_completions(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, DString* out)
+fn void encode_completions(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, DString* out, bool snippets = true)
 {
 	// Find prefix by scanning backwards from offset
 	sz prefix_start = offset;
@@ -416,7 +443,7 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 	// Too large for the stack (the candidate buffer plus the seen-name table), and it
 	// lives exactly as long as the request does, so it comes from the temp pool.
 	CompletionSink* sink = mem::tnew(CompletionSink);
-	sink.init(prefix);
+	sink.init(prefix, snippets);
 
 	if (is_dot_context)
 	{
@@ -440,6 +467,10 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 		{
 			foreach (ct : CT_KEYWORDS) sink.add(ct, 14); // Keyword
 		}
+
+		// Statement and declaration templates (`for`, `fn`, `$if`, ...), where the
+		// cursor's position allows them
+		add_snippets(uri, content, docs, prefix_start, prefix, sink);
 
 		// Document identifiers (current file + open docs + project files)
 		collect_all_identifiers(uri, content, prefix, docs, stdlib_path, sink);
