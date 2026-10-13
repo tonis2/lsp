@@ -2,6 +2,7 @@ module lsp;
 
 import std::core::dstring;
 import std::core::mem;
+import std::collections::list;
 import std::io::file;
 import std::io::path;
 import c3::lexer;
@@ -24,6 +25,22 @@ fn void encode_document_highlights(String content, sz offset, DString* out, Toke
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
 	LineOffsets* lo = stream.get_line_offsets();
+
+	// A local variable or parameter: only the uses that resolve to the same
+	// declaration, so a sibling block's own `abc` stays unmarked.
+	LocalScope scope;
+	if (try decl = stream.tokens.local_target(cursor_idx, &scope))
+	{
+		bool first = true;
+		out.append("[");
+		for (sz i = scope.lparen + 1; i < scope.end; i++)
+		{
+			if (stream.tokens.refers_to_local(i, decl, scope)) append_highlight(stream.tokens.entries[i], lo, out, &first);
+		}
+		out.append("]");
+		if (first) out.clear();
+		return;
+	}
 
 	// Detect if cursor is on a member access (preceded by DOT)
 	bool is_member = cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT;
@@ -55,21 +72,7 @@ fn void encode_document_highlights(String content, sz offset, DString* out, Toke
 				if (recv.text != member_receiver) continue;
 			}
 
-			if (!first) out.append(",");
-			first = false;
-
-			sz line = lo.find_line(tok.offset);
-			sz col = tok.offset - lo.entries[line];
-			sz end_col = col + tok.len;
-
-			DocumentHighlight highlight = {
-				.range = {
-					.start = {.line = line, .character = col},
-					.end = {.line = line, .character = end_col},
-				},
-				.kind = 1,
-			};
-			highlight.encode(out);
+			append_highlight(tok, lo, out, &first);
 		}
 	}
 	out.append("]");
@@ -79,6 +82,25 @@ fn void encode_document_highlights(String content, sz offset, DString* out, Toke
 	{
 		out.clear();
 	}
+}
+
+// Append one DocumentHighlight, handling the JSON comma between entries.
+fn void append_highlight(Token tok, LineOffsets* lo, DString* out, bool* first) @private
+{
+	if (!*first) out.append(",");
+	*first = false;
+
+	sz line = lo.find_line(tok.offset);
+	sz col = tok.offset - lo.entries[line];
+
+	DocumentHighlight highlight = {
+		.range = {
+			.start = {.line = line, .character = col},
+			.end = {.line = line, .character = col + tok.len},
+		},
+		.kind = 1,
+	};
+	highlight.encode(out);
 }
 
 // Encode references (cross-file occurrences of the symbol under cursor).
@@ -97,6 +119,24 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+
+	// A local variable or parameter never leaves its fn/macro: report the uses
+	// that resolve to the same declaration and skip the cross-file search.
+	LocalScope scope;
+	if (try decl = stream.tokens.local_target(cursor_idx, &scope))
+	{
+		LineOffsets* lo = stream.get_line_offsets();
+		bool first = true;
+		out.append("[");
+		for (sz i = scope.lparen + 1; i < scope.end; i++)
+		{
+			if (i == decl && !include_decl) continue;
+			if (stream.tokens.refers_to_local(i, decl, scope)) append_ref_location(uri, stream.tokens.entries[i], lo, out, &first);
+		}
+		out.append("]");
+		if (first) out.clear();
+		return;
+	}
 
 	// Detect if cursor is on a member access (preceded by DOT).
 	// For member accesses, find the receiver name (IDENT before DOT) and restrict
@@ -266,53 +306,6 @@ fn void append_ref_location(String uri, Token tok, LineOffsets* lo, DString* out
 	loc.encode(out);
 }
 
-// Returns the byte offset range (start, end) of the function scope containing `offset`,
-// or (0, 0) if offset is not inside any function.
-// The scope includes the parameter list so that renaming a parameter also covers
-// its occurrences in the function body.
-fn sz[2] TokenList.find_function_scope(&self, sz offset)
-{
-	for (sz i = 0; i < self.size; i++)
-	{
-		TokenType tt = self.entries[i].type;
-		if (tt == FUNC || tt == MACRO)
-		{
-			sz brace_end = self.find_brace_end(i + 1);
-			if (brace_end == 0) continue;
-
-			// Find the opening paren and brace offsets
-			sz paren_start = 0;
-			sz brace_start = 0;
-			for (sz j = i + 1; j < self.size; j++)
-			{
-				if (paren_start == 0 && self.entries[j].type == LPAREN)
-				{
-					paren_start = self.entries[j].offset;
-				}
-				if (self.entries[j].type == LBRACE)
-				{
-					brace_start = self.entries[j].offset;
-					break;
-				}
-			}
-			if (brace_start == 0) continue;
-
-			// Cursor inside function body
-			if (offset >= brace_start && offset < brace_end)
-			{
-				return { brace_start, brace_end };
-			}
-
-			// Cursor inside parameter list — scope covers params + body
-			if (paren_start != 0 && offset >= paren_start && offset < brace_start)
-			{
-				return { paren_start, brace_end };
-			}
-		}
-	}
-	return { 0, 0 };
-}
-
 // Encode rename (cross-file symbol rename).
 // Output: JSON WorkspaceEdit object, or empty string if none.
 fn void encode_rename(String uri, String content, sz offset, DocumentList* docs, String stdlib_path, String new_name, DString* out)
@@ -333,18 +326,27 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 	TokenType ct = cursor_tok.type;
 	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
 
-	// Check if cursor is inside a function body — if so, restrict rename to that scope
-	sz[2] scope = stream.tokens.find_function_scope(offset);
-
 	bool first_uri = true;
 	out.append(`{"changes":{`);
 
-	if (scope[0] != 0 || scope[1] != 0)
+	LocalScope scope;
+	sz decl;
+	RenameReach reach = stream.tokens.rename_reach(cursor_idx, uri, docs, &scope, &decl);
+	if (reach == LOCAL || reach == FUNCTION)
 	{
-		// Local variable — only rename within this function's scope in current file
-		stream.tokens.collect_rename_edits_scoped(uri, content, cursor_tok, new_name, out, &first_uri, scope[0], scope[1]);
+		List{Token} toks;
+		toks.tinit();
+		for (sz i = scope.lparen + 1; i < scope.end; i++)
+		{
+			Token tok = stream.tokens.entries[i];
+			bool hit = reach == LOCAL
+				? stream.tokens.refers_to_local(i, decl, scope)
+				: tok.type == ct && tok.text == cursor_tok.text;
+			if (hit) toks.push(tok);
+		}
+		emit_rename_edits(uri, stream.get_line_offsets(), toks.array_view(), new_name, out, &first_uri);
 	}
-	else
+	else if (reach == GLOBAL)
 	{
 		// Module-level symbol — rename globally across all files
 		// 1. Current file
@@ -382,6 +384,111 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 	}
 }
 
+// How far a rename from the token at `idx` reaches.
+enum RenameReach
+{
+	LOCAL,    // a local or parameter: the uses resolving to its declaration (`decl`)
+	FUNCTION, // an unresolved name inside a fn/macro: every same-named token there
+	GLOBAL,   // a module-level symbol: every file that can see it
+	NONE,     // declared outside the project (the stdlib): renaming it would break the code
+}
+
+// Renaming `helper` from a call inside some function body must still rename its
+// declaration and every other caller, so being inside a function is not enough to
+// make a name local: it has to resolve to a local declaration.
+fn RenameReach TokenList.rename_reach(&self, sz idx, String uri, DocumentList* docs, LocalScope* scope, sz* decl)
+{
+	Token tok = self.entries[idx];
+	if (tok.type == TYPE_IDENT || tok.type == CONST_IDENT)
+	{
+		return has_project_declaration(self, tok, uri, docs) ? GLOBAL : NONE;
+	}
+	if (try d = self.local_target(idx, scope))
+	{
+		*decl = d;
+		return LOCAL;
+	}
+	LocalScope? around = self.callable_around(idx);
+	if (catch around) return GLOBAL;
+	*scope = around;
+
+	TokenType prev = idx > 0 ? self.entries[idx - 1].type : EOS;
+	// Members keep the old function-wide rename: matching them up needs the
+	// receiver's type.
+	if (prev == DOT) return FUNCTION;
+	// A trailing body parameter (`macro @each(list; @body)`).
+	for (sz j = around.lparen + 1; j < around.rparen; j++)
+	{
+		if (self.entries[j].text == tok.text) return FUNCTION;
+	}
+	if (has_project_declaration(self, tok, uri, docs)) return GLOBAL;
+	// A call or qualified name with no declaration in the project lives in the
+	// stdlib or another library.
+	if (prev == SCOPE || (idx + 1 < self.size && self.entries[idx + 1].type == LPAREN)) return NONE;
+	// A local written in a form the declaration matcher does not know.
+	return FUNCTION;
+}
+
+// True when `tok` has a module-level declaration in this file, an open document or
+// a project file (the stdlib is not searched).
+fn bool has_project_declaration(TokenList* tokens, Token tok, String uri, DocumentList* docs) @private
+{
+	if (tokens.declares_globally(tok)) return true;
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].uri == uri) continue;
+		if (docs.entries[d].get_tokens().tokens.declares_globally(tok)) return true;
+	}
+	String path = uri_to_path(uri);
+	if (path.len == 0) return false;
+	GlobalDeclScan scan = { tok };
+	return scan_project_dirs(path, &scan);
+}
+
+// Types and constants are never locals, so the cursor-less declaration search
+// is exact for them; plain names have to skip locals and parameters.
+fn bool TokenList.declares_globally(&self, Token tok)
+{
+	if (tok.type == TYPE_IDENT || tok.type == CONST_IDENT) return @ok(self.find_declaration_in(tok));
+	return @ok(self.find_global_declaration(tok.text));
+}
+
+struct GlobalDeclScan (FileVisitor) @private
+{
+	Token target;
+}
+
+fn bool GlobalDeclScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	return stream.tokens.declares_globally(self.target);
+}
+
+// Rename edits for `toks` in one file, as a URI-keyed TextEdit array.
+fn void emit_rename_edits(String uri, LineOffsets* lo, Token[] toks, String new_name, DString* out, bool* first_uri) @private
+{
+	if (toks.len == 0) return;
+	if (!*first_uri) out.append(",");
+	*first_uri = false;
+	out.append(`"`);
+	json_escape_into(out, uri);
+	out.append(`":[`);
+	foreach (i, tok : toks)
+	{
+		if (i > 0) out.append(",");
+		sz line = lo.find_line(tok.offset);
+		sz col = tok.offset - lo.entries[line];
+		TextEdit edit = {
+			.range = {
+				.start = {.line = line, .character = col},
+				.end = {.line = line, .character = col + tok.len},
+			},
+			.new_text = new_name,
+		};
+		edit.encode(out);
+	}
+	out.append("]");
+}
+
 // Collect rename edits for matching tokens in a single file, emitting a URI-keyed TextEdit array.
 fn void TokenList.collect_rename_edits(&self, String uri, String content, Token target, String new_name, DString* out, bool* first_uri)
 {
@@ -395,57 +502,6 @@ fn void TokenList.collect_rename_edits(&self, String uri, String content, Token 
 
 	foreach (tok : self)
 	{
-		if (tok.type == target.type && tok.text == target.text)
-		{
-			if (!found_any)
-			{
-				if (!*first_uri) out.append(",");
-				out.append(`"`);
-				json_escape_into(out, uri);
-				out.append(`":[`);
-				found_any = true;
-			}
-
-			if (!first_edit) out.append(",");
-			first_edit = false;
-
-			sz line = lo.find_line(tok.offset);
-			sz col = tok.offset - lo.entries[line];
-			sz end_col = col + tok.len;
-
-			TextEdit edit = {
-				.range = {
-					.start = {.line = line, .character = col},
-					.end = {.line = line, .character = end_col},
-				},
-				.new_text = new_name,
-			};
-			edit.encode(out);
-		}
-	}
-
-	if (found_any)
-	{
-		out.append("]");
-		*first_uri = false;
-	}
-}
-
-// Collect rename edits for matching tokens within a specific offset range in a single file.
-fn void TokenList.collect_rename_edits_scoped(&self, String uri, String content, Token target,
-	String new_name, DString* out, bool* first_uri, sz scope_start, sz scope_end)
-{
-	LineOffsets lo;
-	lo.init(mem);
-	defer lo.free();
-	lo.build(content);
-
-	bool found_any = false;
-	bool first_edit = true;
-
-	foreach (tok : self)
-	{
-		if (tok.offset < scope_start || tok.offset >= scope_end) continue;
 		if (tok.type == target.type && tok.text == target.text)
 		{
 			if (!found_any)
