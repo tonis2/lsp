@@ -1813,7 +1813,7 @@ fn sz? TokenList.find_enum_or_constdef_member(&self, String name)
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
 		TokenType kw = self.entries[i].type;
-		if (kw != ENUM && kw != FAULTDEF && kw != CONSTDEF) continue;
+		if (kw != ENUM && kw != CONSTSET && kw != FAULTDEF && kw != CONSTDEF) continue;
 
 		// Locate the first LBRACE or EOS after the keyword to tell block from braceless.
 		sz j = i + 1;
@@ -2008,7 +2008,7 @@ fn sz? TokenList.find_declaration(
 					return name_idx;
 				}
 			}
-			// enum / faultdef / constdef member: enum Foo { NAME }, constdef Bar : T { NAME = v }, faultdef NAME
+			// enum / constset / faultdef / constdef member: enum Foo { NAME }, constdef Bar : T { NAME = v }, faultdef NAME
 			if (try found = self.find_enum_or_constdef_member(name)) return found;
 		case IDENT:
 		case AT_IDENT:

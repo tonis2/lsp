@@ -17,6 +17,7 @@ const String[*] KEYWORDS = {
 	"catch",
 	"const",
 	"constdef",
+	"constset",
 	"continue",
 	"default",
 	"defer",
@@ -592,6 +593,7 @@ fn void collect_declarations_from_content(String content, String prefix, Complet
 				// scanned as module-level declarations.
 				i = stream.tokens.skip_type_body(i + 1);
 			case ENUM:
+			case CONSTSET:
 			case FAULTDEF:
 				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == TYPE_IDENT)
 				{

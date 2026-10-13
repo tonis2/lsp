@@ -267,7 +267,7 @@ fn void TokenList.extract_docs_at(&self, String content, sz decl_idx, DString* o
 		for (sz i = decl_idx; i > 0; i--)
 		{
 			TokenType t = self.entries[i - 1].type;
-			if (t == FUNC || t == MACRO || t == STRUCT || t == UNION || t == ENUM || t == BITSTRUCT || t == INTERFACE || t == FAULTDEF || t == CONSTDEF || t == TYPEDEF || t == ALIAS || t == ATTRDEF)
+			if (t == FUNC || t == MACRO || t == STRUCT || t == UNION || t == ENUM || t == CONSTSET || t == BITSTRUCT || t == INTERFACE || t == FAULTDEF || t == CONSTDEF || t == TYPEDEF || t == ALIAS || t == ATTRDEF)
 			{
 				decl_start_idx = i - 1;
 				break;

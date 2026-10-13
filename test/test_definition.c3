@@ -39,6 +39,18 @@ fn void test_definition_enum() @test {
 	assert(result.contains(`"character":5`), "got: %s", result);
 }
 
+fn void test_definition_constset() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "constset Color { RED }\nColor c;";
+	// Cursor on "Color" in usage at offset 23
+	encode_definition("file:///test.c3", content, 23, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":9`), "got: %s", result);
+}
+
 fn void test_definition_at_declaration_no_result() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);
@@ -140,6 +152,34 @@ fn void test_definition_enum_member_cross_file() @test {
 	String result = out.str_view();
 	assert(result.contains(`file:///types.c3`), "got: %s", result);
 	assert(result.contains(`"character":13`), "got: %s", result);
+
+	ds.close("file:///types.c3");
+}
+
+fn void test_definition_constset_member() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	String content = "constset TokenType { LBRACE, RBRACE }\nTokenType t = LBRACE;";
+	// Cursor on "LBRACE" in usage at offset 53
+	encode_definition("file:///test.c3", content, 53, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"line":0`), "got: %s", result);
+	assert(result.contains(`"character":21`), "got: %s", result);
+}
+
+fn void test_definition_constset_member_cross_file() @test {
+	DString out = dstring::temp();
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open("file:///types.c3", "constset Color { RED, GREEN, BLUE }", 1);
+
+	String content = "Color c = RED;";
+	// Cursor on "RED" at offset 10
+	encode_definition("file:///test.c3", content, 10, ds, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`file:///types.c3`), "got: %s", result);
+	assert(result.contains(`"character":17`), "got: %s", result);
 
 	ds.close("file:///types.c3");
 }
