@@ -640,7 +640,7 @@ fn void LspServer.handle_references(&self, Object* msg, String id_json)
 		bool include_decl = true;
 		if (try ctx = msg.get("params")!!.get("context"))
 		{
-			include_decl = (ctx.get_int("includeDeclaration") ?? 1) != 0;
+			include_decl = ctx.get_bool("includeDeclaration") ?? true;
 		}
 
 		DString data = dstring::temp();

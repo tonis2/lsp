@@ -129,10 +129,24 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 		return;
 	}
 
-	// Detect if cursor is on a member access (preceded by DOT).
-	// For member accesses, find the receiver name (IDENT before DOT) and restrict
-	// matching to same receiver.member patterns. This avoids false positives where
-	// e.g. `.type` on one struct matches `.type` on a completely different struct.
+	// A member — field, method, enum member, interface method — resolved to the type
+	// that declares it: its declaration and every typed use across the project.
+	if (try target = stream.tokens.member_target(cursor_idx, uri, docs, stdlib_path))
+	{
+		bool first = true;
+		out.append("[");
+		MemberQuery q;
+		q.init(&stream.tokens, target, uri, docs, stdlib_path, out, &first);
+		q.include_decl = include_decl;
+		q.run(&stream.tokens, content);
+		out.append("]");
+		if (first) out.clear();
+		return;
+	}
+
+	// Detect if cursor is on a member access (preceded by DOT) whose receiver type is
+	// unknown. Restrict matching to the same receiver text: `.type` on one struct
+	// must not match `.type` on a completely different one.
 	bool is_member = cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT;
 	String member_receiver = "";
 	if (is_member && cursor_idx >= 2)
@@ -150,21 +164,7 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 	// 1. Current file — collect all matching tokens
 	if (is_member)
 	{
-		// A method declaration writes `Shape.run`, its calls write `s.run`: the
-		// receivers never match textually, which is why the declaration and its
-		// calls used to be reported as two disjoint sets. Matching on the type the
-		// receiver resolves to joins them, and still keeps `other.run()` on an
-		// unrelated type out. Without a resolvable type, fall back to the literal
-		// receiver rather than over-report.
-		String owner = stream.tokens.member_owner_type(cursor_idx, uri, docs, stdlib_path);
-		if (owner.len > 0)
-		{
-			stream.tokens.collect_member_refs(uri, content, cursor_tok, owner, docs, stdlib_path, out, &first);
-		}
-		else
-		{
-			stream.tokens.collect_refs(uri, content, cursor_tok, out, &first, true, member_receiver);
-		}
+		stream.tokens.collect_refs(uri, content, cursor_tok, out, &first, true, member_receiver);
 	}
 	else
 	{
@@ -247,37 +247,6 @@ fn String TokenList.member_owner_type(&self, sz idx, String uri, DocumentList* d
 	return self.resolve_receiver_type(idx, uri, docs, stdlib_path);
 }
 
-// Occurrences of `target` that are members of `owner_type` — the declaration
-// `fn void Shape.run(&self)` together with every `x.run()` whose receiver resolves to
-// Shape. Same-file only: resolving a receiver in another file needs that file's own
-// scope, which this pass does not carry.
-fn void TokenList.collect_member_refs(
-	&self,
-	String uri,
-	String content,
-	Token target,
-	String owner_type,
-	DocumentList* docs,
-	String stdlib_path,
-	DString* out,
-	bool* first
-)
-{
-	LineOffsets lo;
-	lo.init(mem);
-	defer lo.free();
-	lo.build(content);
-
-	for (sz i = 0; i < self.size; i++)
-	{
-		Token tok = self.entries[i];
-		if (tok.type != target.type || tok.text != target.text) continue;
-		if (i == 0 || self.entries[i - 1].type != DOT) continue;
-		if (self.member_owner_type(i, uri, docs, stdlib_path) != owner_type) continue;
-		append_ref_location(uri, tok, &lo, out, first);
-	}
-}
-
 // Append one Location, handling the JSON comma between entries.
 fn void append_ref_location(String uri, Token tok, LineOffsets* lo, DString* out, bool* first) @private
 {
@@ -310,6 +279,26 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 
 	bool first_uri = true;
 	out.append(`{"changes":{`);
+	defer { if (first_uri) out.clear(); }
+
+	// A field or method: its declaration and every typed use across the project —
+	// unless only the stdlib declares it, where renaming would break the code.
+	if (ct == IDENT)
+	{
+		if (try target = stream.tokens.member_target(cursor_idx, uri, docs, stdlib_path))
+		{
+			if (member_declared_in_project(&stream.tokens, target.owner, target.name, uri, docs))
+			{
+				MemberQuery q;
+				q.init(&stream.tokens, target, uri, docs, stdlib_path, out, &first_uri);
+				q.include_decl = true;
+				q.new_name = new_name;
+				q.run(&stream.tokens, content);
+			}
+			out.append(`}}`);
+			return;
+		}
+	}
 
 	LocalScope scope;
 	sz decl;
@@ -359,11 +348,6 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 	}
 
 	out.append(`}}`);
-
-	if (first_uri)
-	{
-		out.clear();
-	}
 }
 
 // How far a rename from the token at `idx` reaches.
@@ -395,8 +379,8 @@ fn RenameReach TokenList.rename_reach(&self, sz idx, String uri, DocumentList* d
 	*scope = around;
 
 	TokenType prev = idx > 0 ? self.entries[idx - 1].type : EOS;
-	// Members keep the old function-wide rename: matching them up needs the
-	// receiver's type.
+	// A member whose receiver type could not be resolved (resolved ones never get
+	// here): the function-wide rename is the best that can be done.
 	if (prev == DOT) return FUNCTION;
 	// A trailing body parameter (`macro @each(list; @body)`).
 	for (sz j = around.lparen + 1; j < around.rparen; j++)

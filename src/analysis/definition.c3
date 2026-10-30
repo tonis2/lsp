@@ -1130,7 +1130,13 @@ fn String TokenList.resolve_call_return_type_across(
 
 	// 3 + 4. Project files on disk, then the stdlib
 	String file_path = uri_to_path(uri);
-	return resolve_return_type_in_project(file_path, stdlib_path, type_name, name);
+	result = resolve_return_type_in_project(file_path, stdlib_path, type_name, name);
+	if (result.len > 0 || type_name.len == 0) return result;
+
+	// A method the type takes from another one: an `inline` base or a parent interface.
+	TypeInfo owner = self.member_declarer({ .name = type_name }, name, uri, docs, stdlib_path);
+	if (!owner.known() || owner.name == type_name) return "";
+	return self.resolve_call_return_type_across(owner.name, name, uri, docs, stdlib_path);
 }
 
 // type_name empty = free function lookup, otherwise a method on type_name.
@@ -1984,6 +1990,29 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 			))
 			{
 				return;
+			}
+
+			// A member the receiver takes from another type: an `inline` base, a
+			// typedef's base or a parent interface.
+			TypeInfo owner = stream.tokens.member_declarer({ .name = recv_type }, cursor_tok.text, uri, docs, stdlib_path);
+			if (owner.known() && owner.name != recv_type && owner.name != field_type)
+			{
+				if (is_ident(ct) && stream.tokens.try_find_definition(
+					cursor_tok,
+					cursor_idx,
+					uri,
+					content,
+					docs,
+					stdlib_path,
+					out,
+					owner.name,
+					"",
+					&visctx
+				))
+				{
+					return;
+				}
+				if (try_find_struct_field(owner.name, cursor_tok.text, uri, content, docs, stdlib_path, out)) return;
 			}
 		}
 		return;

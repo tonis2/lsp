@@ -490,6 +490,291 @@ fn bool AliasScan.visit(&self, String path, String content, TokenStream* stream)
 	return true;
 }
 
+// A type whose members another type exposes as its own, and whether only its fields
+// come through: a plain `typedef Name = Base;` keeps Base's fields but not its methods.
+struct MemberSource
+{
+	TypeInfo type;
+	bool fields_only;
+}
+
+const MAX_MEMBER_SOURCES = 8;
+
+// Append `src` unless a type of that name is already listed or the list is full.
+fn void push_member_source(MemberSource[MAX_MEMBER_SOURCES]* out, sz* n, MemberSource src) @private
+{
+	if (!src.type.known() || *n >= MAX_MEMBER_SOURCES) return;
+	for (sz k = 0; k < *n; k++)
+	{
+		if ((*out)[k].type.name == src.type.name) return;
+	}
+	(*out)[(*n)++] = src;
+}
+
+// The types `type_name`'s declaration in this file says it takes members from:
+// - `inline Base member;` inside a struct (generic bases too: `inline List{int} items;`);
+// - `typedef Name = [inline] Base;` (fields only unless inline);
+// - `alias Name = Target;`;
+// - `interface Name : A, B`.
+// Array-shaped bases (`typedef String = inline char[]`) carry no declared members and
+// are left to find_inline_slice_typedef. Returns whether this file declares the type
+// at all, so a cross-file search can stop at the declaring file.
+fn bool TokenList.direct_member_sources(&self, String type_name, MemberSource[MAX_MEMBER_SOURCES]* out, sz* n)
+{
+	bool declared;
+	bool struct_seen;
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+		switch (self.entries[i].type)
+		{
+			case STRUCT:
+			case UNION:
+			case BITSTRUCT:
+				declared = true;
+				if (struct_seen) continue;
+				struct_seen = true;
+				self.@each_struct_member(type_name, null; sz j)
+				{
+					sz lead = self.decl_type_start(j);
+					TypeInfo t;
+					if (lead > 0 && lead < self.size && self.entries[lead - 1].type == INLINE
+						&& self.read_field_decl(j, &t) && !t.is_array)
+					{
+						t.is_pointer = false;
+						push_member_source(out, n, { .type = t });
+					}
+				};
+			case TYPEDEF:
+				declared = true;
+				bool is_inline;
+				TypeInfo t = self.typedef_target_at(i, &is_inline);
+				if (t.known() && !t.is_array) push_member_source(out, n, { .type = t, .fields_only = !is_inline });
+			case ALIAS:
+				declared = true;
+				push_member_source(out, n, { .type = self.alias_target(type_name) });
+			case INTERFACE:
+				declared = true;
+				// Parents: `interface Name : A, B {`
+				for (sz j = i + 2; j < self.size && self.entries[j].type != LBRACE && self.entries[j].type != EOS; j++)
+				{
+					if (self.entries[j].type == TYPE_IDENT) push_member_source(out, n, { .type = { .name = self.entries[j].text, .mod = self.module_of_decl(i + 1) } });
+				}
+			case ENUM:
+			case FAULTDEF:
+			case CONSTDEF:
+			case CONSTSET:
+				declared = true;
+			default:
+				break;
+		}
+	}
+	return declared;
+}
+
+// The right-hand side of the `typedef Name [attrs] = [inline] Base;` whose keyword is
+// at `kw`, and whether it is inline. Unknown when it is not a plain type.
+fn TypeInfo TokenList.typedef_target_at(&self, sz kw, bool* is_inline)
+{
+	// Skip attributes (`@private`, `@if(...)`) up to the `=`.
+	sz j = kw + 2;
+	while (j < self.size && self.entries[j].type != EQ && self.entries[j].type != EOS)
+	{
+		if (self.entries[j].type == LPAREN)
+		{
+			j = self.match_rparen(j);
+			if (j >= self.size) break;
+		}
+		j++;
+	}
+	if (j + 1 >= self.size || self.entries[j].type != EQ) return {};
+	j++;
+	*is_inline = self.entries[j].type == INLINE;
+	if (*is_inline) j++;
+
+	// Skip a `mod::` qualifier in front of the base type.
+	while (j + 1 < self.size && is_ident(self.entries[j].type) && self.entries[j + 1].type == SCOPE) j += 2;
+
+	TypeInfo t;
+	sz after;
+	if (!self.read_type_at(j, &t, &after)) return {};
+	if (t.mod.len == 0) t.mod = self.module_of_decl(kw + 1);
+	return t;
+}
+
+// direct_member_sources for the file that declares `type_name`: the current file, then
+// the open documents, then the project and the stdlib on disk.
+fn sz TokenList.direct_member_sources_across(
+	&self,
+	String type_name,
+	String uri,
+	DocumentList* docs,
+	String stdlib_path,
+	MemberSource[MAX_MEMBER_SOURCES]* out
+)
+{
+	sz n;
+	if (self.direct_member_sources(type_name, out, &n)) return n;
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].get_tokens().tokens.direct_member_sources(type_name, out, &n)) return n;
+	}
+
+	String file_path = uri_to_path(uri);
+	if (file_path.len == 0) return n;
+	MemberSourceScan scan = { type_name, out, 0 };
+	scan_project_then_stdlib(file_path, stdlib_path, &scan);
+	return scan.n;
+}
+
+struct MemberSourceScan (FileVisitor) @private
+{
+	String type_name;
+	MemberSource[MAX_MEMBER_SOURCES]* out;
+	sz n;
+}
+
+fn bool MemberSourceScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	if (!stream.tokens.direct_member_sources(self.type_name, self.out, &self.n)) return false;
+	// The names point into a file buffer the scan engine frees after this visit.
+	for (sz k = 0; k < self.n; k++) (*self.out)[k].type = (*self.out)[k].type.copy_temp();
+	return true;
+}
+
+// Every type whose members `type` exposes as its own, `type` itself first, then what it
+// aliases, embeds with `inline`, typedefs or extends as an interface, transitively and
+// without repeats. Returns the count written to `out`.
+fn sz TokenList.member_sources(
+	&self,
+	TypeInfo type,
+	String uri,
+	DocumentList* docs,
+	String stdlib_path,
+	MemberSource[MAX_MEMBER_SOURCES]* out
+)
+{
+	sz n;
+	push_member_source(out, &n, { .type = type });
+	for (sz k = 0; k < n; k++)
+	{
+		MemberSource[MAX_MEMBER_SOURCES] direct;
+		sz m = self.direct_member_sources_across((*out)[k].type.name, uri, docs, stdlib_path, &direct);
+		for (sz d = 0; d < m; d++)
+		{
+			MemberSource src = direct[d];
+			src.fields_only |= (*out)[k].fields_only;
+			// An alias written without its argument (`alias Ints = List{int}` reached
+			// as `Ints`) keeps the one it was reached with.
+			if (src.type.generic.len == 0) src.type.generic = (*out)[k].type.generic;
+			push_member_source(out, &n, src);
+		}
+	}
+	return n;
+}
+
+// Whether this file declares `member` on `type_name`: a field, an enum/constdef
+// member, an interface method, or (unless fields_only) a `fn Type.member(` method.
+fn bool TokenList.declares_member(&self, String type_name, String member, bool fields_only)
+{
+	self.@each_struct_member(type_name, null; sz j)
+	{
+		if (self.entries[j].text == member) return true;
+	};
+	if (@ok(self.find_enum_or_constdef_member(member, type_name))) return true;
+	if (fields_only) return false;
+	self.@each_interface_method(type_name; sz j)
+	{
+		if (self.entries[j].text == member) return true;
+	};
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		if (self.entries[i].text != member || self.entries[i + 1].type != LPAREN) continue;
+		if (self.method_receiver_matches(i, type_name, false)) return true;
+	}
+	return false;
+}
+
+// declares_member across the current file, the open documents, the project and the stdlib.
+fn bool TokenList.declares_member_across(
+	&self,
+	String type_name,
+	String member,
+	bool fields_only,
+	String uri,
+	DocumentList* docs,
+	String stdlib_path
+)
+{
+	if (self.declares_member(type_name, member, fields_only)) return true;
+	for (sz d = 0; d < docs.size; d++)
+	{
+		if (docs.entries[d].get_tokens().tokens.declares_member(type_name, member, fields_only)) return true;
+	}
+	String file_path = uri_to_path(uri);
+	if (file_path.len == 0) return false;
+	DeclaresMemberScan scan = { type_name, member, fields_only };
+	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
+}
+
+struct DeclaresMemberScan (FileVisitor) @private
+{
+	String type_name;
+	String member;
+	bool fields_only;
+}
+
+fn bool DeclaresMemberScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	return stream.tokens.declares_member(self.type_name, self.member, self.fields_only);
+}
+
+// The type that actually declares `member` as reached through `type`: `type` itself,
+// or the alias target, inline base, typedef base or parent interface that holds it.
+// Two accesses name the same member exactly when their declarers match. Unknown when
+// no source declares it.
+fn TypeInfo TokenList.member_declarer(&self, TypeInfo type, String member, String uri, DocumentList* docs, String stdlib_path)
+{
+	if (!type.known() || type.is_array) return {};
+	MemberSource[MAX_MEMBER_SOURCES] srcs;
+	sz n = self.member_sources(type, uri, docs, stdlib_path, &srcs);
+	for (sz k = 0; k < n; k++)
+	{
+		if (self.declares_member_across(srcs[k].type.name, member, srcs[k].fields_only, uri, docs, stdlib_path)) return srcs[k].type;
+	}
+	return {};
+}
+
+<*
+ Visit the name token of every method an `interface type_name { fn String name(); }`
+ declares in this token list.
+*>
+macro TokenList.@each_interface_method(&self, String type_name; @body(sz name_idx))
+{
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		if (self.entries[i].type != INTERFACE) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+
+		sz brace = i + 2;
+		while (brace < self.size && self.entries[brace].type != LBRACE && self.entries[brace].type != EOS) brace++;
+		if (brace >= self.size || self.entries[brace].type != LBRACE) continue;
+
+		// Each `fn <type> name(` at the top level of the body.
+		sz end = self.match_rbrace(brace);
+		for (sz j = brace + 1; j < end; j++)
+		{
+			if (self.entries[j].type != FUNC) continue;
+			for (sz k = j + 1; k < end && self.entries[k].type != EOS; k++)
+			{
+				if (self.entries[k].type != LPAREN) continue;
+				if (is_ident(self.entries[k - 1].type)) @body(k - 1);
+				break;
+			}
+		}
+	}
+}
+
 // Copy the borrowed name slices into temp storage. Scan results point into a file
 // buffer the scan engine may free as soon as the visit returns.
 fn TypeInfo TypeInfo.copy_temp(&self)
@@ -621,12 +906,24 @@ fn TypeInfo TokenList.field_type_of(&self, TypeInfo parent, String field, String
 	// The fields may live on the type the name is an alias of, and the alias is also
 	// where the generic argument was written (`alias TokenList = List{Token}`).
 	TypeInfo base = self.canonical_type(parent.name, uri, docs, stdlib_path);
-	if (base.name == parent.name) return {};
-	if (base.generic.len == 0) base.generic = parent.generic;
+	if (base.name != parent.name)
+	{
+		if (base.generic.len == 0) base.generic = parent.generic;
+		found = self.struct_field_type_across(base.name, field, uri, docs, stdlib_path);
+		if (found.known()) return substitute_type_param(found, base);
+	}
 
-	found = self.struct_field_type_across(base.name, field, uri, docs, stdlib_path);
-	if (!found.known()) return {};
-	return substitute_type_param(found, base);
+	// Or on a type it embeds with `inline` (`inline GameObject obj;`, `typedef Comp =
+	// inline GameObject;`) or typedefs, whose fields read as its own.
+	MemberSource[MAX_MEMBER_SOURCES] srcs;
+	sz n = self.member_sources(parent, uri, docs, stdlib_path, &srcs);
+	for (sz k = 1; k < n; k++)
+	{
+		if (srcs[k].type.name == base.name) continue; // tried above
+		found = self.struct_field_type_across(srcs[k].type.name, field, uri, docs, stdlib_path);
+		if (found.known()) return substitute_type_param(found, srcs[k].type);
+	}
+	return {};
 }
 
 // Resolve a declaration typed with the declaring module's generic parameter against

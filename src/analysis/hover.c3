@@ -77,6 +77,23 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 								{
 									find_hover_field_docs(uri, content, recv_type, tok.text, docs, stdlib_path, &doc);
 								}
+
+								// A member the receiver takes from another type: an `inline`
+								// base, a typedef's base or a parent interface.
+								if (doc.str_view().len == 0)
+								{
+									TypeInfo owner = hover_stream.tokens.member_declarer({ .name = recv_type }, tok.text, uri, docs, stdlib_path);
+									if (owner.known() && owner.name != recv_type && owner.name != field_type)
+									{
+										lookup.method_type = owner.name;
+										lookup.method_recv_array = false;
+										find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, owner.name, "", false, &gated);
+										if (doc.str_view().len == 0)
+										{
+											find_hover_field_docs(uri, content, owner.name, tok.text, docs, stdlib_path, &doc);
+										}
+									}
+								}
 							}
 						}
 					}

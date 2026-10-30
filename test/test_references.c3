@@ -449,8 +449,9 @@ fn void test_references_method_through_self() @test {
 	assert(result.contains(`"line":3`), "must include the self call, got: %s", result);
 }
 
-// Two receivers of the same type share a field; a same-named field on another type
-// does not. Receiver-text matching got this backwards in both directions.
+// Two receivers of the same type share a field, and so does its declaration; a
+// same-named field on another type does not. Receiver-text matching got this
+// backwards in both directions.
 fn void test_references_field_matches_by_type_not_receiver() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);
@@ -458,7 +459,8 @@ fn void test_references_field_matches_by_type_not_receiver() @test {
 	String content = "module app;\nstruct Alpha { int len; }\nstruct Beta { int len; }\nfn void t() { Alpha a1; Alpha a2; Beta b; int x = a1.len; int y = a2.len; int z = b.len; }";
 	encode_references("file:///main.c3", content, 132, ds, "", true, &out);
 	String result = out.str_view();
-	assert(count_occurrences(result, `"uri"`) == 2, "expected 2 references, got: %s", result);
+	assert(count_occurrences(result, `"uri"`) == 3, "expected 3 references, got: %s", result);
+	assert(result.contains(`"start":{"line":1,"character":19}`), "must include the Alpha.len declaration, got: %s", result);
 	assert(result.contains(`"character":53`), "must include a1.len, got: %s", result);
 	assert(result.contains(`"character":69`), "must include a2.len, got: %s", result);
 	assert(!result.contains(`"character":84`), "Beta.len is a different field, got: %s", result);

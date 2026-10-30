@@ -1221,6 +1221,21 @@ fn void collect_dot_completions(String uri, String content, sz offset, DocumentL
 		if (sink.count > 0) break; // this pass found members — no fallback needed
 	}
 
+	// Members the receiver takes from other types: an `inline` base (`inline GameObject
+	// obj;`, `typedef Comp = inline GameObject;`), a plain typedef's base (fields only)
+	// or a parent interface.
+	if (!initializer_context && !type_receiver)
+	{
+		MemberSource[MAX_MEMBER_SOURCES] srcs;
+		sz n = stream.tokens.member_sources(recv, uri, docs, stdlib_path, &srcs);
+		for (sz k = 1; k < n; k++)
+		{
+			if (srcs[k].type.name == struct_type) continue; // collected above
+			collect_struct_fields(srcs[k].type, uri, content, docs, stdlib_path, sink);
+			if (!srcs[k].fields_only) collect_type_methods(srcs[k].type, uri, content, docs, stdlib_path, sink);
+		}
+	}
+
 	// An alias of a builtin array or vector (`alias Vec3 = float[<3>]`) also carries
 	// the compiler-builtin `.len`, which no declaration scan can find.
 	if (!initializer_context && !type_receiver && canon.is_array)
@@ -1365,6 +1380,17 @@ fn void TokenList.collect_methods_into(&self, TypeInfo type, CompletionSink* sin
 			if (self.entries[j].type == EOS) break;
 		}
 	}
+	if (!type.is_array) self.collect_interface_methods_into(type.name, sink, ctx);
+}
+
+// The methods an `interface Name { fn String name(); }` declares. Parent interfaces
+// come in through member_sources.
+fn void TokenList.collect_interface_methods_into(&self, String name, CompletionSink* sink, ModuleCtx* ctx)
+{
+	self.@each_interface_method(name; sz j)
+	{
+		if (ctx == null || ctx.can_see(self.module_of_decl(j))) sink.add(self.entries[j].text, 2); // 2 = Method
+	};
 }
 
 // Collect enum/faultdef members matching prefix from a TokenList (enum Type { MEMBER, ... } patterns).
