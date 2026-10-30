@@ -67,6 +67,13 @@ fn String detect_stdlib_path(String compiler_path)
 	return (String)owned;
 }
 
+// True when `p` names an existing directory.
+fn bool is_directory(String p)
+{
+	if (try dir = path::tnew(p)) return path::is_dir(dir);
+	return false;
+}
+
 // Extract the path printed on the `Installed directory:` line of `c3c --version`
 // output. Returns "" when the line is absent (e.g. the binary was not c3c). Pure and
 // side-effect free so it can be unit-tested against fixed sample output.

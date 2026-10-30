@@ -382,7 +382,10 @@ fn bool TokenList.extract_signature_at(
 						break;
 					}
 				}
-				else if (t == LBRACE || t == EOS) break;
+				else if (t == LBRACE || t == EOS)
+				{
+					break;
+				}
 			}
 		}
 	}

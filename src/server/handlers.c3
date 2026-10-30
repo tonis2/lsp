@@ -117,6 +117,18 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 		self.snippet_support = item.get_bool("snippetSupport") ?? false;
 	}
 
+	// A configured stdlib path that is not a directory (a mistyped setting, or the
+	// path of some binary) would make every `c3c --stdlib` run fail before compiling,
+	// so no diagnostics would ever show. Drop it and detect the real one below; the
+	// rejected value is reported once the initialize response is out. Not freed: it
+	// may be a command-line argument.
+	String bad_stdlib = "";
+	if (self.stdlib_path.len > 0 && !is_directory(self.stdlib_path))
+	{
+		bad_stdlib = self.stdlib_path;
+		self.stdlib_path = "";
+	}
+
 	// If no stdlib path was supplied (via CLI or client settings), ask the resolved
 	// compiler where it is installed and derive <install dir>/lib/std. Runs after the
 	// overrides above so a client-configured compiler-path is honored. detect_stdlib_path
@@ -130,6 +142,25 @@ fn void LspServer.handle_initialize(&self, Object* msg, String id_json)
 	DString result = dstring::temp();
 	encode_server_capabilities(&result, VERSION);
 	send_response(id_json, result.str_view());
+
+	if (bad_stdlib.len > 0)
+	{
+		DString warn = dstring::temp();
+		warn.append(`{"type":2,"message":"c3-lsp: the stdlib path '`);
+		json_escape_into(&warn, bad_stdlib);
+		warn.append(`' is not a directory (check the c3.stdlib-path setting); `);
+		if (self.stdlib_path.len > 0)
+		{
+			warn.append(`using '`);
+			json_escape_into(&warn, self.stdlib_path);
+			warn.append(`' from the compiler instead."}`);
+		}
+		else
+		{
+			warn.append(`ignoring it."}`);
+		}
+		send_notification("window/showMessage", warn.str_view());
+	}
 }
 
 // params.capabilities.textDocument.completion.completionItem, when the client sent it.
