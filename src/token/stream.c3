@@ -29,19 +29,8 @@ fn TokenStream token_stream_tokenize(String content)
 
 	Lexer lex;
 	lex.init(content);
-	while (true)
-	{
-		if (try tok = lex.next())
-		{
-			self.tokens.push(tok);
-		}
-		else
-		{
-			if (lex.at_end()) break;
-			lex.pos++;
-			lex.col++;
-		}
-	}
+	// Invalid input comes back as INVALID tokens, so the only failure is the end.
+	while (try tok = lex.next()) self.tokens.push(tok);
 	return self;
 }
 
@@ -82,11 +71,7 @@ fn LineOffsets* TokenStream.get_line_offsets(&self)
 // Convert a token to a Range using this stream's line offsets
 fn Range TokenStream.token_to_range(&self, Token tok)
 {
-	LineOffsets* lo = self.get_line_offsets();
-	sz line = lo.find_line(tok.offset);
-	sz col = tok.offset - lo.entries[line];
-	sz end_col = col + tok.len;
-	return (Range) { .start = { .line = line, .character = col }, .end = { .line = line, .character = end_col } };
+	return span_to_range(self.content, self.get_line_offsets(), tok.offset, tok.offset + tok.len);
 }
 
 // Core accessors with C3 error handling using ?

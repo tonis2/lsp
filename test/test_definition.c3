@@ -51,15 +51,16 @@ fn void test_definition_constset() @test {
 	assert(result.contains(`"character":9`), "got: %s", result);
 }
 
-fn void test_definition_at_declaration_no_result() @test {
+fn void test_definition_at_declaration_is_itself() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
 	String content = "fn void hello() {}";
-	// Cursor on "hello" at the declaration itself — offset 8
+	// Cursor on "hello" at the declaration itself — offset 8. The answer is the
+	// declaration, never a same-named symbol found by searching other files (editors
+	// offer "find references" from there).
 	encode_definition("file:///test.c3", content, 8, ds, "", &out);
-	// Should return empty (already at declaration)
-	assert(out.str_view() == "", "got: %s", out.str_view());
+	assert(out.str_view().contains(`"start":{"line":0,"character":8}`), "got: %s", out.str_view());
 }
 
 fn void test_definition_keyword_no_result() @test {

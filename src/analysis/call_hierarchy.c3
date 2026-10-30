@@ -30,18 +30,6 @@ struct CallableSpan
 	sz name_len;
 }
 
-// Convert a byte span to an LSP range.
-fn Range offsets_to_range(LineOffsets* lo, sz start, sz end)
-{
-	if (end < start) end = start;
-	sz start_line = lo.find_line(start);
-	sz end_line   = lo.find_line(end > 0 ? end - 1 : 0);
-	return {
-		.start = { .line = start_line, .character = start - lo.entries[start_line] },
-		.end = { .line = end_line, .character = end - lo.entries[end_line] },
-	};
-}
-
 // Collect every fn/macro declaration in the stream, in ascending offset order.
 fn void TokenList.collect_callables(&self, List{CallableSpan}* out)
 {
@@ -91,7 +79,7 @@ fn void TokenList.collect_callables(&self, List{CallableSpan}* out)
 
 // Emit one CallHierarchyItem. Kind 12 is Function — C3 macros are callables too, and
 // the protocol has no better kind for them.
-fn void encode_call_hierarchy_item(DString* out, CallableSpan* span, String uri, LineOffsets* lo)
+fn void encode_call_hierarchy_item(DString* out, CallableSpan* span, String uri, String content, LineOffsets* lo)
 {
 	out.append(`{"name":"`);
 	json_escape_into(out, span.name);
@@ -105,10 +93,10 @@ fn void encode_call_hierarchy_item(DString* out, CallableSpan* span, String uri,
 	out.append(`,"uri":"`);
 	json_escape_into(out, uri);
 	out.append(`","range":`);
-	Range range = offsets_to_range(lo, span.start, span.end);
+	Range range = span_to_range(content, lo, span.start, span.end);
 	range.encode(out);
 	out.append(`,"selectionRange":`);
-	Range sel = offsets_to_range(lo, span.name_offset, span.name_offset + span.name_len);
+	Range sel = span_to_range(content, lo, span.name_offset, span.name_offset + span.name_len);
 	sel.encode(out);
 	out.append_char('}');
 }
@@ -222,7 +210,7 @@ fn bool PrepareScan.visit(&self, String path, String content, TokenStream* strea
 
 	DString uri = dstring::temp();
 	append_file_uri(&uri, path);
-	encode_call_hierarchy_item(self.out, &spans.entries[idx], uri.str_view(), stream.get_line_offsets());
+	encode_call_hierarchy_item(self.out, &spans.entries[idx], uri.str_view(), content, stream.get_line_offsets());
 	*self.found = true;
 	return true; // first declaration wins
 }
@@ -259,7 +247,7 @@ fn void encode_prepare_call_hierarchy(
 		if (offset < spans.entries[i].name_offset) continue;
 		if (offset > spans.entries[i].name_offset + spans.entries[i].name_len) continue;
 		out.append_char('[');
-		encode_call_hierarchy_item(out, &spans.entries[i], uri, lo);
+		encode_call_hierarchy_item(out, &spans.entries[i], uri, content, lo);
 		out.append_char(']');
 		return;
 	}
@@ -276,7 +264,7 @@ fn void encode_prepare_call_hierarchy(
 		if (find_span_named(&spans, bare, &idx))
 		{
 			out.append_char('[');
-			encode_call_hierarchy_item(out, &spans.entries[idx], uri, lo);
+			encode_call_hierarchy_item(out, &spans.entries[idx], uri, content, lo);
 			out.append_char(']');
 			return;
 		}
@@ -296,6 +284,7 @@ fn void encode_prepare_call_hierarchy(
 					out,
 					&other_spans.entries[idx],
 					docs.entries[d].uri,
+					other.content,
 					other.get_line_offsets()
 				);
 				out.append_char(']');
@@ -319,7 +308,7 @@ fn void encode_prepare_call_hierarchy(
 	if (find_span_at(&spans, offset, &enclosing))
 	{
 		out.append_char('[');
-		encode_call_hierarchy_item(out, &spans.entries[enclosing], uri, lo);
+		encode_call_hierarchy_item(out, &spans.entries[enclosing], uri, content, lo);
 		out.append_char(']');
 	}
 }
@@ -390,7 +379,7 @@ fn void collect_incoming_calls_in(
 			if (!*first) out.append_char(',');
 			*first = false;
 			out.append(`{"from":`);
-			encode_call_hierarchy_item(out, span, uri, lo);
+			encode_call_hierarchy_item(out, span, uri, content, lo);
 			open_entry = true;
 			first_range = true;
 			ranges.clear();
@@ -399,7 +388,7 @@ fn void collect_incoming_calls_in(
 
 		if (!first_range) ranges.append_char(',');
 		first_range = false;
-		Range r = offsets_to_range(lo, tok.offset, tok.offset + tok.len);
+		Range r = token_range(tok, lo);
 		r.encode(&ranges);
 	}
 
@@ -601,7 +590,7 @@ fn void resolve_callees_in(
 		if (rank <= callee.rank) continue;
 
 		callee.item_json.clear();
-		encode_call_hierarchy_item(&callee.item_json, &spans.entries[idx], uri, lo);
+		encode_call_hierarchy_item(&callee.item_json, &spans.entries[idx], uri, content, lo);
 		if (callee.rank < 1 && rank >= 1) (*need_visible)--;
 		callee.rank = rank;
 	}
@@ -684,7 +673,7 @@ fn void encode_outgoing_calls(
 
 		if (!callee.first_range) callee.ranges.append_char(',');
 		callee.first_range = false;
-		Range r = offsets_to_range(lo, tok.offset, tok.offset + tok.len);
+		Range r = token_range(tok, lo);
 		r.encode(&callee.ranges);
 	}
 

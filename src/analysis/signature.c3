@@ -154,7 +154,8 @@ fn void encode_signature_help(
 			if (base.name != recv) method_types[mt_count++] = base.name;
 		}
 	}
-	if (mt_count == 0) method_types[mt_count++] = "";
+	// An unknown receiver still calls a method, never a free function of that name.
+	if (mt_count == 0) method_types[mt_count++] = is_method ? ANY_RECEIVER : "";
 
 	// For a module-qualified free call (`mod::fn(`), restrict the declaration search
 	// to that module so a same-named function elsewhere isn't matched.

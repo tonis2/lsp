@@ -39,12 +39,25 @@ fn void test_completion_ct_prefix() @test {
 	DString out = dstring::temp();
 	DocumentList* docs = mem::new(DocumentList);
 	defer mem::free(docs);
-	// "$si" at offset 3 — should match "$sizeof"
-	encode_completions("", "$si", 3, docs, "", &out);
+	// "$Ty" at offset 3 — should match the 0.8 spelling "$Typeof"
+	encode_completions("", "$Ty", 3, docs, "", &out);
 	String result = out.str_view();
-	assert(result.contains(`"label":"$sizeof"`), "got: %s", result);
+	assert(result.contains(`"label":"$Typeof"`), "got: %s", result);
+	assert(!result.contains(`"label":"$typeof"`), "the pre-0.8 spelling is gone, got: %s", result);
 	// Should not include regular keywords when prefix starts with $
 	assert(!result.contains(`"label":"if"`), "got: %s", result);
+}
+
+// `@feat` (C3 0.8) and the other built-in attributes are offered after `@`.
+fn void test_completion_builtin_attributes() @test {
+	DString out = dstring::temp();
+	DocumentList* docs = mem::new(DocumentList);
+	defer mem::free(docs);
+	String content = "fn void f() @fe";
+	encode_completions("", content, content.len, docs, "", &out);
+	String result = out.str_view();
+	assert(result.contains(`"label":"@feat"`), "got: %s", result);
+	assert(!result.contains(`"label":"while"`), "no plain keywords after @, got: %s", result);
 }
 
 fn void test_completion_doc_identifiers() @test {
@@ -151,7 +164,7 @@ fn void test_completion_dot_no_keywords() @test {
 	// DOT context should never contain keywords or builtin types
 	assert(!result.contains(`"label":"while"`), "no keywords in dot completion");
 	assert(!result.contains(`"label":"int"`), "no builtin types in dot completion");
-	assert(!result.contains(`"label":"$sizeof"`), "no CT keywords in dot completion");
+	assert(!result.contains(`"label":"$Typeof"`), "no CT keywords in dot completion");
 }
 
 fn void test_completion_dot_after_fluent_chain() @test {

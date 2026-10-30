@@ -12,6 +12,10 @@ struct Document
 	// Document (mem-allocated, survives across messages). Its tokens slice into
 	// `content`, so it MUST be invalidated whenever `content` is freed/replaced.
 	TokenStream* tokens;
+	// The semantic tokens last sent for this document and the id they were sent
+	// under, so the next request can answer with only what changed. Owned.
+	String semantic_data;
+	uint semantic_result_id;
 }
 
 alias DocumentList = List{Document};
@@ -101,6 +105,10 @@ fn void DocumentList.close(&self, String uri)
 			if (self.entries[i].content.len > 0)
 			{
 				mem::free((char*)self.entries[i].content.ptr);
+			}
+			if (self.entries[i].semantic_data.len > 0)
+			{
+				mem::free((char*)self.entries[i].semantic_data.ptr);
 			}
 			self.remove_at(i);
 			return;

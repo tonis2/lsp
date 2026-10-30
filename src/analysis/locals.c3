@@ -22,6 +22,23 @@ struct LocalScope
 // True when `idx` is in the parameter list or the body.
 fn bool LocalScope.contains(&self, sz idx) => idx > self.lparen && idx < self.end;
 
+// Token kinds a local or parameter can be named with: `x`, the compile-time `$x`,
+// `$Type` and `$CONST`, and a macro's `#expr` parameters.
+fn bool is_local_name(TokenType t)
+{
+	switch (t)
+	{
+		case IDENT:
+		case CT_IDENT:
+		case CT_TYPE_IDENT:
+		case CT_CONST_IDENT:
+		case HASH_IDENT:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // The span of the fn/macro whose keyword is at `kw`. Fails for a declaration
 // without a body (extern, interface method, function pointer type).
 fn LocalScope? TokenList.callable_span(&self, sz kw)
@@ -105,7 +122,7 @@ fn LocalScope? TokenList.callable_around(&self, sz idx)
 // written without a type.
 fn bool TokenList.declares_local_at(&self, sz i, LocalScope span)
 {
-	if (i == 0 || i + 1 >= self.size || self.entries[i].type != IDENT) return false;
+	if (i == 0 || i + 1 >= self.size || !is_local_name(self.entries[i].type)) return false;
 	TokenType prev = self.entries[i - 1].type;
 	TokenType next = self.entries[i + 1].type;
 
@@ -214,7 +231,7 @@ fn bool TokenList.has_type_before(&self, sz i, sz lowest)
 // still in scope (not inside a block that has already closed).
 fn sz? TokenList.local_declaration_of(&self, sz idx, LocalScope span)
 {
-	if (idx >= self.size || self.entries[idx].type != IDENT) return TOKEN_NOT_FOUND~;
+	if (idx >= self.size || !is_local_name(self.entries[idx].type)) return TOKEN_NOT_FOUND~;
 	if (self.declares_local_at(idx, span)) return idx;
 
 	String name = self.entries[idx].text;
@@ -227,11 +244,9 @@ fn sz? TokenList.local_declaration_of(&self, sz idx, LocalScope span)
 				depth++;
 			case LBRACE:
 				if (depth > 0) depth--;
-			case IDENT:
-				if (depth == 0 && self.entries[i].text == name && self.declares_local_at(i, span)
-					&& !self.in_nested_callable(i, span)) return i;
 			default:
-				break;
+				if (depth == 0 && is_local_name(self.entries[i].type) && self.entries[i].text == name
+					&& self.declares_local_at(i, span) && !self.in_nested_callable(i, span)) return i;
 		}
 	}
 	return TOKEN_NOT_FOUND~;
@@ -242,7 +257,7 @@ fn sz? TokenList.local_declaration_of(&self, sz idx, LocalScope span)
 // are never locals.
 fn sz? TokenList.local_target(&self, sz idx, LocalScope* span)
 {
-	if (idx == 0 || idx >= self.size || self.entries[idx].type != IDENT) return TOKEN_NOT_FOUND~;
+	if (idx == 0 || idx >= self.size || !is_local_name(self.entries[idx].type)) return TOKEN_NOT_FOUND~;
 	TokenType prev = self.entries[idx - 1].type;
 	if (prev == DOT || prev == SCOPE) return TOKEN_NOT_FOUND~;
 	*span = self.callable_around(idx)!;
@@ -253,7 +268,7 @@ fn sz? TokenList.local_target(&self, sz idx, LocalScope* span)
 fn bool TokenList.refers_to_local(&self, sz j, sz decl, LocalScope span)
 {
 	Token tok = self.entries[j];
-	if (tok.type != IDENT || tok.text != self.entries[decl].text) return false;
+	if (!is_local_name(tok.type) || tok.text != self.entries[decl].text) return false;
 	TokenType prev = self.entries[j - 1].type;
 	if (prev == DOT || prev == SCOPE) return false;
 	// C3 lambdas do not capture: a name inside one is never the outer local.
@@ -290,12 +305,20 @@ fn sz? TokenList.find_local_declaration(&self, String name, sz target_idx)
 }
 
 // Index of a module-level declaration of `name`: a fn/macro, a global variable or
-// an alias. Locals, parameters, struct members and methods never match.
-fn sz? TokenList.find_global_declaration(&self, String name)
+// an alias. Locals, parameters, struct members and methods never match. The search
+// starts at token `from`, so repeated calls walk every such declaration.
+fn sz? TokenList.find_global_declaration(&self, String name, sz from = 0)
 {
 	sz depth = 0;
 	for (sz i = 0; i < self.size; i++)
 	{
+		// Before `from` only the brace depth is tracked.
+		if (i < from)
+		{
+			if (self.entries[i].type == LBRACE) depth++;
+			if (self.entries[i].type == RBRACE && depth > 0) depth--;
+			continue;
+		}
 		Token tok = self.entries[i];
 		switch (tok.type)
 		{

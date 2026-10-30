@@ -111,6 +111,8 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 	// several `module` sections per file, so this is tracked as the walk goes rather
 	// than read once from the top of the file.
 	String current_module = "";
+	// That section's `@feat(...)` conditions, which every declaration in it inherits.
+	String module_feat = "";
 
 	for (sz i = 0; i < stream.tokens.size; i++)
 	{
@@ -120,6 +122,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 		int kind           = 0;
 		sz name_offset     = 0;
 		sz name_len        = 0;
+		sz name_idx        = 0;
 		sz decl_offset     = tok.offset;
 		sz end_offset      = 0;
 		bool has_braces    = false;
@@ -133,6 +136,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 					Token first = stream.tokens.entries[i + 1];
 					sz path_end = stream.tokens.scope_path_end(i + 1);
 					current_module = stream.tokens.module_path_at(i);
+					module_feat = stream.tokens.module_feat(i);
 					push_module_symbol(
 						syms,
 						lo,
@@ -203,6 +207,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 						{
 							parent_type = stream.tokens.entries[lparen_idx - 3].text;
 							name = fn_name.text;
+							name_idx = lparen_idx - 1;
 							name_offset = fn_name.offset;
 							name_len = fn_name.len;
 							decl_offset = stream.tokens.entries[lparen_idx - 3].offset;
@@ -210,6 +215,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 						else
 						{
 							name = fn_name.text;
+							name_idx = lparen_idx - 1;
 							name_offset = fn_name.offset;
 							name_len = fn_name.len;
 						}
@@ -228,6 +234,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 				{
 					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
+					name_idx = i + 1;
 					name_offset = nt.offset;
 					name_len = nt.len;
 					kind = 23; // Struct
@@ -241,6 +248,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 				{
 					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
+					name_idx = i + 1;
 					name_offset = nt.offset;
 					name_len = nt.len;
 					kind = 10; // Enum
@@ -252,6 +260,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 				{
 					Token nt = stream.tokens.entries[i + 1];
 					name = nt.text;
+					name_idx = i + 1;
 					name_offset = nt.offset;
 					name_len = nt.len;
 					kind = 11; // Interface
@@ -266,6 +275,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 					if (nt.type == TYPE_IDENT)
 					{
 						name = nt.text;
+						name_idx = i + 1;
 						name_offset = nt.offset;
 						name_len = nt.len;
 						kind = 26; // TypeParameter
@@ -273,6 +283,7 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 					else if (nt.type == CONST_IDENT)
 					{
 						name = nt.text;
+						name_idx = i + 1;
 						name_offset = nt.offset;
 						name_len = nt.len;
 						kind = 14; // Constant
@@ -300,30 +311,15 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 			end_offset = name_offset + name_len;
 		}
 
-		// Build range and selectionRange using line offsets
-		sz decl_line = lo.find_line(decl_offset);
-		sz decl_char = decl_offset - lo.entries[decl_line];
-		sz end_line  = lo.find_line(end_offset > 0 ? end_offset - 1 : 0);
-		sz end_char  = (end_offset > 0 ? end_offset : 1) - lo.entries[end_line];
-
-		sz sel_line     = lo.find_line(name_offset);
-		sz sel_char     = name_offset - lo.entries[sel_line];
-		sz sel_end_line = sel_line;
-		sz sel_end_char = sel_char + name_len;
-
 		syms.push(
 			{
 				.sym = {
 					.name = name,
+					// Platform variants share a name; their conditions tell them apart.
+					.detail = join_feat(stream.tokens.decl_own_feat(name_idx), module_feat),
 					.kind = kind,
-					.range = {
-						.start = { .line = decl_line, .character = decl_char },
-						.end = { .line = end_line, .character = end_char },
-					},
-					.selection_range = {
-						.start = { .line = sel_line, .character = sel_char },
-						.end = { .line = sel_end_line, .character = sel_end_char },
-					},
+					.range = span_to_range(content, lo, decl_offset, end_offset),
+					.selection_range = span_to_range(content, lo, name_offset, name_offset + name_len),
 				},
 				.parent_type = parent_type,
 				.module_name = current_module,
@@ -348,26 +344,13 @@ fn void push_module_symbol(
 	// Keep selectionRange contained in range even if the EOS scan came up short.
 	if (end_offset < name_offset + name_len) end_offset = name_offset + name_len;
 
-	sz decl_line = lo.find_line(decl_offset);
-	sz decl_char = decl_offset - lo.entries[decl_line];
-	sz end_line  = lo.find_line(end_offset > 0 ? end_offset - 1 : 0);
-	sz end_char  = (end_offset > 0 ? end_offset : 1) - lo.entries[end_line];
-	sz sel_line  = lo.find_line(name_offset);
-	sz sel_char  = name_offset - lo.entries[sel_line];
-
 	syms.push(
 		{
 			.sym = {
 				.name = content[name_offset:name_len],
 				.kind = 2, // Module
-				.range = {
-					.start = { .line = decl_line, .character = decl_char },
-					.end = { .line = end_line, .character = end_char },
-				},
-				.selection_range = {
-					.start = { .line = sel_line, .character = sel_char },
-					.end = { .line = sel_line, .character = sel_char + name_len },
-				},
+				.range = span_to_range(content, lo, decl_offset, end_offset),
+				.selection_range = span_to_range(content, lo, name_offset, name_offset + name_len),
 			},
 			.module_name = module_name,
 		}

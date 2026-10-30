@@ -90,16 +90,7 @@ fn void append_highlight(Token tok, LineOffsets* lo, DString* out, bool* first) 
 	if (!*first) out.append(",");
 	*first = false;
 
-	sz line = lo.find_line(tok.offset);
-	sz col = tok.offset - lo.entries[line];
-
-	DocumentHighlight highlight = {
-		.range = {
-			.start = {.line = line, .character = col},
-			.end = {.line = line, .character = col + tok.len},
-		},
-		.kind = 1,
-	};
+	DocumentHighlight highlight = { .range = token_range(tok, lo), .kind = 1 };
 	highlight.encode(out);
 }
 
@@ -293,16 +284,7 @@ fn void append_ref_location(String uri, Token tok, LineOffsets* lo, DString* out
 	if (!*first) out.append(",");
 	*first = false;
 
-	sz line = lo.find_line(tok.offset);
-	sz col = tok.offset - lo.entries[line];
-
-	Location loc = {
-		.uri = uri,
-		.range = {
-			.start = {.line = line, .character = col},
-			.end = {.line = line, .character = col + tok.len},
-		},
-	};
+	Location loc = { .uri = uri, .range = token_range(tok, lo) };
 	loc.encode(out);
 }
 
@@ -475,15 +457,7 @@ fn void emit_rename_edits(String uri, LineOffsets* lo, Token[] toks, String new_
 	foreach (i, tok : toks)
 	{
 		if (i > 0) out.append(",");
-		sz line = lo.find_line(tok.offset);
-		sz col = tok.offset - lo.entries[line];
-		TextEdit edit = {
-			.range = {
-				.start = {.line = line, .character = col},
-				.end = {.line = line, .character = col + tok.len},
-			},
-			.new_text = new_name,
-		};
+		TextEdit edit = { .range = token_range(tok, lo), .new_text = new_name };
 		edit.encode(out);
 	}
 	out.append("]");
@@ -516,17 +490,7 @@ fn void TokenList.collect_rename_edits(&self, String uri, String content, Token 
 			if (!first_edit) out.append(",");
 			first_edit = false;
 
-			sz line = lo.find_line(tok.offset);
-			sz col = tok.offset - lo.entries[line];
-			sz end_col = col + tok.len;
-
-			TextEdit edit = {
-				.range = {
-					.start = {.line = line, .character = col},
-					.end = {.line = line, .character = end_col},
-				},
-				.new_text = new_name,
-			};
+			TextEdit edit = { .range = token_range(tok, &lo), .new_text = new_name };
 			edit.encode(out);
 		}
 	}

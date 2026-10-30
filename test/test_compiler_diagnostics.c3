@@ -163,14 +163,10 @@ fn void test_name_end_col_spans_qualified_name() @test {
 	assert(name_end_col(src, &lo, 9, 0) == 0, "line past the end");
 }
 
-fn void test_encode_uses_end_col_when_known() @test {
-	CompilerDiag d = { .line = 1, .col = 4, .end_col = 14, .severity = 1, .message = "m" };
+fn void test_encode_uses_given_range() @test {
+	CompilerDiag d = { .line = 1, .col = 4, .severity = 1, .message = "m" };
 	DString out = dstring::temp();
-	d.encode(&out);
+	d.encode(&out, { { 1, 4 }, { 1, 14 } });
 	assert(out.str_view().contains(`"end":{"line":1,"character":14}`), "got: %s", out.str_view());
-
-	d.end_col = 0;
-	out.clear();
-	d.encode(&out);
-	assert(out.str_view().contains(`"end":{"line":1,"character":5}`), "unknown end keeps one character, got: %s", out.str_view());
+	assert(!out.str_view().contains("relatedInformation"), "no note, no related info");
 }

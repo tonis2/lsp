@@ -106,13 +106,14 @@ fn void TokenStream.add_import_fixes(&self, ActionDiag d, CodeActionList* fixes)
 	{
 		String prefix = last_module_segment(path);
 		String text = self.line_text(line);
-		if (try col = find_word_near(text, name, d.range.start.character))
+		if (try col = find_word_near(text, name, utf16_to_byte(text, 0, d.range.start.character)))
 		{
 			if (!is_scoped_at(text, col))
 			{
 				CodeAction both = { .title = string::tformat("Add 'import %s;' and use '%s::%s'", path, prefix, name), .preferred = true, .has_diag = true, .diag = d, .edit_count = 2 };
 				both.edits[0] = import_edit;
-				both.edits[1] = { .range = { { line, col }, { line, col } }, .new_text = string::tformat("%s::", prefix) };
+				sz at = utf16_len(text, 0, col);
+				both.edits[1] = { .range = { { line, at }, { line, at } }, .new_text = string::tformat("%s::", prefix) };
 				fixes.add_unique(both);
 				plain.preferred = false;
 			}
@@ -139,12 +140,13 @@ fn void TokenStream.add_prefix_fix(&self, ActionDiag d, CodeActionList* fixes)
 
 	sz line = d.range.start.line;
 	String text = self.line_text(line);
-	sz? col = find_word_near(text, name, d.range.start.character);
+	sz? col = find_word_near(text, name, utf16_to_byte(text, 0, d.range.start.character));
 	if (catch col) return;
 	if (is_scoped_at(text, col)) return;
 
 	CodeAction fix = { .title = string::tformat("Use '%s'", qualified), .preferred = true, .has_diag = true, .diag = d, .edit_count = 1 };
-	fix.edits[0] = { .range = { { line, col }, { line, col } }, .new_text = string::tformat("%s::", prefix) };
+	sz insert_at = utf16_len(text, 0, col);
+	fix.edits[0] = { .range = { { line, insert_at }, { line, insert_at } }, .new_text = string::tformat("%s::", prefix) };
 	fixes.add_unique(fix);
 }
 
@@ -173,13 +175,15 @@ fn void TokenStream.add_typo_fixes(&self, ActionDiag d, CodeActionList* fixes)
 	if (count == 0) return;
 
 	sz line = d.range.start.line;
-	sz? col = find_word_near(self.line_text(line), wrong, d.range.start.character);
+	String text = self.line_text(line);
+	sz? col = find_word_near(text, wrong, utf16_to_byte(text, 0, d.range.start.character));
 	if (catch col) return;
+	Range span = { { line, utf16_len(text, 0, col) }, { line, utf16_len(text, 0, col + wrong.len) } };
 
 	foreach (cand : candidates[:count])
 	{
 		CodeAction fix = { .title = string::tformat("Change to '%s'", cand), .preferred = count == 1, .has_diag = true, .diag = d, .edit_count = 1 };
-		fix.edits[0] = { .range = { { line, col }, { line, col + wrong.len } }, .new_text = cand };
+		fix.edits[0] = { .range = span, .new_text = cand };
 		fixes.add_unique(fix);
 	}
 }
@@ -230,7 +234,8 @@ fn TextEdit? TokenStream.import_edit(&self, String path, sz line)
 		return { .range = { { anchor_line + 1, 0 }, { anchor_line + 1, 0 } }, .new_text = string::tformat("%s\n", stmt) };
 	}
 	// The anchor is on the last line, which has no newline to insert after.
-	sz end_col = self.line_text(anchor_line).len;
+	String last = self.line_text(anchor_line);
+	sz end_col = utf16_len(last, 0, last.len);
 	return { .range = { { anchor_line, end_col }, { anchor_line, end_col } }, .new_text = string::tformat("\n%s", stmt) };
 }
 

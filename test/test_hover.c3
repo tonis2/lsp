@@ -65,9 +65,9 @@ fn void test_hover_ct_keyword() @test {
 	DString out = dstring::temp();
 	DocumentList* ds = mem::new(DocumentList);
 	defer mem::free(ds);
-	encode_hover("file:///test.c3", "$sizeof(int)", 0, ds, "", &out);
+	encode_hover("file:///test.c3", "$Typeof(x) y;", 0, ds, "", &out);
 	String result = out.str_view();
-	assert(result.contains("Returns size of a type in bytes"), "got: %s", result);
+	assert(result.contains("The type of an expression"), "got: %s", result);
 }
 
 fn void test_hover_no_hover_on_whitespace() @test {

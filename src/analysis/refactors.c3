@@ -696,9 +696,7 @@ fn sz RefactorCtx.cursor_token(&self)
 
 fn Position RefactorCtx.position(&self, sz offset)
 {
-	LineOffsets* lo = self.stream.get_line_offsets();
-	sz line = lo.find_line(offset);
-	return { line, offset - lo.entries[line] };
+	return offset_to_position(self.stream.content, self.stream.get_line_offsets(), offset);
 }
 
 fn sz RefactorCtx.line_start(&self, sz offset)

@@ -6,6 +6,7 @@ import std::io::file;
 import std::io::path;
 import std::encoding::json;
 import std::collections::object;
+import std::collections::list;
 import c3::lexer;
 
 const int MAX_SEARCH_DIRS = 32;
@@ -367,19 +368,8 @@ fn void TokenList.tokenize(&self, String content)
 {
 	Lexer lex;
 	lex.init(content);
-	while (true)
-	{
-		if (try tok = lex.next())
-		{
-			self.push(tok);
-		}
-		else
-		{
-			if (lex.at_end()) break;
-			lex.pos++;
-			lex.col++;
-		}
-	}
+	// Invalid input comes back as INVALID tokens, so the only failure is the end.
+	while (try tok = lex.next()) self.push(tok);
 }
 
 // Find the token at a byte offset in a token stream.
@@ -416,6 +406,13 @@ fn bool TokenList.find_token_at(&self, sz offset, Token* result, sz* idx)
 	return false;
 }
 
+// Token kinds go-to-definition can navigate from: plain, type and constant names,
+// `@macro` names, and the `$`/`#` names of compile-time variables and macro parameters.
+fn bool is_navigable_name(TokenType t)
+{
+	return is_ident(t) || t == TYPE_IDENT || t == CONST_IDENT || is_local_name(t);
+}
+
 // Like find_token_at, but if the token at offset is a single-char punctuation
 // (comma, paren, etc.), prefer the adjacent identifier token instead.
 // This handles the case where editors place the cursor right after a word,
@@ -427,7 +424,7 @@ fn bool TokenList.find_ident_token_at(&self, sz offset, Token* result, sz* idx)
 	if (!self.find_token_at(offset, &tok, &tok_idx)) return false;
 
 	// If we found an identifier-like token, use it directly
-	if (is_ident(tok.type) || tok.type == TYPE_IDENT || tok.type == CONST_IDENT)
+	if (is_navigable_name(tok.type))
 	{
 		*result = tok;
 		*idx = tok_idx;
@@ -441,7 +438,7 @@ fn bool TokenList.find_ident_token_at(&self, sz offset, Token* result, sz* idx)
 		sz prev_idx;
 		if (self.find_token_at(offset - 1, &prev, &prev_idx))
 		{
-			if (is_ident(prev.type) || prev.type == TYPE_IDENT || prev.type == CONST_IDENT)
+			if (is_navigable_name(prev.type))
 			{
 				*result = prev;
 				*idx = prev_idx;
@@ -480,14 +477,7 @@ fn void emit_location(String uri, String content, Token tok, DString* out)
 	defer lo.free();
 	lo.build(content);
 
-	sz line    = lo.find_line(tok.offset);
-	sz col     = tok.offset - lo.entries[line];
-	sz end_col = col + tok.len;
-
-	Location loc = {
-		.uri = uri,
-		.range = { .start = { .line = line, .character = col }, .end = { .line = line, .character = end_col }, },
-	};
+	Location loc = { .uri = uri, .range = span_to_range(content, &lo, tok.offset, tok.offset + tok.len) };
 	loc.encode(out);
 }
 
@@ -1220,13 +1210,28 @@ fn bool TokenList.find_inline_slice_typedef(&self, String type_name, bool* is_sl
 }
 
 // Find a struct field declaration: struct/bitstruct/union TypeName { ... field_name ... }
-fn sz? TokenList.find_struct_field(&self, String type_name, String field_name)
+fn sz? TokenList.find_struct_field(&self, String type_name, String field_name, String module_filter = "")
 {
-	self.@each_struct_member(type_name, null; sz j)
+	self.@each_struct_member(type_name, null, module_filter; sz j)
 	{
 		if (self.entries[j].text == field_name) return j;
 	};
-	return TOKEN_NOT_FOUND~;
+	// Enum, constdef and constset members are reached through their type the same
+	// way: `Color.RED`, `Flags.B`.
+	return self.find_enum_or_constdef_member(field_name, type_name, module_filter);
+}
+
+// The type of the first `inline` member of struct `type_name` (`inline Base base;`),
+// whose members are reached as if they were the struct's own; "" when it has none.
+fn String TokenList.inline_member_type(&self, String type_name, String unused = "")
+{
+	self.@each_struct_member(type_name, null; sz j)
+	{
+		sz t = j - 1;
+		while (t > 0 && self.entries[t].type == STAR) t--;
+		if (t > 0 && self.entries[t - 1].type == INLINE && self.entries[t].type == TYPE_IDENT) return self.entries[t].text;
+	};
+	return "";
 }
 
 // Search for a struct field declaration across all sources.
@@ -1238,11 +1243,13 @@ fn bool try_find_struct_field(
 	String content,
 	DocumentList* docs,
 	String stdlib_path,
-	DString* out
+	DString* out,
+	String module_filter = "",
+	int depth = 0
 ) @private
 {
 	// 1. Current file
-
+	String inline_type;
 	{
 		TokenStream owned;
 		bool owns;
@@ -1251,11 +1258,12 @@ fn bool try_find_struct_field(
 		{
 			if (owns) owned.free();
 		}
-		if (try found = stream.tokens.find_struct_field(type_name, field_name))
+		if (try found = stream.tokens.find_struct_field(type_name, field_name, module_filter))
 		{
 			emit_location(uri, content, stream.tokens.entries[found], out);
 			return true;
 		}
+		inline_type = stream.tokens.inline_member_type(type_name).tcopy();
 	}
 
 	// 2. Open documents (reuse their cached token streams)
@@ -1263,17 +1271,29 @@ fn bool try_find_struct_field(
 	{
 		if (docs.entries[d].uri == uri) continue;
 		TokenStream* other_stream = docs.entries[d].get_tokens();
-		if (try found = other_stream.tokens.find_struct_field(type_name, field_name))
+		if (try found = other_stream.tokens.find_struct_field(type_name, field_name, module_filter))
 		{
 			emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
 			return true;
 		}
+		if (inline_type.len == 0) inline_type = other_stream.tokens.inline_member_type(type_name).tcopy();
 	}
 
 	// 3 + 4. Project files on disk, then stdlib
 	String file_path     = uri_to_path(uri);
-	StructFieldScan scan = { type_name, field_name, out };
-	return scan_project_then_stdlib(file_path, stdlib_path, &scan);
+	StructFieldScan scan = { type_name, field_name, module_filter, out };
+	if (scan_project_then_stdlib(file_path, stdlib_path, &scan)) return true;
+
+	// Not a member of its own: maybe one of the struct it embeds with `inline`.
+	if (depth >= 4) return false;
+	if (inline_type.len == 0)
+	{
+		StringScan inline_scan = { &TokenList.inline_member_type, type_name, "", "" };
+		scan_project_then_stdlib(file_path, stdlib_path, &inline_scan);
+		inline_type = inline_scan.result;
+	}
+	if (inline_type.len == 0 || inline_type == type_name) return false;
+	return try_find_struct_field(inline_type, field_name, uri, content, docs, stdlib_path, out, "", depth + 1);
 }
 
 // On-disk struct-field definition lookup, driven through the shared scan engine.
@@ -1281,12 +1301,13 @@ struct StructFieldScan (FileVisitor) @private
 {
 	String type_name;
 	String field_name;
+	String module_filter;
 	DString* out;
 }
 
 fn bool StructFieldScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
 {
-	if (try found = stream.tokens.find_struct_field(self.type_name, self.field_name))
+	if (try found = stream.tokens.find_struct_field(self.type_name, self.field_name, self.module_filter))
 	{
 		DString uri = dstring::temp();
 		append_file_uri(&uri, path);
@@ -1397,19 +1418,19 @@ fn bool TokenList.try_find_definition(
 	bool method_recv_array = false
 )
 {
+	// A declaration compiled only under some `@feat(...)` has platform variants; the
+	// answer is all of them, not whichever one is found first.
+	VariantSearch variants = { cursor_tok, method_type, module_filter, method_recv_array, ctx, uri, content, docs, stdlib_path, false };
+
 	// 1. Search current file (its declarations are always visible to itself)
 	if (try decl_idx = self.find_declaration(cursor_tok, cursor_idx, method_type, module_filter, method_recv_array))
 	{
-		// Standing on a declaration usually means "find it elsewhere", but a local
-		// is declared nowhere else: the other files would only offer a same-named
-		// variable from some unrelated function.
-		LocalScope scope;
-		bool local_decl = decl_idx == cursor_idx && (self.local_target(cursor_idx, &scope) ?? self.size) == cursor_idx;
-		if (decl_idx != cursor_idx || local_decl)
-		{
-			emit_location(uri, content, self.entries[decl_idx], out);
-			return true;
-		}
+		// Standing on a declaration answers with that declaration: searching on would
+		// only find a same-named symbol of some other module or function. A gated one
+		// answers with all its variants, so you can hop between platforms.
+		if (self.decl_feat(decl_idx).len > 0) return variants.emit_all(self, out);
+		emit_location(uri, content, self.entries[decl_idx], out);
+		return true;
 	}
 
 	// With a ctx, declarations in modules this file cannot see don't win outright:
@@ -1435,6 +1456,7 @@ fn bool TokenList.try_find_definition(
 		{
 			if (ctx == null || ctx.can_see(other_stream.tokens.module_of_decl(found)))
 			{
+				if (other_stream.tokens.decl_feat(found).len > 0) return variants.emit_all(self, out);
 				emit_location(docs.entries[d].uri, docs.entries[d].content, other_stream.tokens.entries[found], out);
 				return true;
 			}
@@ -1453,8 +1475,11 @@ fn bool TokenList.try_find_definition(
 
 	// 3 + 4. Scan project files on disk (src/ and lib/ relative to file), then stdlib
 	String file_path = uri_to_path(uri);
-	DeclScan scan    = { cursor_tok, method_type, module_filter, out, ctx, &fallback, &have_fallback, method_recv_array };
-	if (scan_project_then_stdlib(file_path, stdlib_path, &scan)) return true;
+	DeclScan scan    = { cursor_tok, method_type, module_filter, out, ctx, &fallback, &have_fallback, method_recv_array, false };
+	if (scan_project_then_stdlib(file_path, stdlib_path, &scan))
+	{
+		return scan.gated ? variants.emit_all(self, out) : true;
+	}
 
 	// Nothing visible anywhere — fall back to the first module-blind match.
 	if (have_fallback)
@@ -1476,6 +1501,9 @@ struct DeclScan (FileVisitor) @private
 	DString* fallback;
 	bool* have_fallback;
 	bool method_recv_array;
+	// The visible declaration found is `@feat`-gated: nothing was emitted, the caller
+	// collects every variant instead.
+	bool gated;
 }
 
 fn bool DeclScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
@@ -1491,7 +1519,8 @@ fn bool DeclScan.visit(&self, String path, String content, TokenStream* stream) 
 		append_file_uri(&uri, path);
 		if (self.ctx == null || self.ctx.can_see(stream.tokens.module_of_decl(found)))
 		{
-			emit_location(uri.str_view(), content, stream.tokens.entries[found], self.out);
+			self.gated = stream.tokens.decl_feat(found).len > 0;
+			if (!self.gated) emit_location(uri.str_view(), content, stream.tokens.entries[found], self.out);
 			return true;
 		}
 		if (!*self.have_fallback)
@@ -1500,6 +1529,142 @@ fn bool DeclScan.visit(&self, String path, String content, TokenStream* stream) 
 			*self.have_fallback = true;
 		}
 	}
+	return false;
+}
+
+// Collects every `@feat`-gated declaration of one symbol across the current file, the
+// open documents, the project and the stdlib: the platform variants of a function,
+// type, alias or constant (`Process.join` @feat(POSIX) / @feat(WIN32)).
+struct VariantSearch
+{
+	Token target;
+	String method_type;
+	String module_filter;
+	bool method_recv_array;
+	ModuleCtx* ctx;
+	String uri;
+	String content;
+	DocumentList* docs;
+	String stdlib_path;
+	// Collect every match, not only `@feat`-gated ones (an unknown receiver's
+	// candidate methods).
+	bool any_decl;
+}
+
+// More candidates than this for a method on an unknown receiver is no answer: the
+// list would be noise, and the right one rarely among the first.
+const sz MAX_GUESSED_METHODS = 8;
+
+// One variant found: its encoded Location, its `@feat` conditions and where it is.
+// Temp-allocated.
+struct FoundVariant
+{
+	String uri;
+	sz offset;
+	sz line; // 0-based
+	String json;
+	String feat;
+}
+
+alias FoundVariants = List{FoundVariant};
+
+// Every variant, sorted by file then position so the order doesn't depend on
+// directory listing order. `current` holds the tokens of `uri`.
+fn FoundVariants VariantSearch.collect(&self, TokenList* current)
+{
+	FoundVariants found;
+	found.tinit();
+	self.add_from(&found, self.uri, self.content, current);
+	for (sz d = 0; d < self.docs.size; d++)
+	{
+		if (self.docs.entries[d].uri == self.uri) continue;
+		self.add_from(&found, self.docs.entries[d].uri, self.docs.entries[d].content, &self.docs.entries[d].get_tokens().tokens);
+	}
+	VariantScan scan = { self, &found };
+	scan_project_then_stdlib(uri_to_path(self.uri), self.stdlib_path, &scan);
+
+	// Insertion sort: there are a handful of variants at most.
+	for (sz i = 1; i < found.len(); i++)
+	{
+		for (sz j = i; j > 0 && found[j].precedes(&found[j - 1]); j--)
+		{
+			FoundVariant tmp = found[j];
+			found[j] = found[j - 1];
+			found[j - 1] = tmp;
+		}
+	}
+	return found;
+}
+
+// Write the variants as a Location array (a single Location when there is one).
+// Returns false when none was found.
+fn bool VariantSearch.emit_all(&self, TokenList* current, DString* out)
+{
+	return emit_found(self.collect(current), out);
+}
+
+// Write found declarations as a Location array (a single Location when there is one).
+// Returns false when there are none.
+fn bool emit_found(FoundVariants found, DString* out)
+{
+	if (found.len() == 0) return false;
+	if (found.len() > 1) out.append_char('[');
+	foreach (i, v : found)
+	{
+		if (i > 0) out.append_char(',');
+		out.append(v.json);
+	}
+	if (found.len() > 1) out.append_char(']');
+	return true;
+}
+
+fn bool FoundVariant.precedes(&self, FoundVariant* other) @private
+{
+	if (self.uri != other.uri) return self.uri.compare_to(other.uri) < 0;
+	return self.offset < other.offset;
+}
+
+// Add the gated declarations of the target in one file. An ungated one with the same
+// name is a different symbol (another module's), not a variant.
+fn void VariantSearch.add_from(&self, FoundVariants* found, String uri, String content, TokenList* tokens) @private
+{
+	List{sz} all;
+	all.tinit();
+	if (catch tokens.find_declaration_in(self.target, self.method_type, self.module_filter, self.method_recv_array, &all)) return;
+	foreach (idx : all)
+	{
+		if (!self.any_decl && tokens.decl_feat(idx).len == 0) continue;
+		if (self.ctx != null && !self.ctx.can_see(tokens.module_of_decl(idx))) continue;
+		Token tok = tokens.entries[idx];
+		bool dup = false;
+		foreach (v : *found) dup = dup || (v.uri == uri && v.offset == tok.offset);
+		if (dup) continue;
+		DString json = dstring::temp();
+		emit_location(uri, content, tok, &json);
+		sz line = 0;
+		foreach (c : content[:tok.offset]) if (c == '\n') line++;
+		found.push({ uri.tcopy(), tok.offset, line, json.str_view(), tokens.decl_feat(idx).tcopy() });
+	}
+}
+
+// On-disk half of VariantSearch. Files that are open were already searched through
+// their (possibly unsaved) buffers, so their disk copies are skipped.
+struct VariantScan (FileVisitor) @private
+{
+	VariantSearch* search;
+	FoundVariants* found;
+}
+
+fn bool VariantScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
+{
+	if (path_matches_uri(path, self.search.uri)) return false;
+	foreach (doc : *self.search.docs)
+	{
+		if (path_matches_uri(path, doc.uri)) return false;
+	}
+	DString uri = dstring::temp();
+	append_file_uri(&uri, path);
+	self.search.add_from(self.found, uri.str_view(), content, &stream.tokens);
 	return false;
 }
 
@@ -1598,14 +1763,15 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 		if (owns) owned.free();
 	}
 
-	// Find the token at cursor
+	// Find the token at cursor. Editors put the cursor right after a word as often as
+	// on it, which lands on the `(` or `.` that follows.
 	Token cursor_tok;
 	sz cursor_idx;
-	if (!stream.tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
+	if (!stream.tokens.find_ident_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	// Only navigate for identifier-like tokens
 	TokenType ct = cursor_tok.type;
-	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_navigable_name(ct)) return;
 
 	// Module visibility of the current file — used to prefer declarations this
 	// file can actually see over same-named ones in unrelated modules.
@@ -1639,15 +1805,37 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 			String full = resolve_module_name(content, written);
 			if (full.len > 0 && full != written)
 			{
-				stream.tokens.try_find_module_definition(full, uri, content, docs, stdlib_path, out);
+				if (stream.tokens.try_find_module_definition(full, uri, content, docs, stdlib_path, out)) return;
 			}
+			// `std::core` is imported implicitly, so `mem::` and `string::` need no import.
+			stream.tokens.try_find_module_definition(string::tformat("std::core::%s", written), uri, content, docs, stdlib_path, out);
 		}
 		return;
 	}
 
+	// `break OUTER;` / `continue OUTER;` name a label of the enclosing function.
+	if (try label = stream.tokens.label_target(cursor_idx))
+	{
+		emit_location(uri, content, stream.tokens.entries[label], out);
+		return;
+	}
+
+	// Inside `module m <Type>;`, `Type` is that module's generic parameter.
+	if (try param = stream.tokens.module_generic_param(cursor_idx))
+	{
+		emit_location(uri, content, stream.tokens.entries[param], out);
+		return;
+	}
+
+	// `.RED` with nothing before the dot that could have members (`c = .RED`,
+	// `case .RED:`, `foo(.RED)`) is an enum member whose type is inferred: an
+	// ordinary constant lookup finds it.
+	bool inferred_member = ct == CONST_IDENT && cursor_idx >= 2 && stream.tokens.entries[cursor_idx - 1].type == DOT
+		&& !can_end_expression(stream.tokens.entries[cursor_idx - 2].type);
+
 	// For DOT-preceded tokens (field/method access), resolve the receiver type
 	// to avoid jumping to unrelated declarations with the same name.
-	if (cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT)
+	if (!inferred_member && cursor_idx > 0 && stream.tokens.entries[cursor_idx - 1].type == DOT)
 	{
 		// A designator in a struct initializer (`Foo v = { .field = 1 }`, `, .field =`)
 		// names a field of the type being initialized, not a member of whatever token
@@ -1682,7 +1870,28 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 			}
 		}
 
-		String recv_type = stream.tokens.resolve_receiver_type(cursor_idx, uri, docs, stdlib_path);
+		TypeInfo recv_info = stream.tokens.receiver_type_info(cursor_idx, uri, docs, stdlib_path);
+		// An array receiver only has the builtin `.len`/`.ptr`, nothing declared.
+		String recv_type = recv_info.is_array ? "" : recv_info.name;
+		// A receiver written with its module (`b::Node* n`) prefers that module's type.
+		// Only a preference: an unqualified type reports the module it was used in,
+		// which is not where it is declared, so each lookup retries without it.
+		String recv_mod = recv_info.mod;
+		if (recv_mod.len > 0)
+		{
+			String full = resolve_module_name(content, recv_mod);
+			if (full.len > 0) recv_mod = full;
+		}
+		if (recv_type.len == 0 && is_ident(ct))
+		{
+			// The receiver's type is unknown. A method of that name is still the
+			// best answer there is; offer every one when there are only a few.
+			VariantSearch candidates = { .target = cursor_tok, .method_type = ANY_RECEIVER, .any_decl = true, .ctx = &visctx,
+				.uri = uri, .content = content, .docs = docs, .stdlib_path = stdlib_path };
+			FoundVariants found = candidates.collect(&stream.tokens);
+			if (found.len() <= MAX_GUESSED_METHODS) emit_found(found, out);
+			return;
+		}
 		if (recv_type.len > 0)
 		{
 			// Follow the alias chain for the struct-field lookup (LineOffsets -> List,
@@ -1696,6 +1905,21 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 			// then with resolved alias
 			if (is_ident(ct))
 			{
+				if (recv_mod.len > 0 && stream.tokens.try_find_definition(
+					cursor_tok,
+					cursor_idx,
+					uri,
+					content,
+					docs,
+					stdlib_path,
+					out,
+					recv_type,
+					recv_mod,
+					&visctx
+				))
+				{
+					return;
+				}
 				if (stream.tokens.try_find_definition(
 					cursor_tok,
 					cursor_idx,
@@ -1738,6 +1962,11 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 			// Try struct field resolution: struct Type { ... name ... }
 			// Use resolved alias for struct field lookup
 			String field_type = resolved_type.len > 0 ? resolved_type : recv_type;
+			if (field_type == recv_type && recv_mod.len > 0
+				&& try_find_struct_field(field_type, cursor_tok.text, uri, content, docs, stdlib_path, out, recv_mod))
+			{
+				return;
+			}
 			if (try_find_struct_field(field_type, cursor_tok.text, uri, content, docs, stdlib_path, out))
 			{
 				return;
@@ -1813,12 +2042,15 @@ fn void encode_definition(String uri, String content, sz offset, DocumentList* d
 // (faultdef A, NAME; / constdef NAME = 100), in which members sit in declaration
 // position — right after the keyword and after each top-level comma — so value
 // expressions on the right of '=' are not mistaken for declarations.
-fn sz? TokenList.find_enum_or_constdef_member(&self, String name)
+fn sz? TokenList.find_enum_or_constdef_member(&self, String name, String type_name = "", String module_filter = "")
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
 		TokenType kw = self.entries[i].type;
 		if (kw != ENUM && kw != CONSTSET && kw != FAULTDEF && kw != CONSTDEF) continue;
+		// Only members of `type_name` when one is given (`Color.RED`).
+		if (type_name.len > 0 && (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name)) continue;
+		if (!self.decl_in_filter(i + 1, module_filter)) continue;
 
 		// Locate the first LBRACE or EOS after the keyword to tell block from braceless.
 		sz j = i + 1;
@@ -1871,10 +2103,11 @@ fn sz? TokenList.find_declaration_in(
 	Token target,
 	String method_type = "",
 	String module_filter = "",
-	bool method_recv_array = false
+	bool method_recv_array = false,
+	List{sz}* all = null
 )
 {
-	return self.find_declaration(target, self.size, method_type, module_filter, method_recv_array);
+	return self.find_declaration(target, self.size, method_type, module_filter, method_recv_array, all);
 }
 
 // True when the declaration at decl_idx satisfies the module-qualification filter.
@@ -1887,16 +2120,29 @@ fn bool TokenList.decl_in_filter(&self, sz decl_idx, String module_filter)
 	return module_matches_filter(self.module_of_decl(decl_idx), module_filter);
 }
 
+// One declaration matched. Without a collector the first match is the answer
+// (returns true: stop); with one, every match is recorded and the search goes on.
+fn bool record_match(List{sz}* all, sz idx) @private
+{
+	if (all == null) return true;
+	if (!all.contains(idx)) all.push(idx);
+	return false;
+}
+
 // Searches for the declaration of a token in the token stream.
 // When method_type is non-empty, searches for fn Type.name( pattern only.
 // When module_filter is non-empty, only declarations in the matching module match.
+// With `all`, every matching declaration in the file is collected there instead of
+// stopping at the first (the platform variants of an `@feat` declaration); the first
+// match is still returned.
 fn sz? TokenList.find_declaration(
 	&self,
 	Token target,
 	sz target_idx,
 	String method_type = "",
 	String module_filter = "",
-	bool method_recv_array = false
+	bool method_recv_array = false,
+	List{sz}* all = null
 )
 {
 	String name = target.text;
@@ -1906,44 +2152,33 @@ fn sz? TokenList.find_declaration(
 		case TYPE_IDENT:
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				TokenType kw = self.get(i).type;
-				if (is_type_declaration_keyword(kw))
+				if (!is_type_declaration_keyword(self.entries[i].type)) continue;
+				if (self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == name
+					&& self.decl_in_filter(i + 1, module_filter))
 				{
-					if (self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == name
-						&& self.decl_in_filter(
-						i + 1,
-						module_filter
-					))
-					{
-						return i + 1;
-					}
+					if (record_match(all, i + 1)) return i + 1;
 				}
 			}
 		case CONST_IDENT:
 			// constdef NAME
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (self.get(i)
-					.type == CONSTDEF && self.entries[i + 1].type
-						== CONST_IDENT && self.entries[i + 1].text == name && self.decl_in_filter(
-						i + 1,
-						module_filter
-					))
+				if (self.entries[i].type == CONSTDEF && self.entries[i + 1].type == CONST_IDENT
+					&& self.entries[i + 1].text == name && self.decl_in_filter(i + 1, module_filter))
 				{
-					return i + 1;
+					if (record_match(all, i + 1)) return i + 1;
 				}
 			}
 			// const [Type] NAME = ...
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (self.get(i).type != CONST) continue;
+				if (self.entries[i].type != CONST) continue;
 				// const NAME = ... (no type)
-				if (self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name && self.decl_in_filter(
-					i + 1,
-					module_filter
-				))
+				if (self.entries[i + 1].type == CONST_IDENT && self.entries[i + 1].text == name
+					&& self.decl_in_filter(i + 1, module_filter))
 				{
-					return i + 1;
+					if (record_match(all, i + 1)) return i + 1;
+					continue;
 				}
 				// const Type NAME = ... — `read_type_at` steps over the whole type,
 				// so a `[]`/`[N]`/`[<N>]`/`*`/`?` suffix or a generic `{...}` block
@@ -1955,11 +2190,24 @@ fn sz? TokenList.find_declaration(
 					&& self.entries[name_idx].type == CONST_IDENT && self.entries[name_idx].text == name
 					&& self.decl_in_filter(name_idx, module_filter))
 				{
-					return name_idx;
+					if (record_match(all, name_idx)) return name_idx;
 				}
 			}
 			// enum / constset / faultdef / constdef member: enum Foo { NAME }, constdef Bar : T { NAME = v }, faultdef NAME
-			if (try found = self.find_enum_or_constdef_member(name)) return found;
+			if (try found = self.find_enum_or_constdef_member(name, "", module_filter))
+			{
+				if (record_match(all, found)) return found;
+			}
+		case CT_IDENT:
+		case CT_TYPE_IDENT:
+		case CT_CONST_IDENT:
+		case HASH_IDENT:
+			// Compile-time variables and macro parameters live in their macro.
+			if (try local_idx = self.find_local_declaration(name, target_idx))
+			{
+				record_match(all, local_idx);
+				return local_idx;
+			}
 		case IDENT:
 		case AT_IDENT:
 			if (method_type.len > 0)
@@ -1967,22 +2215,24 @@ fn sz? TokenList.find_declaration(
 				// Search for fn ... Type.method( pattern only
 				for (sz i = 0; i < self.size; i++)
 				{
-					if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
+					if (self.entries[i].type != FUNC && self.entries[i].type != MACRO) continue;
 					if (try j = self.fn_lparen_after(i))
 					{
-						if (j >= 3 && is_ident(
-							self.entries[j - 1].type
-						) && self.entries[j - 1].text == name && self.method_receiver_matches(
-							j - 1,
-							method_type,
-							method_recv_array
-						))
+						if (j >= 3 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
+							&& self.method_receiver_matches(j - 1, method_type, method_recv_array)
+							&& self.decl_in_filter(j - 1, module_filter))
 						{
-							return j - 1;
+							if (record_match(all, j - 1)) return j - 1;
 						}
 					}
 				}
-				return TOKEN_NOT_FOUND~;
+				// An interface declares its methods in its body: `interface Printable
+				// { fn String to_text(); }` is what `p.to_text()` on a Printable calls.
+				if (try m = self.find_interface_method(method_type, name))
+				{
+					if (record_match(all, m)) return m;
+				}
+				break;
 			}
 			// Local variables and parameters resolve scope-aware: the nearest
 			// declaration in the enclosing function wins over same-named
@@ -1993,54 +2243,137 @@ fn sz? TokenList.find_declaration(
 			{
 				if (try local_idx = self.find_local_declaration(name, target_idx))
 				{
+					record_match(all, local_idx);
 					return local_idx;
 				}
 			}
-			// fn ... name( or macro ... name(
+			// fn ... name( or macro ... name( — but not `fn ... Type.name(`: a plain
+			// call is never a call of some type's same-named method.
 			for (sz i = 0; i < self.size; i++)
 			{
-				if (self.get(i).type != FUNC && self.get(i).type != MACRO) continue;
+				if (self.entries[i].type != FUNC && self.entries[i].type != MACRO) continue;
 				if (try j = self.fn_lparen_after(i))
 				{
-					if (j > 0 && is_ident(
-						self.entries[j - 1].type
-					) && self.entries[j - 1].text == name && self.decl_in_filter(j - 1, module_filter))
+					if (j >= 2 && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name
+						&& self.entries[j - 2].type != DOT && self.decl_in_filter(j - 1, module_filter))
 					{
-						return j - 1;
+						if (record_match(all, j - 1)) return j - 1;
 					}
 				}
 			}
 			// macro name (no parens)
 			for (sz i = 0; i + 1 < self.size; i++)
 			{
-				if (self.get(i)
-					.type == MACRO && is_ident(
-						self.entries[i + 1].type
-					) && self.entries[i + 1].text == name && self.decl_in_filter(i + 1, module_filter))
+				if (self.entries[i].type == MACRO && is_ident(self.entries[i + 1].type)
+					&& self.entries[i + 1].text == name && self.decl_in_filter(i + 1, module_filter))
 				{
-					return i + 1;
+					if (record_match(all, i + 1)) return i + 1;
 				}
 			}
-			// type IDENT = ...
-			for (sz i = 0; i + 1 < self.size; i++)
+			// Module-level globals (`Cache* g = null;`, `int b @feat(NO_LIBC);`) and
+			// aliases (`alias memcpy = __memcpy;`). Locals of other functions never
+			// match: they are not at module level.
+			for (sz from = 0; from < self.size;)
 			{
-				if (is_type_token(self.get(i)
-					.type) && is_ident(self.entries[i + 1].type) && self.entries[i + 1].text == name)
-				{
-					if (i + 2 < self.size)
-					{
-						TokenType next = self.entries[i + 2].type;
-						if ((next == EQ || next == EOS || next == COMMA) && self.decl_in_filter(i + 1, module_filter))
-						{
-							return i + 1;
-						}
-					}
-				}
+				sz? g = self.find_global_declaration(name, from);
+				if (catch g) break;
+				from = g + 1;
+				if (!self.decl_in_filter(g, module_filter)) continue;
+				if (record_match(all, g)) return g;
 			}
 		default:
-			return TOKEN_NOT_FOUND~;
+			break;
 	}
 
+	if (all != null && all.len() > 0) return (*all)[0];
+	return TOKEN_NOT_FOUND~;
+}
+
+// Whether a token can end an expression, i.e. whether a `.` after it is a member
+// access. After anything else (`=`, `(`, `,`, `case`, `return`) a `.NAME` is an
+// enum member with its type inferred.
+fn bool can_end_expression(TokenType t)
+{
+	switch (t)
+	{
+		case RPAREN:
+		case RBRACKET:
+		case RBRACE:
+		case STRING:
+		case INTEGER:
+		case REAL:
+		case CHAR_LITERAL:
+		case BANGBANG:
+			return true;
+		default:
+			return is_navigable_name(t);
+	}
+}
+
+// The `NAME:` label that `break NAME` / `continue NAME` / `nextcase NAME` at `idx`
+// refers to: the nearest one before it in the enclosing function.
+fn sz? TokenList.label_target(&self, sz idx)
+{
+	if (idx == 0 || idx >= self.size || self.entries[idx].type != CONST_IDENT) return TOKEN_NOT_FOUND~;
+	TokenType prev = self.entries[idx - 1].type;
+	if (prev != BREAK && prev != CONTINUE && prev != NEXTCASE) return TOKEN_NOT_FOUND~;
+	String name = self.entries[idx].text;
+	for (sz i = idx - 1; i > 0; i--)
+	{
+		TokenType t = self.entries[i].type;
+		if (t == FUNC || t == MACRO) break;
+		if (t != CONST_IDENT || self.entries[i].text != name || i + 1 >= self.size) continue;
+		if (self.entries[i + 1].type != COLON) continue;
+		TokenType before = self.entries[i - 1].type;
+		if (before == EOS || before == LBRACE || before == RBRACE || before == COLON) return i;
+	}
+	return TOKEN_NOT_FOUND~;
+}
+
+// The generic parameter of the enclosing `module m <Type, SIZE>;` named like the
+// token at `idx`, when there is one.
+fn sz? TokenList.module_generic_param(&self, sz idx)
+{
+	if (idx >= self.size) return TOKEN_NOT_FOUND~;
+	TokenType ct = self.entries[idx].type;
+	if (ct != TYPE_IDENT && ct != CONST_IDENT) return TOKEN_NOT_FOUND~;
+	for (sz m = idx; m > 0; m--)
+	{
+		if (self.entries[m - 1].type != MODULE) continue;
+		sz j = m;
+		while (j < self.size && self.entries[j].type != LESS && self.entries[j].type != EOS) j++;
+		if (j >= self.size || self.entries[j].type != LESS) return TOKEN_NOT_FOUND~;
+		for (j++; j < self.size && self.entries[j].type != GREATER && self.entries[j].type != EOS; j++)
+		{
+			if (self.entries[j].type == ct && self.entries[j].text == self.entries[idx].text) return j;
+		}
+		return TOKEN_NOT_FOUND~;
+	}
+	return TOKEN_NOT_FOUND~;
+}
+
+// The method `name` declared in the body of `interface iface` (any interface for
+// ANY_RECEIVER).
+fn sz? TokenList.find_interface_method(&self, String iface, String name)
+{
+	for (sz i = 0; i + 2 < self.size; i++)
+	{
+		if (self.entries[i].type != INTERFACE || self.entries[i + 1].type != TYPE_IDENT) continue;
+		if (iface != ANY_RECEIVER && self.entries[i + 1].text != iface) continue;
+		sz lbrace = i + 2;
+		while (lbrace < self.size && self.entries[lbrace].type != LBRACE && self.entries[lbrace].type != EOS) lbrace++;
+		if (lbrace >= self.size || self.entries[lbrace].type != LBRACE) continue;
+		sz rbrace = self.match_rbrace(lbrace);
+		for (sz k = lbrace + 1; k < rbrace && k < self.size; k++)
+		{
+			if (self.entries[k].type != FUNC && self.entries[k].type != MACRO) continue;
+			if (try j = self.fn_lparen_after(k))
+			{
+				if (j > 0 && j < rbrace && is_ident(self.entries[j - 1].type) && self.entries[j - 1].text == name) return j - 1;
+			}
+		}
+		i = rbrace;
+	}
 	return TOKEN_NOT_FOUND~;
 }
 

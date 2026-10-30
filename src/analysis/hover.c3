@@ -41,6 +41,11 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 					// Check if this is a DOT-preceded token (field/method access)
 					bool is_member = have_idx && hover_idx > 0 && hover_stream.tokens.entries[hover_idx - 1].type == DOT;
 
+					// The lookup that found the docs, and whether its declaration is
+					// `@feat`-gated, so its platform variants can be listed with it.
+					bool gated;
+					VariantSearch lookup = { .target = tok, .uri = uri, .content = content, .docs = docs, .stdlib_path = stdlib_path };
+
 					if (is_member && is_ident(ct))
 					{
 						// Resolve receiver type and search for method or struct field
@@ -48,7 +53,8 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 						if (recv_type.len > 0)
 						{
 							// Try method docs with original type first (methods declared on alias name)
-							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, recv_type);
+							lookup.method_type = recv_type;
+							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, recv_type, "", false, &gated);
 
 							// Follow the alias chain, stdlib included, for the fallback.
 							TypeInfo base        = hover_stream.tokens.canonical_type(recv_type, uri, docs, stdlib_path);
@@ -57,7 +63,9 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 							// Try method docs with resolved alias
 							if (doc.str_view().len == 0 && resolved_type.len > 0 && resolved_type != recv_type)
 							{
-								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, resolved_type, "", base.is_array);
+								lookup.method_type = resolved_type;
+								lookup.method_recv_array = base.is_array;
+								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, resolved_type, "", base.is_array, &gated);
 							}
 
 							// Try struct field docs (use resolved alias for struct lookup)
@@ -80,7 +88,8 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 							String method_type = hover_stream.tokens.resolve_method_type(hover_idx, uri, docs, stdlib_path);
 							if (method_type.len > 0)
 							{
-								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, method_type);
+								lookup.method_type = method_type;
+								find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, method_type, "", false, &gated);
 							}
 						}
 
@@ -99,22 +108,17 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 									if (module_filter.len == 0) module_filter = mod_prefix;
 								}
 							}
-							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, "", module_filter);
+							lookup.method_type = "";
+							lookup.module_filter = module_filter;
+							find_hover_docs(uri, content, tok, docs, stdlib_path, &doc, "", module_filter, false, &gated);
 						}
 					}
+					if (gated) append_feat_variants(&doc, lookup.collect(&hover_stream.tokens));
 					if (hover_owns) hover_owned.free();
 
 					if (doc.str_view().len > 0)
 					{
-						sz line = lo.find_line(tok.offset);
-						sz start_char = tok.offset - lo.entries[line];
-						sz end_line = lo.find_line(tok_end > 0 ? tok_end - 1 : 0);
-						sz end_char = tok_end - lo.entries[end_line];
-
-						Range range = {
-							.start = {.line = line, .character = start_char},
-							.end = {.line = end_line, .character = end_char},
-						};
+						Range range = span_to_range(content, &lo, tok.offset, tok_end);
 						encode_hover_response(out, doc.str_view(), range);
 						return;
 					}
@@ -124,15 +128,7 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 				String desc = get_token_description(tok.type, tok.text);
 				if (desc.len == 0) return;
 
-				sz line = lo.find_line(tok.offset);
-				sz start_char = tok.offset - lo.entries[line];
-				sz end_line = lo.find_line(tok_end > 0 ? tok_end - 1 : 0);
-				sz end_char = tok_end - lo.entries[end_line];
-
-				Range range = {
-					.start = {.line = line, .character = start_char},
-					.end = {.line = end_line, .character = end_char},
-				};
+				Range range = span_to_range(content, &lo, tok.offset, tok_end);
 				encode_hover_response(out, desc, range);
 				return;
 			}
@@ -140,16 +136,14 @@ fn void encode_hover(String uri, String content, sz offset, DocumentList* docs, 
 		}
 		else
 		{
-			if (lex.at_end()) break;
-			lex.pos++;
-			lex.col++;
+			break; // end of input: invalid input is an INVALID token, not a failure
 		}
 	}
 }
 
 // Search for the declaration of a token and extract its doc comment + signature.
 // Searches: current file -> open documents -> project files -> stdlib.
-fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "", bool method_recv_array = false) @private
+fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentList* docs, String stdlib_path, DString* out, String method_type = "", String module_filter = "", bool method_recv_array = false, bool* gated = null) @private
 {
 	// Cached token stream for the current document (reused across the searches below).
 	TokenStream cur_owned;
@@ -160,7 +154,7 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 	// If method type specified, try method-specific search first with each type candidate
 	if (method_type.len > 0)
 	{
-		if (try_extract_docs_from(content, cursor_tok, out, method_type, cur_stream, module_filter, method_recv_array)) return;
+		if (try_extract_docs_from(content, cursor_tok, out, method_type, cur_stream, module_filter, method_recv_array, gated)) return;
 		for (sz d = 0; d < docs.size; d++)
 		{
 			if (docs.entries[d].uri == uri) continue;
@@ -171,28 +165,29 @@ fn void find_hover_docs(String uri, String content, Token cursor_tok, DocumentLi
 				method_type,
 				docs.entries[d].get_tokens(),
 				module_filter,
-				method_recv_array
+				method_recv_array,
+				gated
 			)) return;
 		}
 		String file_path = uri_to_path(uri);
-		DocsScan scan = { cursor_tok, method_type, module_filter, out, method_recv_array };
+		DocsScan scan = { cursor_tok, method_type, module_filter, out, method_recv_array, gated };
 		scan_project_then_stdlib(file_path, stdlib_path, &scan);
 		return;
 	}
 
 	// 1. Current file
-	if (try_extract_docs_from(content, cursor_tok, out, "", cur_stream, module_filter)) return;
+	if (try_extract_docs_from(content, cursor_tok, out, "", cur_stream, module_filter, false, gated)) return;
 
 	// 2. Open documents
 	for (sz d = 0; d < docs.size; d++)
 	{
 		if (docs.entries[d].uri == uri) continue;
-		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, "", docs.entries[d].get_tokens(), module_filter)) return;
+		if (try_extract_docs_from(docs.entries[d].content, cursor_tok, out, "", docs.entries[d].get_tokens(), module_filter, false, gated)) return;
 	}
 
 	// 3 + 4. Project files on disk, then stdlib
 	String file_path = uri_to_path(uri);
-	DocsScan scan = { cursor_tok, "", module_filter, out, false };
+	DocsScan scan = { cursor_tok, "", module_filter, out, false, gated };
 	scan_project_then_stdlib(file_path, stdlib_path, &scan);
 }
 
@@ -240,7 +235,7 @@ fn bool try_extract_field_docs_from(String content, String type_name, String fie
 }
 
 // Tokenize content, find the declaration of target, and extract doc comment + signature.
-fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "", TokenStream* cached = null, String module_filter = "", bool method_recv_array = false) @private
+fn bool try_extract_docs_from(String content, Token target, DString* out, String method_type = "", TokenStream* cached = null, String module_filter = "", bool method_recv_array = false, bool* gated = null) @private
 {
 	TokenStream owned;
 	TokenStream* stream;
@@ -251,6 +246,7 @@ fn bool try_extract_docs_from(String content, Token target, DString* out, String
 	if (try decl_idx = stream.tokens.find_declaration_in(target, method_type, module_filter, method_recv_array))
 	{
 		stream.tokens.extract_docs_at(content, decl_idx, out);
+		if (gated) *gated = stream.tokens.decl_feat(decl_idx).len > 0;
 		return out.str_view().len > 0;
 	}
 	return false;
@@ -427,6 +423,7 @@ struct DocsScan (FileVisitor) @private
 	String module_filter;
 	DString* out;
 	bool method_recv_array;
+	bool* gated;
 }
 
 fn bool DocsScan.visit(&self, String path, String content, TokenStream* stream) @dynamic
@@ -438,8 +435,23 @@ fn bool DocsScan.visit(&self, String path, String content, TokenStream* stream) 
 		self.method_type,
 		stream,
 		self.module_filter,
-		self.method_recv_array
+		self.method_recv_array,
+		self.gated
 	);
+}
+
+// List an `@feat` declaration's platform variants under its docs, each with its
+// conditions and a link to where it is declared.
+fn void append_feat_variants(DString* out, FoundVariants variants) @private
+{
+	if (variants.len() < 2) return;
+	out.append("\n\n---\n\n**Variants**\n");
+	foreach (v : variants)
+	{
+		String file = v.uri;
+		if (try slash = file.rindex_of_char('/')) file = file[slash + 1..];
+		out.appendf("\n- `%s` — [%s:%d](%s#L%d)", v.feat, file, v.line + 1, v.uri, v.line + 1);
+	}
 }
 
 // On-disk struct-field hover-doc lookup, driven through the shared scan engine.

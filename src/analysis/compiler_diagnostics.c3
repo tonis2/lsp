@@ -10,16 +10,23 @@ import std::time;
 const sz COMPILER_OUTPUT_BUFFER   = 65536;
 const sz MAX_COMPILER_DIAGNOSTICS = 50;
 
-// A single parsed c3c diagnostic. `file` and `message` reference temp/buffer
-// memory valid only for the duration of publish_compiler_diagnostics.
+// A single parsed c3c diagnostic. Line and columns are in bytes, as c3c reports them;
+// they are converted to the UTF-16 positions LSP wants only when encoded, against the
+// text the diagnostic is shown in. The strings reference temp/buffer memory while a
+// build is being published; DiagEntry keeps owned copies (see CompilerDiag.own).
 struct CompilerDiag
 {
 	String file;    // resolved absolute path (separators normalized to '/')
 	int line;       // 0-indexed
-	int col;        // 0-indexed
-	int end_col;    // 0-indexed, exclusive; <= col = unknown (one-character range)
+	int col;        // 0-indexed byte column
 	int severity;   // LSP DiagnosticSeverity (1=error, 2=warning, 3=info)
 	String message; // raw message text (slice into compiler output)
+	// The `note` c3c prints right after an error ("The previous use of 'Foo' was
+	// here."), published as the error's relatedInformation. note_file "" = no note.
+	String note_file;
+	int note_line;
+	int note_col;
+	String note_message;
 }
 
 alias CompilerDiagList = List{CompilerDiag};
@@ -79,24 +86,46 @@ fn void LspServer.publish_compiler_diagnostics(&self, String uri)
 		send_notification("window/showMessage", errmsg.str_view());
 		return;
 	}
+	// Drain the output before joining: it arrives through a pipe, and a compiler that
+	// fills the pipe blocks until someone reads it, so joining first can hang forever.
+	// Output past the buffer is read and dropped.
+	char[] buf = mem::new_array(char, COMPILER_OUTPUT_BUFFER);
+	defer mem::free(buf);
+	char[1024] discard;
+	sz total_read = 0;
+	while (true)
+	{
+		sz n;
+		if (total_read < COMPILER_OUTPUT_BUFFER)
+		{
+			n = proc.read_stdout(&buf[total_read], COMPILER_OUTPUT_BUFFER - total_read) ?? 0;
+			total_read += n;
+		}
+		else
+		{
+			n = proc.read_stdout(&discard, discard.len) ?? 0;
+		}
+		if (n == 0) break;
+	}
 	if (catch proc.join())
 	{
 		proc.destroy();
 		return;
 	}
-
-	char[] buf = mem::new_array(char, COMPILER_OUTPUT_BUFFER);
-	defer mem::free(buf);
-	sz total_read = 0;
-	while (total_read < COMPILER_OUTPUT_BUFFER)
-	{
-		sz n = proc.read_stdout(&buf[total_read], COMPILER_OUTPUT_BUFFER - total_read) ?? 0;
-		if (n == 0) break;
-		total_read += n;
-	}
 	proc.destroy();
 
 	String output = (String)buf[:total_read];
+
+	// Without the BEGINLSP marker c3c never got as far as compiling: a broken
+	// project.json, a missing dependency, a bad flag. Reading that as "no errors" would
+	// clear every marker while nothing builds, so keep what is shown and say why.
+	if (!output.contains("BEGINLSP"))
+	{
+		self.report_build_failure(output);
+		self.last_diag_time = time::now();
+		return;
+	}
+	self.clear_build_failure();
 
 	// A project build reports diagnostics across all files, so parse every
 	// LSPERR line and publish per file (and clear files that no longer have
@@ -219,6 +248,23 @@ fn void CompilerDiagList.parse(&self, String output, String project_root)
 		if (diag_line < 0) diag_line = 0;
 		if (diag_col < 0) diag_col = 0;
 
+		String file = resolve_compiler_path(file_str, project_root);
+
+		// A note explains the diagnostic just before it; attach it there rather than
+		// publishing a second, unrelated-looking marker.
+		if (severity_str == "note" && self.len() > 0)
+		{
+			CompilerDiag* prev = self.get_ref(self.len() - 1);
+			if (prev.note_file.len == 0)
+			{
+				prev.note_file = file;
+				prev.note_line = diag_line;
+				prev.note_col = diag_col;
+				prev.note_message = msg_str;
+				continue;
+			}
+		}
+
 		// Map severity
 		int sev = 1; // error
 		if (severity_str == "warning")
@@ -230,7 +276,7 @@ fn void CompilerDiagList.parse(&self, String output, String project_root)
 			sev = 3;
 		}
 
-		self.push({ .file = resolve_compiler_path(file_str, project_root), .line = diag_line, .col = diag_col, .severity = sev, .message = msg_str });
+		self.push({ .file = file, .line = diag_line, .col = diag_col, .severity = sev, .message = msg_str });
 	}
 }
 
@@ -252,32 +298,13 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 		if (current.contains(uri)) continue;
 		current.push(uri);
 
-		// c3c reports only a start column. Underline the whole name there, so the
-		// squiggle (and the quick-fix lightbulb) covers it rather than one character.
-		String content;
-		if (try doc = self.documents.find(uri))
-		{
-			content = doc.content;
-		}
-		else
-		{
-			content = (String)file::load_temp(d.file) ?? "";
-		}
-		LineOffsets lo;
-		lo.tinit();
-		lo.build(content);
-
-		DString arr = dstring::temp();
-		int n = 0;
+		CompilerDiagList file_diags;
+		file_diags.tinit();
 		foreach (d2 : *diags)
 		{
-			if (d2.file != d.file) continue;
-			if (n > 0) arr.append_char(',');
-			d2.end_col = name_end_col(content, &lo, d2.line, d2.col);
-			d2.encode(&arr);
-			n++;
+			if (d2.file == d.file) file_diags.push(d2);
 		}
-		self.set_diagnostics(uri, arr.str_view(), COMPILER);
+		self.set_compiler_diagnostics(uri, self.content_for_path(d.file), file_diags.array_view());
 	}
 
 	// Clear the compiler half of files that dropped out of this run, leaving any lexer
@@ -291,19 +318,131 @@ fn void LspServer.publish_grouped_diagnostics(&self, CompilerDiagList* diags)
 	}
 }
 
-// Append a single diagnostic object (LSP Diagnostic) as JSON.
-fn void CompilerDiag.encode(&self, DString* out)
+// Encode `diags` (all in one file) and make them that file's compiler half, keeping an
+// owned copy so they can be moved along with later edits (shift_compiler_diagnostics).
+// `content` is the text the markers are shown on, which their positions are converted
+// against.
+fn void LspServer.set_compiler_diagnostics(&self, String uri, String content, CompilerDiag[] diags)
 {
-	// line/col are clamped to >= 0 when parsed, so the sz casts are safe.
-	int end = self.end_col > self.col ? self.end_col : self.col + 1;
-	Range range = { { (sz)self.line, (sz)self.col }, { (sz)self.line, (sz)end } };
+	DString arr = dstring::temp();
+	self.encode_compiler_elements(content, diags, &arr);
+	// Copy first: `diags` may point into the entry's current copy.
+	CompilerDiag[] owned = own_compiler_diags(diags);
+	self.set_diagnostics(uri, arr.str_view(), COMPILER);
+
+	sz idx = self.diag_index(uri);
+	if (idx == self.diag_state.size)
+	{
+		free_compiler_diags(owned);
+		return;
+	}
+	DiagEntry* e = &self.diag_state.entries[idx];
+	free_compiler_diags(e.cdiags);
+	e.cdiags = owned;
+}
+
+// The text of a file as the user sees it: the open buffer when there is one, otherwise
+// what is on disk. "" when neither is available.
+fn String LspServer.content_for_path(&self, String file_path)
+{
+	if (try doc = self.documents.find(self.document_uri_for_path(file_path))) return doc.content;
+	return (String)file::load_temp(file_path) ?? "";
+}
+
+// Encode one file's diagnostics as comma-separated LSP Diagnostic objects. Positions are
+// clamped to the line they are on and converted from bytes to UTF-16 units, and each
+// range is widened over the name at the reported column.
+fn void LspServer.encode_compiler_elements(&self, String content, CompilerDiag[] diags, DString* out)
+{
+	LineOffsets lo;
+	lo.tinit();
+	lo.build(content);
+
+	int n = 0;
+	foreach (i, d : diags)
+	{
+		// After some errors (an unterminated string) c3c follows up with a second one
+		// on the same line at a column far past its end. It is noise caused by the
+		// first, not something to fix separately.
+		if (n > 0 && col_past_line_end(content, &lo, d.line, d.col) && diags[i - 1].line == d.line) continue;
+
+		Range range = diag_range(content, &lo, d.line, d.col);
+		Location note;
+		bool has_note = d.note_file.len > 0;
+		if (has_note)
+		{
+			String note_content = d.note_file == d.file ? content : self.content_for_path(d.note_file);
+			LineOffsets note_lo;
+			note_lo.tinit();
+			note_lo.build(note_content);
+			note = { self.document_uri_for_path(d.note_file), diag_range(note_content, &note_lo, d.note_line, d.note_col) };
+		}
+
+		if (n > 0) out.append_char(',');
+		d.encode(out, range, has_note ? &note : null);
+		n++;
+	}
+}
+
+// Append a single diagnostic object (LSP Diagnostic) as JSON, at `range` (already in
+// UTF-16 units), with the note it carries, if any, as relatedInformation.
+fn void CompilerDiag.encode(&self, DString* out, Range range, Location* note = null)
+{
 	out.append(`{"range":`);
 	range.encode(out);
 	out.append(`,"severity":`);
 	out.appendf("%d", self.severity);
 	out.append(`,"source":"c3c","message":"`);
 	json_escape_into(out, self.message);
-	out.append(`"}`);
+	out.append_char('"');
+	if (note)
+	{
+		out.append(`,"relatedInformation":[{"location":{"uri":"`);
+		json_escape_into(out, note.uri);
+		out.append(`","range":`);
+		note.range.encode(out);
+		out.append(`},"message":"`);
+		json_escape_into(out, self.note_message);
+		out.append(`"}]`);
+	}
+	out.append_char('}');
+}
+
+// The LSP range for a c3c position (0-indexed line, byte column) in `content`: the name
+// starting there, or one character when there is none. Lines past the end are clamped
+// to the last line and columns to the end of their line, so a marker always lands on
+// real text; positions are converted to UTF-16 units. Unknown content ("") leaves the
+// position as reported.
+fn Range diag_range(String content, LineOffsets* lo, int line, int col)
+{
+	if (content.len == 0) return { { (sz)line, (sz)col }, { (sz)line, (sz)col + 1 } };
+
+	int ln = (sz)line < lo.size ? line : (int)lo.size - 1;
+	sz line_start = lo.entries[(sz)ln];
+	sz line_len = line_byte_len(content, lo, ln);
+	int c = (sz)col > line_len ? (int)line_len : col;
+
+	sz start = utf16_len(content, line_start, line_start + (sz)c);
+	int end_col = name_end_col(content, lo, ln, c);
+	sz end = end_col > c ? utf16_len(content, line_start, line_start + (sz)end_col) : start + 1;
+	return { { (sz)ln, start }, { (sz)ln, end } };
+}
+
+// Whether a byte column lies beyond the end of its line (or the line beyond the file).
+fn bool col_past_line_end(String content, LineOffsets* lo, int line, int col) @private
+{
+	if (content.len == 0) return false;
+	if ((sz)line >= lo.size) return true;
+	return (sz)col > line_byte_len(content, lo, line);
+}
+
+// Length in bytes of a line, without its line terminator.
+fn sz line_byte_len(String content, LineOffsets* lo, int line) @private
+{
+	sz start = lo.entries[(sz)line];
+	sz end = (sz)line + 1 < lo.size ? lo.entries[(sz)line + 1] - 1 : content.len;
+	if (end > start && content[end - 1] == '\r') end--;
+	return end - start;
 }
 
 // End column of the (possibly `::`-qualified) name starting at line/col of `content`,
@@ -322,6 +461,41 @@ fn int name_end_col(String content, LineOffsets* lo, int line, int col) @private
 	}
 	if (i == name_start) return 0;
 	return col + (int)(i - start);
+}
+
+// c3c failed before compiling anything, so its output is plain text rather than LSPERR
+// lines. Tell the user what it said; the same failure on every save is shown once.
+fn void LspServer.report_build_failure(&self, String output)
+{
+	String first = first_nonempty_line(output);
+	if (first.len == 0) first = "the compiler produced no diagnostics output";
+	if (first == self.last_build_error) return;
+	if (self.last_build_error.len > 0) mem::free((char*)self.last_build_error.ptr);
+	self.last_build_error = str_own(first);
+
+	DString msg = dstring::temp();
+	msg.append(`{"type":1,"message":"c3c: `);
+	json_escape_into(&msg, first);
+	msg.append(`"}`);
+	send_notification("window/showMessage", msg.str_view());
+}
+
+// A build got far enough to report diagnostics, so the next failure is news again.
+fn void LspServer.clear_build_failure(&self)
+{
+	if (self.last_build_error.len > 0) mem::free((char*)self.last_build_error.ptr);
+	self.last_build_error = "";
+}
+
+// The first line of `s` with any text on it, trimmed.
+fn String first_nonempty_line(String s) @private
+{
+	foreach (line : s.tsplit("\n"))
+	{
+		String t = line.trim();
+		if (t.len > 0) return t;
+	}
+	return "";
 }
 
 // Send a publishDiagnostics notification for a single file URI.

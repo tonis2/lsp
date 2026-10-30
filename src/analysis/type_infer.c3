@@ -374,6 +374,17 @@ fn TypeInfo TokenList.scoped_var_type(
 			if (tb.known()) best = tb;
 			continue;
 		}
+		// `var x = expr;` takes the type of what it is initialized with.
+		if (lead == VAR && i + 3 < self.size && self.entries[i + 1].text == var_name && self.entries[i + 2].type == EQ)
+		{
+			sz end = self.expression_end(i + 3);
+			if (end > i + 3)
+			{
+				TypeInfo init = self.expr_type(end - 1, uri, docs, stdlib_path, depth + 1);
+				if (init.known()) best = init;
+			}
+			continue;
+		}
 		if (lead != TYPE_IDENT && !is_builtin_type_token(lead)) continue;
 
 		TypeInfo d;
@@ -816,8 +827,11 @@ fn TypeInfo TokenList.expr_type(&self, sz last, String uri, DocumentList* docs, 
 
 	// A cast names the type outright: `(Foo*)raw` is a Foo however `raw` was declared.
 	// Only a parenthesised group holding exactly a type counts, so a `foreach`,
-	// `if` or `while` header before the identifier is not mistaken for one.
-	if (last >= 1 && self.entries[last - 1].type == RPAREN)
+	// `if` or `while` header before the identifier is not mistaken for one. A cast
+	// binds looser than member access, though: in `(void)p.join()` it applies to the
+	// whole `p.join()`, so an identifier with a member after it keeps its own type.
+	bool has_member = last + 1 < self.size && self.entries[last + 1].type == DOT;
+	if (!has_member && last >= 1 && self.entries[last - 1].type == RPAREN)
 	{
 		sz? open = self.match_paren_backward(last - 1);
 		if (try open)
@@ -911,7 +925,76 @@ fn TypeInfo TokenList.call_return_type(&self, TypeInfo recv, String name, String
 		if (base.name != recv.name) ret = self.resolve_call_return_type_across(base.name, name, uri, docs, stdlib_path);
 	}
 	if (ret.len == 0) return {};
+	// A method of a generic type returning its parameter (`fn Type List.get(...)`)
+	// returns whatever the receiver was instantiated with: `List{Foo}.get` is a Foo.
+	if (recv.generic.len > 0)
+	{
+		String arg = generic_arg_for(self.type_module_params_across(recv.name, uri, docs, stdlib_path), recv.generic, ret);
+		if (arg.len > 0) return { .name = arg };
+	}
 	return { .name = ret };
+}
+
+// The generic parameters (`Key,Value`) of the module declaring type `type_name`, as
+// a comma-separated list; "" when that module is not generic or the type isn't here.
+fn String TokenList.type_module_params(&self, String type_name, String unused = "")
+{
+	for (sz i = 0; i + 1 < self.size; i++)
+	{
+		if (!is_type_declaration_keyword(self.entries[i].type)) continue;
+		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
+		for (sz m = i; m > 0; m--)
+		{
+			if (self.entries[m - 1].type != MODULE) continue;
+			DString params = dstring::temp();
+			sz j = m;
+			while (j < self.size && self.entries[j].type != LESS && self.entries[j].type != EOS) j++;
+			if (j >= self.size || self.entries[j].type != LESS) return "";
+			for (j++; j < self.size && self.entries[j].type != GREATER && self.entries[j].type != EOS; j++)
+			{
+				TokenType t = self.entries[j].type;
+				if (t != TYPE_IDENT && t != CONST_IDENT) continue;
+				if (params.len() > 0) params.append_char(',');
+				params.append(self.entries[j].text);
+			}
+			return params.str_view();
+		}
+		return "";
+	}
+	return "";
+}
+
+// type_module_params, searched in this file, the open documents, then the project
+// and the stdlib.
+fn String TokenList.type_module_params_across(&self, String type_name, String uri, DocumentList* docs, String stdlib_path)
+{
+	String params = self.type_module_params(type_name);
+	if (params.len > 0) return params;
+	for (sz d = 0; d < docs.size; d++)
+	{
+		params = docs.entries[d].get_tokens().tokens.type_module_params(type_name);
+		if (params.len > 0) return params;
+	}
+	StringScan scan = { &TokenList.type_module_params, type_name, "", "" };
+	scan_project_then_stdlib(uri_to_path(uri), stdlib_path, &scan);
+	return scan.result;
+}
+
+// The argument a generic instantiation passes for parameter `param`: with params
+// `Key,Value` and args `String, int`, `Value` is `int`. "" when `param` is not one of
+// the parameters.
+fn String generic_arg_for(String params, String args, String param)
+{
+	if (params.len == 0) return "";
+	String[] names = params.tsplit(",");
+	String[] values = args.tsplit(",");
+	foreach (i, n : names)
+	{
+		if (n != param) continue;
+		if (names.len == 1) return args.trim();
+		return i < values.len ? values[i].trim() : "";
+	}
+	return "";
 }
 
 // True when the `{` at `lbrace` opens an anonymous `struct`/`union`/`bitstruct` block
@@ -945,7 +1028,7 @@ fn bool TokenList.opens_inlined_member_block(&self, sz lbrace)
  When `ctx` is non-null only declarations that module can see are visited, which is
  how completion keeps another module's same-named struct out of the list.
 *>
-macro TokenList.@each_struct_member(&self, String type_name, ModuleCtx* ctx; @body(sz name_idx))
+macro TokenList.@each_struct_member(&self, String type_name, ModuleCtx* ctx, String module_filter = ""; @body(sz name_idx))
 {
 	for (sz i = 0; i + 1 < self.size; i++)
 	{
@@ -953,6 +1036,7 @@ macro TokenList.@each_struct_member(&self, String type_name, ModuleCtx* ctx; @bo
 		if (kw != STRUCT && kw != BITSTRUCT && kw != UNION) continue;
 		if (self.entries[i + 1].type != TYPE_IDENT || self.entries[i + 1].text != type_name) continue;
 		if (ctx != null && !ctx.can_see(self.module_of_decl(i))) continue;
+		if (!self.decl_in_filter(i + 1, module_filter)) continue;
 
 		sz brace = i + 2;
 		while (brace < self.size && self.entries[brace].type != LBRACE) brace++;
@@ -1001,6 +1085,10 @@ macro TokenList.@each_struct_member(&self, String type_name, ModuleCtx* ctx; @bo
 	}
 }
 
+// The method type to search with when a call's receiver type can't be inferred: a
+// method of any type, matched by name.
+const String ANY_RECEIVER = "?";
+
 // Whether the method/macro whose name token is at `name_idx` is declared on
 // `recv_type`.
 //
@@ -1013,6 +1101,7 @@ macro TokenList.@each_struct_member(&self, String type_name, ModuleCtx* ctx; @bo
 fn bool TokenList.method_receiver_matches(&self, sz name_idx, String recv_type, bool recv_is_array)
 {
 	if (name_idx < 2 || self.entries[name_idx - 1].type != DOT) return false;
+	if (recv_type == ANY_RECEIVER) return true;
 
 	sz p         = name_idx - 2;
 	bool suffixed = false;

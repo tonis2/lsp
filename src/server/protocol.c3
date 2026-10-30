@@ -23,6 +23,9 @@ struct LspServer
 	// What is currently published per file, so both producers can be merged and stale
 	// markers explicitly cleared. See DiagEntry.
 	DiagState diag_state;
+	// The last "c3c could not build at all" message shown, so the same failure isn't
+	// popped up again on every save. Owned; "" after a build that got through.
+	String last_build_error;
 	bool diag_pending;
 	String diag_pending_uri;
 	// Trailing-edge debounce state for the cheap lexer diagnostics on large files.
@@ -33,6 +36,8 @@ struct LspServer
 	FileCache fcache;
 	// The client accepts snippet syntax in completion items (see handle_initialize).
 	bool snippet_support;
+	// Last semanticTokens resultId handed out (ids are unique across documents).
+	uint semantic_result_id;
 }
 
 fn void LspServer.init(&self, String stdlib_path, String compiler_path, long diag_delay_ms)
@@ -66,6 +71,8 @@ const MethodHandler[] HANDLERS = {
 	{ "textDocument/didClose",            &LspServer.handle_did_close },
 	{ "textDocument/didSave",             &LspServer.handle_did_save },
 	{ "textDocument/semanticTokens/full", &LspServer.handle_semantic_tokens },
+	{ "textDocument/semanticTokens/full/delta", &LspServer.handle_semantic_tokens_delta },
+	{ "textDocument/semanticTokens/range", &LspServer.handle_semantic_tokens_range },
 	{ "textDocument/foldingRange",        &LspServer.handle_folding_range },
 	{ "textDocument/documentSymbol",      &LspServer.handle_document_symbol },
 	{ "textDocument/hover",               &LspServer.handle_hover },

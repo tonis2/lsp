@@ -116,9 +116,7 @@ fn void encode_folding_ranges(String content, DString* out)
 		}
 		else
 		{
-			if (lex.at_end()) break;
-			lex.pos++;
-			lex.col++;
+			break; // end of input: invalid input is an INVALID token, not a failure
 		}
 	}
 

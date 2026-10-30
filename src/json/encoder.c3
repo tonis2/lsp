@@ -31,6 +31,7 @@ struct DocumentHighlight
 struct DocumentSymbol
 {
 	String name;
+	String detail; // "" = none
 	int kind;
 	Range range;
 	Range selection_range;
@@ -127,6 +128,11 @@ fn void DocumentSymbol.encode(&self, DString* out)
 {
 	out.append(`{"name":"`);
 	json_escape_into(out, self.name);
+	if (self.detail.len > 0)
+	{
+		out.append(`","detail":"`);
+		json_escape_into(out, self.detail);
+	}
 	out.appendf(`","kind":%d`, self.kind);
 	out.append(",\"range\":");
 	self.range.encode(out);
@@ -229,12 +235,16 @@ fn void FoldingRange.encode(&self, DString* out)
 fn void encode_server_capabilities(DString* out, String version)
 {
 	out.append(`{"capabilities":{`);
+	// Every position is converted to UTF-16 columns (see positions.c3), the LSP default.
+	out.append(`"positionEncoding":"utf-16",`);
 	out.append(`"textDocumentSync":{"openClose":true,"change":1,"save":true},`);
 	out.append(`"semanticTokensProvider":{`);
 	out.append(`"legend":{"tokenTypes":`);
 	out.append(TOKEN_TYPES_LEGEND);
-	out.append(`,"tokenModifiers":[]},`);
-	out.append(`"full":true`);
+	out.append(`,"tokenModifiers":`);
+	out.append(TOKEN_MODIFIERS_LEGEND);
+	out.append(`},`);
+	out.append(`"full":{"delta":true},"range":true`);
 	out.append(`},`);
 	out.append(`"foldingRangeProvider":true,`);
 	out.append(`"documentSymbolProvider":true,`);

@@ -10,14 +10,19 @@ import c3::lexer;
 // punctuation and structural tokens are skipped (-1).
 
 fn void test_map_keywords() @test {
-	assert(map_token_type(MODULE) == KEYWORD);
-	assert(map_token_type(FUNC) == KEYWORD);
-	assert(map_token_type(MACRO) == KEYWORD);
+	// Control-flow keywords are colored as keywords.
 	assert(map_token_type(IF) == KEYWORD);
 	assert(map_token_type(RETURN) == KEYWORD);
 	assert(map_token_type(WHILE) == KEYWORD);
-	assert(map_token_type(STRUCT) == KEYWORD);
-	assert(map_token_type(ENUM) == KEYWORD);
+	// Declaration and literal keywords are left to the grammar's storage/constant
+	// colors: "keyword" would paint them in the control-flow color.
+	assert(map_token_type(MODULE) == SKIP);
+	assert(map_token_type(FUNC) == SKIP);
+	assert(map_token_type(MACRO) == SKIP);
+	assert(map_token_type(STRUCT) == SKIP);
+	assert(map_token_type(ENUM) == SKIP);
+	assert(map_token_type(TRUE) == SKIP);
+	assert(map_token_type(NULL) == SKIP);
 }
 
 fn void test_map_types() @test {
@@ -34,7 +39,9 @@ fn void test_map_types() @test {
 fn void test_map_identifiers() @test {
 	assert(map_token_type(IDENT) == VARIABLE);
 	assert(map_token_type(CONST_IDENT) == ENUM_MEMBER);
-	assert(map_token_type(CT_IDENT) == MACRO_CAT);
+	// `$x` is a compile-time variable and `#x` a macro parameter.
+	assert(map_token_type(CT_IDENT) == VARIABLE);
+	assert(map_token_type(HASH_IDENT) == PARAMETER);
 }
 
 fn void test_map_literals() @test {
@@ -68,10 +75,9 @@ fn void test_map_operators() @test {
 fn void test_map_ct_keywords() @test {
 	// CT keywords and the $$ builtin are emitted as KEYWORD
 	assert(map_token_type(CT_IF) == KEYWORD);
-	assert(map_token_type(CT_SIZEOF) == KEYWORD);
+	assert(map_token_type(CT_TYPEOF) == KEYWORD);
+	assert(map_token_type(CT_FEAT) == KEYWORD);
 	assert(map_token_type(BUILTIN) == KEYWORD);
-	// CT identifiers are emitted as macro
-	assert(map_token_type(CT_IDENT) == MACRO_CAT);
 }
 
 fn void test_map_skip_tokens() @test {
@@ -137,23 +143,23 @@ fn void test_encode_empty() @test {
 
 fn void test_encode_single_keyword() @test {
 	DString out = dstring::temp();
-	// "fn" is FUNC → KEYWORD (index 7), len 2
-	encode_semantic_tokens("fn", &out);
-	assert(out.str_view() == "0,0,2,7,0", "got: %s", out.str_view());
+	// "return" → KEYWORD (index 7), len 6
+	encode_semantic_tokens("return", &out);
+	assert(out.str_view() == "0,0,6,7,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_two_tokens_same_line() @test {
 	DString out = dstring::temp();
-	// "fn x" → "fn" KEYWORD (7), IDENT "x" at col 3 → VARIABLE (4)
-	encode_semantic_tokens("fn x", &out);
-	assert(out.str_view() == "0,0,2,7,0,0,3,1,4,0", "got: %s", out.str_view());
+	// "return x" → "return" KEYWORD (7), IDENT "x" at col 7 → VARIABLE (4)
+	encode_semantic_tokens("return x", &out);
+	assert(out.str_view() == "0,0,6,7,0,0,7,1,4,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_multiline() @test {
 	DString out = dstring::temp();
-	// "fn\nx" → "fn" KEYWORD (7), IDENT "x" at line 1 col 0 → VARIABLE (4)
-	encode_semantic_tokens("fn\nx", &out);
-	assert(out.str_view() == "0,0,2,7,0,1,0,1,4,0", "got: %s", out.str_view());
+	// "return\nx" → "return" KEYWORD (7), IDENT "x" at line 1 col 0 → VARIABLE (4)
+	encode_semantic_tokens("return\nx", &out);
+	assert(out.str_view() == "0,0,6,7,0,1,0,1,4,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_comment() @test {
@@ -224,16 +230,16 @@ fn void test_encode_function_call() @test {
 
 fn void test_encode_variable_not_function() @test {
 	DString out = dstring::temp();
-	// "fn x" → "fn" KEYWORD (7), "x" not followed by LPAREN → VARIABLE (4)
-	encode_semantic_tokens("fn x", &out);
-	assert(out.str_view() == "0,0,2,7,0,0,3,1,4,0", "Variable should stay variable, got: %s", out.str_view());
+	// "return x" → "x" not followed by LPAREN → VARIABLE (4)
+	encode_semantic_tokens("return x", &out);
+	assert(out.str_view() == "0,0,6,7,0,0,7,1,4,0", "Variable should stay variable, got: %s", out.str_view());
 }
 
 fn void test_encode_variable_assignment() @test {
 	DString out = dstring::temp();
-	// "int x = 1;" → "int" TYPE (1), "x" → VARIABLE (4), "1" → NUMBER (11)
+	// "int x = 1;" → "int" TYPE (1) + defaultLibrary (4), "x" → VARIABLE (4), "1" → NUMBER (11)
 	encode_semantic_tokens("int x = 1;", &out);
-	assert(out.str_view() == "0,0,3,1,0,0,4,1,4,0,0,4,1,11,0", "got: %s", out.str_view());
+	assert(out.str_view() == "0,0,3,1,4,0,4,1,4,0,0,4,1,11,0", "got: %s", out.str_view());
 }
 
 fn void test_encode_namespace() @test {
@@ -248,55 +254,51 @@ fn void test_encode_namespace() @test {
 fn void test_encode_method_signature() @test {
 	DString out = dstring::temp();
 	// "fn void Foo.bar(int x)":
-	//   fn    → DECL_ACCENT (17) [signature keyword]
-	//   void  → DECL_ACCENT (17) [return type, same accent as "fn"]
-	//   Foo   → CLASS (14)       [receiver type, before ".name("]
-	//   bar   → FUNCTION (5)     [method name, before "("]
-	//   int   → TYPE (1)         [parameter type — NOT the return type, stays plain]
-	//   x     → PARAMETER (15)   [parameter name, before ")"]
+	//   fn    → left to the grammar (storage keyword)
+	//   void  → TYPE (1), defaultLibrary (4)
+	//   Foo   → CLASS (14)                 [receiver type, before ".name("]
+	//   bar   → FUNCTION (5), declaration (1)
+	//   int   → TYPE (1), defaultLibrary (4)
+	//   x     → PARAMETER (15), declaration (1)
 	encode_semantic_tokens("fn void Foo.bar(int x)", &out);
-	assert(out.str_view() == "0,0,2,17,0,0,3,4,17,0,0,5,3,14,0,0,4,3,5,0,0,4,3,1,0,0,4,1,15,0",
+	assert(out.str_view() == "0,3,4,1,4,0,5,3,14,0,0,4,3,5,1,0,4,3,1,4,0,4,1,15,1",
 		"got: %s", out.str_view());
 }
 
 fn void test_encode_plain_function_signature() @test {
 	DString out = dstring::temp();
 	// "fn int add(int a)": no receiver — "add" is the name, "a" a parameter
-	//   fn(17, accent) int(17, accent — return type) add(5) int(1, param type) a(15)
 	encode_semantic_tokens("fn int add(int a)", &out);
-	assert(out.str_view() == "0,0,2,17,0,0,3,3,17,0,0,4,3,5,0,0,4,3,1,0,0,4,1,15,0",
+	assert(out.str_view() == "0,3,3,1,4,0,4,3,5,1,0,4,3,1,4,0,4,1,15,1",
 		"got: %s", out.str_view());
 }
 
 fn void test_encode_class_return_type() @test {
 	DString out = dstring::temp();
-	// "fn Foo bar()": fn → DECL_ACCENT(17), Foo → TYPE(1) [class return type,
-	// NOT accented — regular type green], bar → FUNCTION(5)
+	// "fn Foo bar()": Foo → TYPE(1), bar → FUNCTION(5) declaration(1)
 	encode_semantic_tokens("fn Foo bar()", &out);
-	assert(out.str_view() == "0,0,2,17,0,0,3,3,1,0,0,4,3,5,0",
+	assert(out.str_view() == "0,3,3,1,0,0,4,3,5,1",
 		"got: %s", out.str_view());
 }
 
 fn void test_encode_struct_field_types() @test {
 	DString out = dstring::temp();
 	// "struct Point { String name; int version; }":
-	//   struct  → KEYWORD(7)
-	//   Point   → CLASS(14)          [declared type name]
-	//   String  → TYPE(1)            [class field type — NOT accented]
-	//   name    → VARIABLE(4)
-	//   int     → DECL_ACCENT(17)    [primitive field type — accented, like a
-	//                                 primitive return type]
-	//   version → VARIABLE(4)
+	//   Point   → CLASS(14), declaration
+	//   String  → TYPE(1)
+	//   name    → PROPERTY(16), declaration — a field, like the `.name` reading it
+	//   int     → TYPE(1), defaultLibrary
+	//   version → PROPERTY(16), declaration
 	encode_semantic_tokens("struct Point { String name; int version; }", &out);
-	assert(out.str_view() == "0,0,6,7,0,0,7,5,14,0,0,8,6,1,0,0,7,4,4,0,0,6,3,17,0,0,4,7,4,0",
+	assert(out.str_view() == "0,7,5,14,1,0,8,6,1,0,0,7,4,16,1,0,6,3,1,4,0,4,7,16,1",
 		"got: %s", out.str_view());
 }
 
 fn void test_encode_type_declaration() @test {
 	DString out = dstring::temp();
-	// "struct Point" → struct KEYWORD (7), Point CLASS (14)
+	// "struct Point" → Point CLASS (14), declaration (1)
 	encode_semantic_tokens("struct Point", &out);
-	assert(out.str_view() == "0,0,6,7,0,0,7,5,14,0", "got: %s", out.str_view());
+	assert(out.str_view() == "0,7,5,14,1", "got: %s", out.str_view());
 }
 
 fn void test_encode_property_access() @test {
@@ -341,16 +343,16 @@ fn void test_encode_utf16_char_offset() @test {
 
 fn void test_encode_const_ident() @test {
 	DString out = dstring::temp();
-	// "FOO" is CONST_IDENT → ENUM_MEMBER (index 13)
+	// "FOO" is CONST_IDENT → ENUM_MEMBER (index 13), readonly (2)
 	encode_semantic_tokens("FOO", &out);
-	assert(out.str_view() == "0,0,3,13,0", "CONST_IDENT should be enumMember, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,3,13,2", "CONST_IDENT should be enumMember, got: %s", out.str_view());
 }
 
 fn void test_encode_const_ident_not_function() @test {
 	DString out = dstring::temp();
 	// "FOO()" — CONST_IDENT is always ENUM_MEMBER, not promoted to FUNCTION
 	encode_semantic_tokens("FOO()", &out);
-	assert(out.str_view() == "0,0,3,13,0", "CONST_IDENT before LPAREN should stay enumMember, got: %s", out.str_view());
+	assert(out.str_view() == "0,0,3,13,2", "CONST_IDENT before LPAREN should stay enumMember, got: %s", out.str_view());
 }
 
 fn void test_encode_function_call_with_args() @test {

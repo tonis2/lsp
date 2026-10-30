@@ -27,20 +27,21 @@ enum SemanticCategory : char (int index)
 	CLASS       { 14 },
 	PARAMETER   { 15 },
 	PROPERTY    { 16 },
-	// Reuses the standard "typeParameter" legend slot as a "declaration
-	// accent" color: the fn/macro keyword plus a *primitive* return type
-	// (void, int, bool, ...), so `fn void foo(...)` reads as one visual
-	// unit distinct from other keywords. A class return type is left as
-	// TYPE instead — it renders as a regular (green) type reference.
-	DECL_ACCENT { 17 },
 	SKIP        { -1 },
 }
 
+// Semantic token modifiers, as bits in the order of TOKEN_MODIFIERS_LEGEND.
+const int MOD_DECLARATION     = 1 << 0; // the name being declared
+const int MOD_READONLY        = 1 << 1; // constants and enum members
+const int MOD_DEFAULT_LIBRARY = 1 << 2; // builtin types
+
 // Maps a TokenType to its semantic token category index.
-// The LSP owns all syntax coloring: it emits a semantic token for every
-// meaningful token so VS Code colors from the lexer (accurate) rather than
-// relying on the TextMate grammar's regex approximation. Only operators,
-// punctuation and structural tokens are left uncolored (SKIP).
+// Names, types, literals, comments and control-flow keywords get a semantic token,
+// colored from the lexer rather than the TextMate grammar's regex approximation.
+// Operators and punctuation are left uncolored (SKIP), and so are the literal and
+// declaration keywords (`true`, `null`, `struct`, `fn`, `static`, ...): the standard
+// legend has no category for them, and "keyword" would paint them all in the
+// control-flow color, so the grammar's constant/storage colors are kept instead.
 fn SemanticCategory map_token_type(TokenType t)
 {
 	switch (t)
@@ -59,10 +60,10 @@ fn SemanticCategory map_token_type(TokenType t)
 		case CT_CONST_IDENT:
 			return ENUM_MEMBER;
 		case IDENT:
-		case HASH_IDENT:
-			return VARIABLE;
 		case CT_IDENT:
-			return MACRO_CAT;
+			return VARIABLE;
+		case HASH_IDENT:
+			return PARAMETER; // only macro parameters are named #name
 
 		// Decorators — @attributes
 		case AT_INLINE:
@@ -87,7 +88,8 @@ fn SemanticCategory map_token_type(TokenType t)
 		case FLOAT:
 		case DOUBLE:
 		case FLOAT16:
-		case BFLOAT16:
+		case BFLOAT:
+		case UNTYPEDLIST:
 		case FLOAT128:
 		case IPTR:
 		case UPTR:
@@ -115,25 +117,9 @@ fn SemanticCategory map_token_type(TokenType t)
 		case REAL:
 			return NUMBER;
 
-		// Keywords — declarations, control flow, storage, literals.
-		case ALIAS:
+		// Control-flow and statement keywords.
 		case ASM:
 		case ASSERT:
-		case ATTRDEF:
-		case BITSTRUCT:
-		case CONST:
-		case CONSTDEF:
-		case CONSTSET:
-		case ENUM:
-		case FAULTDEF:
-		case FUNC:
-		case IMPORT:
-		case INTERFACE:
-		case MACRO:
-		case MODULE:
-		case STRUCT:
-		case UNION:
-		case TYPEDEF:
 		case BREAK:
 		case CASE:
 		case CATCH:
@@ -142,66 +128,46 @@ fn SemanticCategory map_token_type(TokenType t)
 		case DEFER:
 		case DO:
 		case ELSE:
-		case EXTERN:
-		case FALSE:
 		case FOR:
 		case FOREACH:
 		case FOREACH_R:
 		case IF:
-		case INLINE:
 		case LENGTHOF:
 		case NEXTCASE:
-		case NULL:
 		case RETURN:
-		case STATIC:
 		case SWITCH:
-		case TLOCAL:
-		case TRUE:
 		case TRY:
-		case VAR:
 		case WHILE:
 			return KEYWORD;
 
 		// Compile-time ($) keywords and the $$ builtin intrinsic.
-		case CT_ALIGNOF:
 		case CT_ASSERT:
-		case CT_ASSIGNABLE:
 		case CT_CASE:
 		case CT_DEFAULT:
 		case CT_DEFINED:
 		case CT_ECHO:
 		case CT_ELSE:
+		case CT_EMBED:
 		case CT_ENDFOR:
 		case CT_ENDFOREACH:
 		case CT_ENDIF:
 		case CT_ENDSWITCH:
 		case CT_ERROR:
 		case CT_EVAL:
-		case CT_EVALTYPE:
 		case CT_EXEC:
-		case CT_EXTNAMEOF:
+		case CT_EXPAND:
+		case CT_FEAT:
 		case CT_FEATURE:
 		case CT_FOR:
 		case CT_FOREACH:
 		case CT_IF:
-		case CT_IS_CONST:
 		case CT_INCLUDE:
-		case CT_KINDOF:
-		case CT_NAMEOF:
-		case CT_OFFSETOF:
-		case CT_QNAMEOF:
-		case CT_SIZEOF:
+		case CT_REFLECT:
 		case CT_STRINGIFY:
 		case CT_SWITCH:
 		case CT_TYPEFROM:
 		case CT_TYPEOF:
 		case CT_VAARG:
-		case CT_VACONST:
-		case CT_VACOUNT:
-		case CT_VAEXPR:
-		case CT_VAREF:
-		case CT_VATYPE:
-		case CT_VASPLAT:
 		case BUILTIN:
 			return KEYWORD;
 
@@ -247,7 +213,8 @@ fn bool is_type_token(TokenType t)
 		case FLOAT:
 		case DOUBLE:
 		case FLOAT16:
-		case BFLOAT16:
+		case BFLOAT:
+		case UNTYPEDLIST:
 		case FLOAT128:
 		case IPTR:
 		case UPTR:
@@ -287,7 +254,8 @@ fn bool is_builtin_type_token(TokenType t)
 		case FLOAT:
 		case DOUBLE:
 		case FLOAT16:
-		case BFLOAT16:
+		case BFLOAT:
+		case UNTYPEDLIST:
 		case FLOAT128:
 		case IPTR:
 		case UPTR:
@@ -485,6 +453,78 @@ fn String TokenList.module_of_decl(&self, sz decl_idx)
 	return "";
 }
 
+// The `@feat(...)` conditions a declaration is compiled under, as written: those on the
+// declaration itself (`fn void foo() @feat(POSIX)`, `alias WChar @feat(WIN32) = ...`)
+// and those on the module section it sits in (`module libc @feat(LIBC);`), joined by
+// a space. "" for a declaration that is always compiled. `name_idx` is the declared
+// name. Nothing is evaluated: this is for telling platform variants apart.
+fn String TokenList.decl_feat(&self, sz name_idx)
+{
+	String own = self.decl_own_feat(name_idx);
+	for (sz m = name_idx; m > 0; m--)
+	{
+		if (self.entries[m - 1].type != MODULE) continue;
+		return join_feat(own, self.module_feat(m - 1));
+	}
+	return own;
+}
+
+// The `@feat(...)` attributes on the declaration named at `name_idx` itself: from the
+// name to its body, `=` or `;`, stepping over a parameter list whole.
+fn String TokenList.decl_own_feat(&self, sz name_idx)
+{
+	DString feat = dstring::temp();
+	for (sz j = name_idx + 1; j < self.size && j < name_idx + 256; j++)
+	{
+		TokenType t = self.entries[j].type;
+		if (t == LBRACE || t == EOS || t == EQ || t == IMPLIES) break;
+		if (t == LPAREN)
+		{
+			j = self.match_rparen(j);
+			continue;
+		}
+		if (t == AT_IDENT && self.entries[j].text == "@feat") j = self.append_attr(j, &feat);
+	}
+	return feat.str_view();
+}
+
+// The `@feat(...)` attributes of the `module` line at `module_idx`.
+fn String TokenList.module_feat(&self, sz module_idx)
+{
+	DString feat = dstring::temp();
+	for (sz j = module_idx; j < self.size && self.entries[j].type != EOS; j++)
+	{
+		if (self.entries[j].type == AT_IDENT && self.entries[j].text == "@feat") j = self.append_attr(j, &feat);
+	}
+	return feat.str_view();
+}
+
+fn String join_feat(String a, String b)
+{
+	if (a.len == 0) return b;
+	if (b.len == 0) return a;
+	return string::tformat("%s %s", a, b);
+}
+
+// Append the attribute starting at `at_idx` (`@feat(POSIX, WIN32)`) to `out` as it is
+// written, space-separated from what is already there. Returns the index of its last
+// token.
+fn sz TokenList.append_attr(&self, sz at_idx, DString* out) @private
+{
+	sz last = at_idx;
+	if (at_idx + 1 < self.size && self.entries[at_idx + 1].type == LPAREN)
+	{
+		last = self.match_rparen(at_idx + 1);
+		if (last >= self.size) last = self.size - 1;
+	}
+	Token first = self.entries[at_idx];
+	Token end = self.entries[last];
+	if (out.len() > 0) out.append_char(' ');
+	// Both tokens slice the same text, so the span between them is the source as written.
+	out.append(((String)first.text.ptr[:end.offset + end.len - first.offset]));
+	return last;
+}
+
 // From decl_idx, find the first `{` and return the index of its matching `}`, so a
 // loop iterating top-level declarations can skip a type body `{...}` (e.g. an
 // interface's method declarations, which must not be scanned as module functions).
@@ -566,7 +606,8 @@ fn String get_token_description(TokenType t, String text)
 		case FLOAT: return "`float` — 32-bit floating point";
 		case DOUBLE: return "`double` — 64-bit floating point";
 		case FLOAT16: return "`float16` — 16-bit floating point";
-		case BFLOAT16: return "`bfloat16` — 16-bit brain floating point";
+		case BFLOAT: return "`bfloat` — 16-bit brain floating point";
+		case UNTYPEDLIST: return "`untypedlist` — Type of an untyped initializer list";
 		case FLOAT128: return "`float128` — 128-bit floating point";
 		case IPTR: return "`iptr` — Signed pointer-sized integer";
 		case UPTR: return "`uptr` — Unsigned pointer-sized integer";
@@ -577,45 +618,33 @@ fn String get_token_description(TokenType t, String text)
 		case TYPEID: return "`typeid` — Runtime type identifier";
 
 		// Compile-time intrinsics
-		case CT_ALIGNOF: return "`$alignof` — Returns alignment of a type";
 		case CT_ASSERT: return "`$assert` — Compile-time assertion";
-		case CT_ASSIGNABLE: return "`$assignable` — Checks if a value is assignable";
 		case CT_CASE: return "`$case` — Compile-time case";
 		case CT_DEFAULT: return "`$default` — Compile-time default case";
-		case CT_DEFINED: return "`$defined` — Checks if an identifier is defined";
+		case CT_DEFINED: return "`$defined` — Checks if an expression is defined";
 		case CT_ECHO: return "`$echo` — Compile-time message output";
 		case CT_ELSE: return "`$else` — Compile-time else branch";
+		case CT_EMBED: return "`$embed` — Embeds a file's contents as a constant";
 		case CT_ENDFOR: return "`$endfor` — Ends compile-time for";
 		case CT_ENDFOREACH: return "`$endforeach` — Ends compile-time foreach";
 		case CT_ENDIF: return "`$endif` — Ends compile-time if";
 		case CT_ENDSWITCH: return "`$endswitch` — Ends compile-time switch";
 		case CT_ERROR: return "`$error` — Emits a compile-time error";
 		case CT_EVAL: return "`$eval` — Compile-time expression evaluation";
-		case CT_EVALTYPE: return "`$evaltype` — Evaluates to a type at compile time";
 		case CT_EXEC: return "`$exec` — Executes a compile-time command";
-		case CT_EXTNAMEOF: return "`$extnameof` — External name of a symbol";
-		case CT_FEATURE: return "`$feature` — Checks for a compile-time feature";
+		case CT_EXPAND: return "`$expand` — Expands a string into code";
+		case CT_FEAT: return "`$feat` — Checks a feature-flag expression";
+		case CT_FEATURE: return "`$feature` — Checks for a feature flag (deprecated: use `$feat`)";
 		case CT_FOR: return "`$for` — Compile-time for loop";
 		case CT_FOREACH: return "`$foreach` — Compile-time foreach loop";
 		case CT_IF: return "`$if` — Compile-time conditional";
-		case CT_IS_CONST: return "`$is_const` — Checks if expression is constant";
 		case CT_INCLUDE: return "`$include` — Includes a file at compile time";
-		case CT_KINDOF: return "`$kindof` — Returns the kind of a type";
-		case CT_NAMEOF: return "`$nameof` — Returns the name of a symbol";
-		case CT_OFFSETOF: return "`$offsetof` — Returns field offset in bytes";
-		case CT_QNAMEOF: return "`$qnameof` — Returns qualified name of a symbol";
-		case CT_SIZEOF: return "`$sizeof` — Returns size of a type in bytes";
+		case CT_REFLECT: return "`$reflect` — Compile-time reflection on a type or symbol";
 		case CT_STRINGIFY: return "`$stringify` — Converts expression to string";
 		case CT_SWITCH: return "`$switch` — Compile-time switch";
-		case CT_TYPEFROM: return "`$typefrom` — Creates type from typeid";
-		case CT_TYPEOF: return "`$typeof` — Returns the type of an expression";
-		case CT_VAARG: return "`$vaarg` — Accesses variadic argument";
-		case CT_VACONST: return "`$vaconst` — Variadic constant access";
-		case CT_VACOUNT: return "`$vacount` — Returns number of variadic arguments";
-		case CT_VAEXPR: return "`$vaexpr` — Variadic expression access";
-		case CT_VAREF: return "`$varef` — Variadic reference access";
-		case CT_VATYPE: return "`$vatype` — Variadic type access";
-		case CT_VASPLAT: return "`$vasplat` — Splats variadic arguments";
+		case CT_TYPEFROM: return "`$Typefrom` — Creates a type from a typeid";
+		case CT_TYPEOF: return "`$Typeof` — The type of an expression";
+		case CT_VAARG: return "`$vaarg` — Accesses variadic arguments";
 		case BUILTIN: return "`$$` — Builtin intrinsic access";
 
 		// Identifier types

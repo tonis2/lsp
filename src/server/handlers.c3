@@ -6,16 +6,19 @@ import std::collections::list;
 import std::collections::object;
 import std::time;
 
-const TOKEN_TYPES_LEGEND = `["namespace","type","enum","struct","variable","function","macro","keyword","decorator","comment","string","number","operator","enumMember","class","parameter","property","typeParameter"]`;
+const TOKEN_TYPES_LEGEND = `["namespace","type","enum","struct","variable","function","macro","keyword","decorator","comment","string","number","operator","enumMember","class","parameter","property"]`;
+const TOKEN_MODIFIERS_LEGEND = `["declaration","readonly","defaultLibrary"]`;
 
+// Byte offset of an LSP position (line, UTF-16 column) in `content`. The column is
+// clamped to its line; a line past the end of the document gives 0.
 fn sz position_to_offset(String content, int line, int character)
 {
 	LineOffsets lo;
 	lo.init(mem);
 	defer lo.free();
 	lo.build(content);
-	if ((sz)line < lo.size) return lo.entries[(sz)line] + (sz)character;
-	return 0;
+	if (line < 0 || (sz)line >= lo.size) return 0;
+	return utf16_to_byte(content, lo.entries[(sz)line], character < 0 ? 0 : (sz)character);
 }
 
 // --- Typed request decode ---------------------------------------------------
@@ -156,6 +159,7 @@ fn void LspServer.handle_exit(&self, Object* msg = null, String id_json = "")
 	}
 	self.documents.free();
 	self.free_diag_state();
+	self.clear_build_failure();
 
 	if (self.diag_pending_uri.len > 0) mem::free((char*)self.diag_pending_uri.ptr);
 	if (self.lex_diag_pending_uri.len > 0) mem::free((char*)self.lex_diag_pending_uri.ptr);
@@ -183,6 +187,12 @@ fn void LspServer.handle_did_change(&self, Object* msg, String id_json = "")
 	Object* first   = changes.get_at(0);
 	String text     = first.get_string("text") ?? "";
 
+	// The compiler's markers were placed against the old text; move them with the edit
+	// before it is replaced. update() frees the old content, so diff it first.
+	if (try doc = self.documents.find(uri))
+	{
+		self.shift_compiler_diagnostics(uri, doc.content, text);
+	}
 	self.documents.update(uri, text, version);
 	self.maybe_publish_lex_diagnostics(uri, text);
 }
@@ -294,11 +304,90 @@ fn void LspServer.handle_semantic_tokens(&self, Object* msg, String id_json)
 	{
 		DString data = dstring::temp();
 		encode_semantic_tokens(doc.content, &data, doc.get_tokens());
+		uint id = self.remember_semantic_tokens(doc, data.str_view());
+
+		DString result = dstring::temp();
+		result.appendf(`{"resultId":"%d","data":[%s]}`, id, data.str_view());
+		send_response(id_json, result.str_view());
+	}
+}
+
+// semanticTokens/full/delta: the tokens as edits to the array last sent, when the
+// client still has it (its previousResultId is the one remembered), else in full.
+// While typing, a keystroke changes a few numbers in an array of thousands.
+fn void LspServer.handle_semantic_tokens_delta(&self, Object* msg, String id_json)
+{
+	if (try doc = self.doc_or_respond(request_uri(msg), id_json, `{"data":[]}`))
+	{
+		String previous = msg.get("params")!!.get_string("previousResultId") ?? "";
+		bool known = doc.semantic_data.len > 0 && previous == string::tformat("%d", doc.semantic_result_id);
+		String old_data = known ? doc.semantic_data.tcopy() : "";
+
+		DString data = dstring::temp();
+		encode_semantic_tokens(doc.content, &data, doc.get_tokens());
+		uint id = self.remember_semantic_tokens(doc, data.str_view());
+
+		DString result = dstring::temp();
+		if (known)
+		{
+			result.appendf(`{"resultId":"%d","edits":[`, id);
+			encode_semantic_edit(old_data, data.str_view(), &result);
+			result.append("]}");
+		}
+		else
+		{
+			result.appendf(`{"resultId":"%d","data":[%s]}`, id, data.str_view());
+		}
+		send_response(id_json, result.str_view());
+	}
+}
+
+// semanticTokens/range: only the tokens on the requested lines, which is what a
+// client asks for first on a large file to color the visible part quickly.
+fn void LspServer.handle_semantic_tokens_range(&self, Object* msg, String id_json)
+{
+	if (try doc = self.doc_or_respond(request_uri(msg), id_json, `{"data":[]}`))
+	{
+		Range range;
+		if (try r = msg.get("params")!!.get("range")) range = decode_range(r);
+		DString data = dstring::temp();
+		encode_semantic_tokens(doc.content, &data, doc.get_tokens(), range.start.line, range.end.line);
 
 		DString result = dstring::temp();
 		result.appendf(`{"data":[%s]}`, data.str_view());
 		send_response(id_json, result.str_view());
 	}
+}
+
+// Keep `data` as the tokens last sent for `doc`, under a fresh resultId.
+fn uint LspServer.remember_semantic_tokens(&self, Document* doc, String data)
+{
+	if (doc.semantic_data.len > 0) mem::free((char*)doc.semantic_data.ptr);
+	doc.semantic_data = str_own(data);
+	doc.semantic_result_id = ++self.semantic_result_id;
+	return doc.semantic_result_id;
+}
+
+// The single SemanticTokensEdit turning the comma-separated integers `old` into
+// `new`: the run between their common prefix and suffix. Nothing when they're equal.
+fn void encode_semantic_edit(String old, String new, DString* out)
+{
+	String[] a = old.len > 0 ? old.tsplit(",") : {};
+	String[] b = new.len > 0 ? new.tsplit(",") : {};
+	sz shorter = a.len < b.len ? a.len : b.len;
+	sz prefix = 0;
+	while (prefix < shorter && a[prefix] == b[prefix]) prefix++;
+	if (prefix == a.len && prefix == b.len) return;
+	sz suffix = 0;
+	while (suffix < shorter - prefix && a[a.len - 1 - suffix] == b[b.len - 1 - suffix]) suffix++;
+
+	out.appendf(`{"start":%d,"deleteCount":%d,"data":[`, prefix, a.len - prefix - suffix);
+	for (sz i = prefix; i < b.len - suffix; i++)
+	{
+		if (i > prefix) out.append_char(',');
+		out.append(b[i]);
+	}
+	out.append("]}");
 }
 
 fn void LspServer.handle_folding_range(&self, Object* msg, String id_json)

@@ -69,7 +69,7 @@ const String[*] BUILTIN_TYPES = {
 	"float",
 	"double",
 	"float16",
-	"bfloat16",
+	"bfloat",
 	"float128",
 	"iptr",
 	"uptr",
@@ -78,48 +78,98 @@ const String[*] BUILTIN_TYPES = {
 	"fault",
 	"any",
 	"typeid",
+	"untypedlist",
 	};
 
+// The compile-time keywords of C3 0.8 (`$feature` still lexes, but is deprecated in
+// favour of `$feat`, so it is not offered).
 const String[*] CT_KEYWORDS = {
-	"$alignof",
 	"$assert",
-	"$assignable",
 	"$case",
 	"$default",
 	"$defined",
 	"$echo",
 	"$else",
+	"$embed",
 	"$endfor",
 	"$endforeach",
 	"$endif",
 	"$endswitch",
 	"$error",
 	"$eval",
-	"$evaltype",
 	"$exec",
-	"$extnameof",
-	"$feature",
+	"$expand",
+	"$feat",
 	"$for",
 	"$foreach",
 	"$if",
-	"$is_const",
 	"$include",
-	"$kindof",
-	"$nameof",
-	"$offsetof",
-	"$qnameof",
-	"$sizeof",
+	"$reflect",
 	"$stringify",
 	"$switch",
-	"$typefrom",
-	"$typeof",
+	"$Typefrom",
+	"$Typeof",
 	"$vaarg",
-	"$vaconst",
-	"$vacount",
-	"$vaexpr",
-	"$varef",
-	"$vasplat",
-	"$vatype",
+	};
+
+// The attributes the compiler defines (MANUAL.md, "Attributes"). User-defined ones
+// (`attrdef`) come from the identifier scan.
+const String[*] BUILTIN_ATTRIBUTES = {
+	"@allow_deprecated",
+	"@benchmark",
+	"@bigendian",
+	"@builtin",
+	"@callconv",
+	"@cname",
+	"@compact",
+	"@const",
+	"@constinit",
+	"@deprecated",
+	"@dynamic",
+	"@export",
+	"@feat",
+	"@finalizer",
+	"@format",
+	"@if",
+	"@init",
+	"@inline",
+	"@jump",
+	"@link",
+	"@local",
+	"@maydiscard",
+	"@mustinit",
+	"@naked",
+	"@noalias",
+	"@nodiscard",
+	"@noinit",
+	"@noinline",
+	"@nopadding",
+	"@norecurse",
+	"@noredzone",
+	"@noreturn",
+	"@nosanitize",
+	"@nostackprobe",
+	"@nostackprotector",
+	"@nostrip",
+	"@obfuscate",
+	"@operator",
+	"@optional",
+	"@overlap",
+	"@packed",
+	"@private",
+	"@public",
+	"@pure",
+	"@reflect",
+	"@safemacro",
+	"@simd",
+	"@stackprobe",
+	"@stackprotector",
+	"@test",
+	"@unused",
+	"@used",
+	"@weak",
+	"@weaklink",
+	"@winmain",
 	};
 
 // How many items the response carries. Kept at the number the old streaming emit
@@ -418,8 +468,8 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 	sz cur_line   = lo.find_line(offset);
 	sz line_start = lo.entries[cur_line];
 	Range edit_range = {
-		.start = { .line = cur_line, .character = prefix_start - line_start },
-		.end   = { .line = cur_line, .character = offset - line_start },
+		.start = { .line = cur_line, .character = utf16_len(content, line_start, prefix_start) },
+		.end   = { .line = cur_line, .character = utf16_len(content, line_start, offset) },
 	};
 
 	// Emit editRange as an explicit InsertReplaceEdit ({insert, replace}) rather than a
@@ -466,6 +516,12 @@ fn void encode_completions(String uri, String content, sz offset, DocumentList* 
 		if (prefix.len == 0 || prefix[0] == '$')
 		{
 			foreach (ct : CT_KEYWORDS) sink.add(ct, 14); // Keyword
+		}
+
+		// Built-in attributes when prefix starts with @
+		if (prefix.len > 0 && prefix[0] == '@')
+		{
+			foreach (attr : BUILTIN_ATTRIBUTES) sink.add(attr, 14); // Keyword
 		}
 
 		// Statement and declaration templates (`for`, `fn`, `$if`, ...), where the
@@ -821,10 +877,7 @@ fn sz parse_imports(String content, String[MAX_IMPORTS]* imports) @private
 					}
 					else
 					{
-						if (lex.at_end()) break;
-						lex.pos++;
-						lex.col++;
-						break;
+						break; // end of input
 					}
 				}
 				if (mod_path.len() > 0)
@@ -843,9 +896,7 @@ fn sz parse_imports(String content, String[MAX_IMPORTS]* imports) @private
 		}
 		else
 		{
-			if (lex.at_end()) break;
-			lex.pos++;
-			lex.col++;
+			break; // end of input: invalid input is an INVALID token, not a failure
 		}
 	}
 	return count;
