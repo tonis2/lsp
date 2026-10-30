@@ -111,6 +111,24 @@ fn void classify_roles(TokenStream* stream, SemanticCategory[] roles, int[] mods
 			}
 			if (tt == ENUM || tt == CONSTSET || tt == CONSTDEF) mark_member_declarations(toks, mods, i);
 		}
+		else if ((tt == ATTRDEF || tt == ATTRMACRO) && i + 1 < n && toks.entries[i + 1].type == AT_TYPE_IDENT)
+		{
+			// The declared attribute: `attrdef @Component(name) = @tag(...)`.
+			mods[i + 1] |= MOD_DECLARATION;
+			// Its parameters, and their uses in the attribute list.
+			if (try span = toks.attribute_span(i))
+			{
+				for (sz j = span.lparen + 1; j < span.end; j++)
+				{
+					if (!is_local_name(toks.entries[j].type)) continue;
+					if (try decl = toks.local_declaration_of(j, span))
+					{
+						roles[j] = PARAMETER;
+						if (decl == j) mods[j] |= MOD_DECLARATION;
+					}
+				}
+			}
+		}
 		else if (tt == FAULTDEF || tt == CONSTDEF)
 		{
 			// Braceless: `faultdef A, B;` / `constdef NAME = 1;`.

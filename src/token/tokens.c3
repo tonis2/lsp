@@ -50,7 +50,6 @@ fn SemanticCategory map_token_type(TokenType t)
 		// IDENT may be refined to FUNCTION / NAMESPACE in the encoder
 		// based on the following token ( "(" or "::" ).
 		case TYPE_IDENT:
-		case AT_TYPE_IDENT:
 		case HASH_TYPE_IDENT:
 		case CT_TYPE_IDENT:
 			return TYPE;
@@ -70,6 +69,7 @@ fn SemanticCategory map_token_type(TokenType t)
 		case AT_PURE:
 		case AT_NOINLINE:
 		case AT_IDENT:
+		case AT_TYPE_IDENT: // user-defined attributes: attrdef/attrmacro @Name
 			return DECORATOR;
 
 		// Builtin types — colored like user types.
@@ -509,7 +509,7 @@ fn String join_feat(String a, String b)
 // Append the attribute starting at `at_idx` (`@feat(POSIX, WIN32)`) to `out` as it is
 // written, space-separated from what is already there. Returns the index of its last
 // token.
-fn sz TokenList.append_attr(&self, sz at_idx, DString* out) @private
+fn sz TokenList.append_attr(&self, sz at_idx, DString* out)
 {
 	sz last = at_idx;
 	if (at_idx + 1 < self.size && self.entries[at_idx + 1].type == LPAREN)
@@ -648,8 +648,13 @@ fn String get_token_description(TokenType t, String text)
 		case BUILTIN: return "`$$` — Builtin intrinsic access";
 
 		// Identifier types
-		case TYPE_IDENT:
 		case AT_TYPE_IDENT:
+			DString d = dstring::temp();
+			d.append("Attribute: `");
+			d.append(text);
+			d.append_char('`');
+			return d.str_view();
+		case TYPE_IDENT:
 		case HASH_TYPE_IDENT:
 		case CT_TYPE_IDENT:
 			DString d = dstring::temp();

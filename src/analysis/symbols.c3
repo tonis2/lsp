@@ -293,6 +293,19 @@ fn void collect_symbols(String content, TokenStream* stream, List{SymbolEntry}* 
 						end_offset = stream.tokens.find_eos_end(i + 2);
 					}
 				}
+			case ATTRDEF:
+			case ATTRMACRO:
+				// attrdef @Name(...) = @attr, ...; — LSP has no attribute kind.
+				if (i + 1 < stream.tokens.size && stream.tokens.entries[i + 1].type == AT_TYPE_IDENT)
+				{
+					Token nt = stream.tokens.entries[i + 1];
+					name = nt.text;
+					name_idx = i + 1;
+					name_offset = nt.offset;
+					name_len = nt.len;
+					kind = 12; // Function
+					end_offset = stream.tokens.find_eos_end(i + 2);
+				}
 			default:
 				continue;
 		}

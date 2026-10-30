@@ -39,10 +39,19 @@ fn bool is_local_name(TokenType t)
 	}
 }
 
+// Keywords opening a declaration with its own parameter scope: fn/macro, and the
+// attribute declarations `attrdef @Name(params) = @attr(params), ...;`.
+fn bool is_callable_keyword(TokenType t)
+{
+	return t == FUNC || t == MACRO || t == ATTRDEF || t == ATTRMACRO;
+}
+
 // The span of the fn/macro whose keyword is at `kw`. Fails for a declaration
-// without a body (extern, interface method, function pointer type).
+// without a body (extern, interface method, function pointer type). For an
+// attribute declaration the body is its `= ...` attribute list up to the `;`.
 fn LocalScope? TokenList.callable_span(&self, sz kw)
 {
+	if (self.entries[kw].type == ATTRDEF || self.entries[kw].type == ATTRMACRO) return self.attribute_span(kw);
 	sz lparen = self.fn_lparen_after(kw)!;
 	sz rparen = self.match_rparen(lparen);
 	if (rparen >= self.size) return TOKEN_NOT_FOUND~;
@@ -58,6 +67,39 @@ fn LocalScope? TokenList.callable_span(&self, sz kw)
 				return (LocalScope){ kw, lparen, rparen, self.expression_end(j + 1) };
 			case EOS:
 				return TOKEN_NOT_FOUND~;
+			default:
+				break;
+		}
+	}
+	return TOKEN_NOT_FOUND~;
+}
+
+// The span of `attrdef @Name(params) ...;` at `kw`: the parameters are its locals,
+// used in the attribute list after `=`. Fails without a parameter list.
+fn LocalScope? TokenList.attribute_span(&self, sz kw)
+{
+	if (kw + 2 >= self.size || self.entries[kw + 1].type != AT_TYPE_IDENT || self.entries[kw + 2].type != LPAREN)
+	{
+		return TOKEN_NOT_FOUND~;
+	}
+	sz lparen = kw + 2;
+	sz rparen = self.match_rparen(lparen);
+	if (rparen >= self.size) return TOKEN_NOT_FOUND~;
+	sz depth = 0;
+	for (sz j = rparen + 1; j < self.size; j++)
+	{
+		switch (self.entries[j].type)
+		{
+			case LPAREN:
+			case LBRACE:
+			case LBRACKET:
+				depth++;
+			case RPAREN:
+			case RBRACE:
+			case RBRACKET:
+				if (depth > 0) depth--;
+			case EOS:
+				if (depth == 0) return (LocalScope){ kw, lparen, rparen, j };
 			default:
 				break;
 		}
@@ -94,14 +136,14 @@ fn sz TokenList.expression_end(&self, sz from)
 	return self.size;
 }
 
-// The innermost fn/macro whose parameter list or body holds `idx`.
+// The innermost fn/macro (or attribute declaration) whose parameter list or body
+// holds `idx`.
 fn LocalScope? TokenList.callable_around(&self, sz idx)
 {
 	LocalScope? found = TOKEN_NOT_FOUND~;
 	for (sz i = 0; i < idx && i < self.size; i++)
 	{
-		TokenType t = self.entries[i].type;
-		if (t != FUNC && t != MACRO) continue;
+		if (!is_callable_keyword(self.entries[i].type)) continue;
 		LocalScope? span = self.callable_span(i);
 		if (catch span) continue;
 		if (span.contains(idx))

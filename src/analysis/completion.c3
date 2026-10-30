@@ -1068,6 +1068,11 @@ fn void collect_idents_from_content(String content, String prefix, CompletionSin
 				kind = 22; // Struct (type)
 			case CONST_IDENT:
 				kind = 21; // Constant
+			case AT_TYPE_IDENT:
+				// User-defined attributes (attrdef/attrmacro @Name), only after `@`
+				// like the built-in ones.
+				if (prefix.len == 0 || prefix[0] != '@') continue;
+				kind = 14; // Keyword, as the built-in attributes
 			default:
 				continue;
 		}

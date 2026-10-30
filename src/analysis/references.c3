@@ -22,7 +22,7 @@ fn void encode_document_highlights(String content, sz offset, DString* out, Toke
 	if (!stream.tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
-	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT && ct != AT_TYPE_IDENT) return;
 
 	LineOffsets* lo = stream.get_line_offsets();
 
@@ -109,7 +109,7 @@ fn void encode_references(String uri, String content, sz offset, DocumentList* d
 	if (!stream.tokens.find_token_at(offset, &cursor_tok, &cursor_idx)) return;
 
 	TokenType ct = cursor_tok.type;
-	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT && ct != AT_TYPE_IDENT) return;
 
 	// A local variable or parameter never leaves its fn/macro: report the uses
 	// that resolve to the same declaration and skip the cross-file search.
@@ -306,7 +306,7 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 	}
 
 	TokenType ct = cursor_tok.type;
-	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT) return;
+	if (!is_ident(ct) && ct != TYPE_IDENT && ct != CONST_IDENT && ct != AT_TYPE_IDENT) return;
 
 	bool first_uri = true;
 	out.append(`{"changes":{`);
@@ -381,7 +381,7 @@ enum RenameReach
 fn RenameReach TokenList.rename_reach(&self, sz idx, String uri, DocumentList* docs, LocalScope* scope, sz* decl)
 {
 	Token tok = self.entries[idx];
-	if (tok.type == TYPE_IDENT || tok.type == CONST_IDENT)
+	if (tok.type == TYPE_IDENT || tok.type == CONST_IDENT || tok.type == AT_TYPE_IDENT)
 	{
 		return has_project_declaration(self, tok, uri, docs) ? GLOBAL : NONE;
 	}
@@ -427,11 +427,11 @@ fn bool has_project_declaration(TokenList* tokens, Token tok, String uri, Docume
 	return scan_project_dirs(path, &scan);
 }
 
-// Types and constants are never locals, so the cursor-less declaration search
-// is exact for them; plain names have to skip locals and parameters.
+// Types, constants and attributes are never locals, so the cursor-less declaration
+// search is exact for them; plain names have to skip locals and parameters.
 fn bool TokenList.declares_globally(&self, Token tok)
 {
-	if (tok.type == TYPE_IDENT || tok.type == CONST_IDENT) return @ok(self.find_declaration_in(tok));
+	if (tok.type == TYPE_IDENT || tok.type == CONST_IDENT || tok.type == AT_TYPE_IDENT) return @ok(self.find_declaration_in(tok));
 	return @ok(self.find_global_declaration(tok.text));
 }
 

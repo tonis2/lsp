@@ -407,10 +407,11 @@ fn bool TokenList.find_token_at(&self, sz offset, Token* result, sz* idx)
 }
 
 // Token kinds go-to-definition can navigate from: plain, type and constant names,
-// `@macro` names, and the `$`/`#` names of compile-time variables and macro parameters.
+// `@macro` names, `@Attribute` names (attrdef/attrmacro), and the `$`/`#` names of
+// compile-time variables and macro parameters.
 fn bool is_navigable_name(TokenType t)
 {
-	return is_ident(t) || t == TYPE_IDENT || t == CONST_IDENT || is_local_name(t);
+	return is_ident(t) || t == TYPE_IDENT || t == CONST_IDENT || t == AT_TYPE_IDENT || is_local_name(t);
 }
 
 // Like find_token_at, but if the token at offset is a single-char punctuation
@@ -454,7 +455,7 @@ fn bool TokenList.find_ident_token_at(&self, sz offset, Token* result, sz* idx)
 		sz next_idx;
 		if (self.find_token_at(offset + 1, &next, &next_idx))
 		{
-			if (is_ident(next.type) || next.type == TYPE_IDENT || next.type == CONST_IDENT)
+			if (is_ident(next.type) || next.type == TYPE_IDENT || next.type == CONST_IDENT || next.type == AT_TYPE_IDENT)
 			{
 				*result = next;
 				*idx = next_idx;
@@ -1618,7 +1619,7 @@ fn bool emit_found(FoundVariants found, DString* out)
 	return true;
 }
 
-fn bool FoundVariant.precedes(&self, FoundVariant* other) @private
+fn bool FoundVariant.precedes(&self, FoundVariant* other)
 {
 	if (self.uri != other.uri) return self.uri.compare_to(other.uri) < 0;
 	return self.offset < other.offset;
@@ -1626,7 +1627,7 @@ fn bool FoundVariant.precedes(&self, FoundVariant* other) @private
 
 // Add the gated declarations of the target in one file. An ungated one with the same
 // name is a different symbol (another module's), not a variant.
-fn void VariantSearch.add_from(&self, FoundVariants* found, String uri, String content, TokenList* tokens) @private
+fn void VariantSearch.add_from(&self, FoundVariants* found, String uri, String content, TokenList* tokens)
 {
 	List{sz} all;
 	all.tinit();
@@ -2155,6 +2156,17 @@ fn sz? TokenList.find_declaration(
 				if (!is_type_declaration_keyword(self.entries[i].type)) continue;
 				if (self.entries[i + 1].type == TYPE_IDENT && self.entries[i + 1].text == name
 					&& self.decl_in_filter(i + 1, module_filter))
+				{
+					if (record_match(all, i + 1)) return i + 1;
+				}
+			}
+		case AT_TYPE_IDENT:
+			// attrdef @Name ... / attrmacro @Name ...: a user-defined attribute
+			for (sz i = 0; i + 1 < self.size; i++)
+			{
+				TokenType kw = self.entries[i].type;
+				if ((kw == ATTRDEF || kw == ATTRMACRO) && self.entries[i + 1].type == AT_TYPE_IDENT
+					&& self.entries[i + 1].text == name && self.decl_in_filter(i + 1, module_filter))
 				{
 					if (record_match(all, i + 1)) return i + 1;
 				}
