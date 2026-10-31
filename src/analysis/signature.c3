@@ -134,50 +134,19 @@ fn void encode_signature_help(
 
 	if (call_name_idx == stream.tokens.size) return;
 
-	Token target   = stream.tokens[call_name_idx];
-	bool is_method = call_name_idx > 0 && stream.tokens[call_name_idx - 1].type == DOT;
+	Token target = stream.tokens[call_name_idx];
+	CalleeLookup lookup = stream.tokens.callee_lookup(call_name_idx, content, uri, docs, stdlib_path);
+	bool is_method = lookup.is_method;
+	String module_filter = lookup.module_filter;
 
-	// Build the list of receiver types to try when matching the declaration. For a method
-	// call we resolve the receiver type (and its alias base); for a free function the single
-	// empty candidate triggers the `fn Ret name(` / `macro name(` scan.
-	String[2] method_types;
-	sz mt_count = 0;
-	if (is_method && docs != null)
-	{
-		String recv = stream.tokens.resolve_receiver_type(call_name_idx, uri, docs, stdlib_path);
-		if (recv.len > 0)
-		{
-			method_types[mt_count++] = recv;
-			// Follow the alias chain, stdlib included — methods are declared on the
-			// underlying type as often as on the alias.
-			TypeInfo base = stream.tokens.canonical_type(recv, uri, docs, stdlib_path);
-			if (base.name != recv) method_types[mt_count++] = base.name;
-		}
-	}
-	// An unknown receiver still calls a method, never a free function of that name.
-	if (mt_count == 0) method_types[mt_count++] = is_method ? ANY_RECEIVER : "";
-
-	// For a module-qualified free call (`mod::fn(`), restrict the declaration search
-	// to that module so a same-named function elsewhere isn't matched.
-	String module_filter = "";
-	if (!is_method)
-	{
-		String mod_prefix = stream.tokens.resolve_module_prefix(call_name_idx);
-		if (mod_prefix.len > 0)
-		{
-			module_filter = resolve_module_name(content, mod_prefix);
-			if (module_filter.len == 0) module_filter = mod_prefix;
-		}
-	}
-
-	for (sz ci = 0; ci < mt_count; ci++)
+	for (sz ci = 0; ci < lookup.count; ci++)
 	{
 		if (search_signature_all(
 			stream,
 			target,
 			active_param,
 			is_method,
-			method_types[ci],
+			lookup.method_types[ci],
 			content,
 			uri,
 			docs,
@@ -189,6 +158,65 @@ fn void encode_signature_help(
 		{
 			return;
 		}
+		if (ci == 0) lookup.widen(&stream.tokens, uri, docs, stdlib_path);
+	}
+}
+
+// How to look up the declaration a call at `call_name_idx` refers to.
+struct CalleeLookup
+{
+	// The receiver types to try for a method call, in order; a single "" for a free
+	// function, or ANY_RECEIVER for a method on a receiver that could not be resolved.
+	// Only the first is filled in at first; `widen` adds the rest.
+	String[3] method_types;
+	sz count;
+	// For a module-qualified free call (`mod::fn(`), the module to search.
+	String module_filter;
+	bool is_method;
+	String name;
+	String recv; // the resolved receiver type, "" when unknown or not a method call
+}
+
+// How to look up the callee named at `call_name_idx`. A method call searches for
+// `fn Ret Type.name(` on the receiver's type; a free call for `fn Ret name(` /
+// `macro name(`, restricted to its module when written qualified. Without `docs` the
+// receiver is not resolved (unit tests that only pass content).
+fn CalleeLookup TokenList.callee_lookup(&self, sz call_name_idx, String content, String uri, DocumentList* docs, String stdlib_path)
+{
+	CalleeLookup lookup = {
+		.is_method = call_name_idx > 0 && self.entries[call_name_idx - 1].type == DOT,
+		.name = self.entries[call_name_idx].text,
+	};
+	if (lookup.is_method && docs != null) lookup.recv = self.resolve_receiver_type(call_name_idx, uri, docs, stdlib_path);
+	// An unknown receiver still calls a method, never a free function of that name.
+	lookup.method_types[lookup.count++] = lookup.recv.len > 0 ? lookup.recv : lookup.is_method ? ANY_RECEIVER : "";
+
+	if (!lookup.is_method)
+	{
+		String mod_prefix = self.resolve_module_prefix(call_name_idx);
+		if (mod_prefix.len > 0)
+		{
+			lookup.module_filter = resolve_module_name(content, mod_prefix);
+			if (lookup.module_filter.len == 0) lookup.module_filter = mod_prefix;
+		}
+	}
+	return lookup;
+}
+
+// When the receiver's own type doesn't declare the method: add its alias base and the
+// type that actually declares it (an `inline` member's type or a parent interface).
+// Both scan the project and the stdlib, so callers try `method_types[0]` first.
+fn void CalleeLookup.widen(&self, TokenList* toks, String uri, DocumentList* docs, String stdlib_path)
+{
+	if (self.recv.len == 0 || self.count > 1) return;
+	// Follow the alias chain, stdlib included — methods are declared on the
+	// underlying type as often as on the alias.
+	TypeInfo base = toks.canonical_type(self.recv, uri, docs, stdlib_path);
+	if (base.name != self.recv) self.method_types[self.count++] = base.name;
+	TypeInfo owner = toks.member_declarer({ .name = self.recv }, self.name, uri, docs, stdlib_path);
+	if (owner.known() && owner.name != self.recv && owner.name != base.name)
+	{
+		self.method_types[self.count++] = owner.name;
 	}
 }
 
@@ -281,35 +309,9 @@ fn bool TokenList.extract_signature_at(
 	bool is_generic_help = false
 )
 {
-	// Locate the `fn`/`macro` keyword that introduces this declaration.
-	sz kw_idx     = 0;
-	bool found_kw = false;
-	for (sz back = 0; back <= name_idx && back < 16; back++)
-	{
-		sz i        = name_idx - back;
-		TokenType t = self.entries[i].type;
-		if (t == FUNC || t == MACRO)
-		{
-			kw_idx = i;
-			found_kw = true;
-			break;
-		}
-		if (i == 0) break;
-	}
-	if (!found_kw) return false;
-
-	// Opening paren of the parameter list.
-	sz lparen_idx = 0;
-	for (sz j = name_idx + 1; j < self.size && j < name_idx + 8; j++)
-	{
-		if (self.entries[j].type == LPAREN)
-		{
-			lparen_idx = j;
-			break;
-		}
-		if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
-	}
-	if (lparen_idx == 0) return false;
+	sz kw_idx;
+	sz lparen_idx;
+	if (!self.callable_lparen(name_idx, &kw_idx, &lparen_idx)) return false;
 
 	// Signature label spans keyword .. matching ')' of the value list (or '{'/';' for
 	// paren-less forms). Remember the ')' index so a trailing generic `<...>` can extend it.
@@ -424,6 +426,40 @@ fn bool TokenList.extract_signature_at(
 	}
 	out.appendf(`]}],"activeSignature":0,"activeParameter":%d}`, active_param);
 	return true;
+}
+
+// For the NAME token of a function/macro declaration at `name_idx`: the index of its
+// `fn`/`macro` keyword and of the `(` opening its parameter list. False when `name_idx`
+// is not a callable declaration.
+fn bool TokenList.callable_lparen(&self, sz name_idx, sz* kw_idx, sz* lparen_idx)
+{
+	// Locate the `fn`/`macro` keyword that introduces this declaration.
+	bool found_kw = false;
+	for (sz back = 0; back <= name_idx && back < 16; back++)
+	{
+		sz i        = name_idx - back;
+		TokenType t = self.entries[i].type;
+		if (t == FUNC || t == MACRO)
+		{
+			*kw_idx = i;
+			found_kw = true;
+			break;
+		}
+		if (i == 0) break;
+	}
+	if (!found_kw) return false;
+
+	// Opening paren of the parameter list.
+	for (sz j = name_idx + 1; j < self.size && j < name_idx + 8; j++)
+	{
+		if (self.entries[j].type == LPAREN)
+		{
+			*lparen_idx = j;
+			return true;
+		}
+		if (self.entries[j].type == LBRACE || self.entries[j].type == EOS) break;
+	}
+	return false;
 }
 
 // Split the top-level parameters between the opening bracket at open_idx and its

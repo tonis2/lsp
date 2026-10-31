@@ -12,6 +12,7 @@ A Language Server Protocol implementation for the [C3 programming language](http
 - **Hover** — type signatures and doc comments (`<* ... *>`) for functions, macros, types, and struct fields, plus the `@feat(...)` variants of a platform-specific declaration
 - **Completion** — keywords, types, identifiers, compile-time builtins (`$if`, `@sizeof`, …), and attribute names; member completion after `.` for struct fields, methods, and enum values; snippet templates (`for`, `foreach`, `switch`, `fn`, `struct`, `$if`, …) where a statement or declaration can start
 - **Signature Help** — parameter hints when calling functions and macros, with the active parameter highlighted
+- **Inlay Hints** — parameter names shown before call arguments (`move(x: 1, y: 2)`), skipped for named, spread and variadic arguments and for arguments spelled like the parameter
 - **Document Symbols** — outline of modules, functions, structs, enums, macros, and constants, with each declaration's `@feat(...)` conditions
 - **Workspace Symbols** — search declarations across the project *and the standard library* by name, each labelled with the module that declares it; queries may narrow by module or list one type's methods (see below)
 - **Document Highlights** — highlight all occurrences of a symbol in the current file

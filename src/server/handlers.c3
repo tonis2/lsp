@@ -616,6 +616,25 @@ fn void LspServer.handle_signature_help(&self, Object* msg, String id_json)
 	}
 }
 
+fn void LspServer.handle_inlay_hint(&self, Object* msg, String id_json)
+{
+	String uri = request_uri(msg);
+	if (try doc = self.doc_or_respond(uri, id_json, "[]"))
+	{
+		Range range;
+		if (try r = msg.get("params")!!.get("range")) range = decode_range(r);
+		sz from = position_to_offset(doc.content, (int)range.start.line, (int)range.start.character);
+		sz to = position_to_offset(doc.content, (int)range.end.line, (int)range.end.character);
+		// An end past the last line gives 0 (every later line starts after offset 0):
+		// clients ask for whole-document ranges that way.
+		if (to == 0 && range.end.line > 0) to = doc.content.len;
+
+		DString data = dstring::temp();
+		encode_inlay_hints(uri, doc.content, from, to, &data, doc.get_tokens(), &self.documents, self.stdlib_path);
+		send_response(id_json, data.str_view());
+	}
+}
+
 fn void LspServer.handle_document_highlight(&self, Object* msg, String id_json)
 {
 	if (try doc = self.doc_or_respond(request_uri(msg), id_json, "null"))

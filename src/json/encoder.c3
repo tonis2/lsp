@@ -261,6 +261,7 @@ fn void encode_server_capabilities(DString* out, String version)
 	out.append(`"referencesProvider":true,`);
 	out.append(`"renameProvider":true,`);
 	out.append(`"codeActionProvider":{"codeActionKinds":["quickfix","refactor.rewrite"]},`);
+	out.append(`"inlayHintProvider":true,`);
 	out.append(`"signatureHelpProvider":{"triggerCharacters":["(",",","{","}"]}`);
 	out.append(`},`);
 	out.appendf(`"serverInfo":{"name":"c3-lsp","version":"%s"}}`, version);
