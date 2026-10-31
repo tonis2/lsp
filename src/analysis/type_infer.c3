@@ -2,6 +2,7 @@ module lsp;
 
 import std::core::dstring;
 import std::core::mem;
+import std::collections::map;
 import c3::lexer;
 
 // Static type inference over the token stream, shared by go-to-definition, hover,
@@ -17,6 +18,44 @@ import c3::lexer;
 // Bound on how deep expression/alias resolution may recurse. Chains this long are
 // pathological; the limit only exists so a cyclic alias cannot hang the server.
 const int MAX_INFER_DEPTH = 24;
+
+// The on-disk part of cross-file type lookups, memoized for the message being handled.
+// A lookup that misses walks every project and stdlib file, and inference repeats the
+// same few for each receiver in a file — highlighting `.type` across a file types
+// dozens of receivers through the same `alias TokenList = List{Token}`. Entries live in
+// the message's temp pool, so the server turns the memo on per message; other callers
+// (the tests) run uncached.
+struct TypeLookupMemo
+{
+	bool active;
+	HashMap{String, TypeInfo} map;
+}
+
+TypeLookupMemo type_lookup_memo;
+
+fn void type_lookup_memo_begin()
+{
+	type_lookup_memo.map.tinit();
+	type_lookup_memo.active = true;
+}
+
+fn void type_lookup_memo_end()
+{
+	type_lookup_memo.active = false;
+	type_lookup_memo.map = {};
+}
+
+// The memoized result for `key`, when the memo is on and holds one.
+fn TypeInfo? type_lookup_memo_get(String key) @private
+{
+	if (!type_lookup_memo.active) return NOT_FOUND~;
+	return type_lookup_memo.map.get(key);
+}
+
+fn void type_lookup_memo_set(String key, TypeInfo t) @private
+{
+	if (type_lookup_memo.active) type_lookup_memo.map.set(key.tcopy(), t);
+}
 
 // What is statically known about an expression's type.
 //
@@ -470,8 +509,11 @@ fn TypeInfo TokenList.alias_target_across(
 
 	String file_path = uri_to_path(uri);
 	if (file_path.len == 0) return {};
+	String key = string::tformat("alias|%s|%s", file_path, type_name);
+	if (try hit = type_lookup_memo_get(key)) return hit;
 	AliasScan scan = { type_name, {} };
 	scan_project_then_stdlib(file_path, stdlib_path, &scan);
+	type_lookup_memo_set(key, scan.result);
 	return scan.result;
 }
 
@@ -677,6 +719,16 @@ fn sz TokenList.member_sources(
 // member, an interface method, or (unless fields_only) a `fn Type.member(` method.
 fn bool TokenList.declares_member(&self, String type_name, String member, bool fields_only)
 {
+	// Every form of declaration spells out both names, so one pass rules out most of
+	// the files a cross-file search visits before the per-form passes below.
+	bool has_type;
+	bool has_member;
+	foreach (tok : self)
+	{
+		if (tok.text == type_name) has_type = true;
+		if (tok.text == member) has_member = true;
+	}
+	if (!has_type || !has_member) return false;
 	self.@each_struct_member(type_name, null; sz j)
 	{
 		if (self.entries[j].text == member) return true;
@@ -967,8 +1019,11 @@ fn TypeInfo TokenList.struct_field_type_across(
 
 	String file_path = uri_to_path(uri);
 	if (file_path.len == 0) return {};
+	String key = string::tformat("field|%s|%s|%s", file_path, struct_type, field_name);
+	if (try hit = type_lookup_memo_get(key)) return hit;
 	FieldTypeScan scan = { struct_type, field_name, {} };
 	scan_project_then_stdlib(file_path, stdlib_path, &scan);
+	type_lookup_memo_set(key, scan.result);
 	return scan.result;
 }
 

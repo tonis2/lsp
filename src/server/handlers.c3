@@ -643,7 +643,7 @@ fn void LspServer.handle_document_highlight(&self, Object* msg, String id_json)
 		sz offset = position_to_offset(doc.content, p.line, p.character);
 
 		DString data = dstring::temp();
-		encode_document_highlights(doc.content, offset, &data, doc.get_tokens());
+		encode_document_highlights(doc.content, offset, &data, doc.get_tokens(), request_uri(msg), &self.documents, self.stdlib_path);
 		respond_nonempty(id_json, &data, "null");
 	}
 }

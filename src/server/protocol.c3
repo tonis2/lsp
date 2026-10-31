@@ -121,6 +121,9 @@ fn void LspServer.handle_message(&self, String message)
 
 	String method = msg.get_string("method") ?? "";
 
+	type_lookup_memo_begin();
+	defer type_lookup_memo_end();
+
 	bool dispatched = false;
 	foreach (h : HANDLERS)
 	{

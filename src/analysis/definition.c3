@@ -726,7 +726,8 @@ fn TypeInfo TokenList.initializer_type_at(&self, sz lb, String uri, DocumentList
 	return self.spread_source_type(lb, uri, docs, stdlib_path, depth);
 }
 
-// The initializer's type as told by what precedes its opening brace.
+// The initializer's type as told by what precedes its opening brace. Only the tokens
+// before `lb` are read, so expected_type_at reuses it for any expression start.
 fn TypeInfo TokenList.initializer_type_from_context(&self, sz lb, String uri, DocumentList* docs, String stdlib_path, int depth)
 {
 	if (depth > 8 || lb < 1) return {};
@@ -837,6 +838,54 @@ fn TypeInfo TokenList.initializer_type_from_context(&self, sz lb, String uri, Do
 		return self.call_argument_init_type(lb, uri, docs, stdlib_path, depth + 1);
 	}
 
+	return {};
+}
+
+// The type an expression starting at `start` is expected to have, from where it is
+// written: `case RED:` takes the switch subject's type, `k == RED` the other side's,
+// and everything else — `return`, `Type v =`, `.field =`, call arguments, array
+// elements, casts — what an initializer list in the same spot would take. That is how
+// a bare `RED` or an inferred `.RED` is pinned to its enum. `start` is the `RED` or the
+// DOT of `.RED`.
+fn TypeInfo TokenList.expected_type_at(&self, sz start, String uri, DocumentList* docs, String stdlib_path)
+{
+	if (start < 1 || start >= self.size) return {};
+	switch (self.entries[start - 1].type)
+	{
+		case CASE:
+		case NEXTCASE:
+			return self.switch_subject_type(start - 1, uri, docs, stdlib_path);
+		case EQEQ:
+		case NOT_EQUAL:
+			if (start < 2) return {};
+			return self.expr_type(start - 2, uri, docs, stdlib_path);
+		default:
+			return self.initializer_type_from_context(start, uri, docs, stdlib_path, 0);
+	}
+}
+
+// The type of the subject of the `switch (subject) { ... }` whose body holds the token
+// at `idx`, found by walking back to the body's unmatched `{`.
+fn TypeInfo TokenList.switch_subject_type(&self, sz idx, String uri, DocumentList* docs, String stdlib_path)
+{
+	for (sz k = idx; k > 0; k--)
+	{
+		sz i = k - 1;
+		TokenType t = self.entries[i].type;
+		if (t == RBRACE)
+		{
+			sz open = self.match_lbrace_back(i);
+			if (open >= self.size || open == 0) return {};
+			k = open + 1;
+			continue;
+		}
+		if (t != LBRACE) continue;
+		if (i < 3 || self.entries[i - 1].type != RPAREN) return {};
+		sz? lparen = self.match_paren_backward(i - 1);
+		if (catch lparen) return {};
+		if (lparen == 0 || lparen + 1 >= i - 1 || self.entries[lparen - 1].type != SWITCH) return {};
+		return self.expr_type(i - 2, uri, docs, stdlib_path);
+	}
 	return {};
 }
 

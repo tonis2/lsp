@@ -229,3 +229,113 @@ fn void test_member_plain_typedef_fields_only() @test {
 	assert(r.contains(`"label":"handle"`) && r.contains(`"label":"pos"`), "got: %s", r);
 	assert(!r.contains(`"label":"getPos"`), "got: %s", r);
 }
+
+// --- generic receivers, inferred enum members, untyped receivers, highlights ---
+
+const String ME_SRC = "module game::e;\n"
+	+++ "enum Color { RED, GREEN }\n"
+	+++ "enum Light { RED, OFF }\n"
+	+++ "struct Box <Type> { Type n; }\n"
+	+++ "fn void Box{int}.clear(&self) {}\n"
+	+++ "struct Ping { int id; }\n"
+	+++ "fn void Ping.unique_ping(&self) {}\n"
+	+++ "struct Tag { int id; }\n"
+	+++ "fn void paint(Color c) {}\n"
+	+++ "fn Color pick() { return RED; }\n"
+	+++ "macro go(x) { x.unique_ping(); }\n"
+	+++ "macro go2(y) { y.id = 1; }\n"
+	+++ "fn void h1(Ping x) { x.id = 1; }\n"
+	+++ "fn void h2(Tag x) { x.id = 2; }\n"
+	+++ "fn void f(Color k, Box{int} b)\n"
+	+++ "{\n"
+	+++ "\tswitch (k)\n"
+	+++ "\t{\n"
+	+++ "\t\tcase RED: break;\n"
+	+++ "\t\tdefault: break;\n"
+	+++ "\t}\n"
+	+++ "\tLight l = RED;\n"
+	+++ "\tpaint(.RED);\n"
+	+++ "\tb.clear();\n"
+	+++ "\tif (k == RED) return;\n"
+	+++ "}\n";
+
+const String ME_URI = "file:///p/e.c3";
+
+enum MeRequest @private
+{
+	REFS,
+	RENAME,
+	HIGHLIGHT,
+}
+
+fn String me_ask(MeRequest req, String needle, sz skip = 0, int nth = 0) @private
+{
+	DocumentList* ds = mem::new(DocumentList);
+	defer mem::free(ds);
+	ds.open(ME_URI, ME_SRC, 1);
+	defer ds.close(ME_URI);
+	DString out = dstring::temp();
+	sz offset = mr_offset(ME_SRC, needle, nth) + skip;
+	switch (req)
+	{
+		case REFS: encode_references(ME_URI, ME_SRC, offset, ds, "", true, &out);
+		case RENAME: encode_rename(ME_URI, ME_SRC, offset, ds, "", "renamed", &out);
+		case HIGHLIGHT: encode_document_highlights(ME_SRC, offset, &out, null, ME_URI, ds, "");
+	}
+	return out.str_view();
+}
+
+fn bool me_on_line(String json, int line) @private
+{
+	return json.contains(string::tformat(`"start":{"line":%d,`, line));
+}
+
+fn void test_member_refs_generic_receiver_declaration() @test {
+	// `fn void Box{int}.clear` is the declaration `b.clear()` on a `Box{int}` calls.
+	foreach (String r : { me_ask(REFS, "b.clear", 2), me_ask(REFS, "}.clear", 2) })
+	{
+		assert(mr_count(r, `"uri"`) == 2 && me_on_line(r, 4) && me_on_line(r, 23), "got: %s", r);
+	}
+	String r = me_ask(RENAME, "b.clear", 2);
+	assert(mr_count(r, `"newText":"renamed"`) == 2 && me_on_line(r, 4) && me_on_line(r, 23), "got: %s", r);
+}
+
+fn void test_member_refs_inferred_enum_member() @test {
+	// Color.RED: the declaration, `return RED`, `case RED`, `paint(.RED)` and `k == RED`
+	// — not Light.RED or `Light l = RED`.
+	foreach (String r : { me_ask(REFS, "RED"), me_ask(REFS, "case RED", 5), me_ask(REFS, ".RED", 1) })
+	{
+		assert(mr_count(r, `"uri"`) == 5, "got: %s", r);
+		assert(me_on_line(r, 1) && me_on_line(r, 9) && me_on_line(r, 18) && me_on_line(r, 22) && me_on_line(r, 24), "got: %s", r);
+	}
+	foreach (String r : { me_ask(REFS, "RED", 0, 1), me_ask(REFS, "l = RED", 4) })
+	{
+		assert(mr_count(r, `"uri"`) == 2 && me_on_line(r, 2) && me_on_line(r, 21), "got: %s", r);
+	}
+}
+
+fn void test_member_rename_enum_member_leaves_other_enum() @test {
+	String r = me_ask(RENAME, "case RED", 5);
+	assert(mr_count(r, `"newText":"renamed"`) == 5, "got: %s", r);
+	assert(!me_on_line(r, 2) && !me_on_line(r, 21), "got: %s", r);
+}
+
+fn void test_member_refs_untyped_receiver_unique_name() @test {
+	// `x` in `macro go(x)` has no type, but only Ping declares `unique_ping`.
+	foreach (String r : { me_ask(REFS, "x.unique_ping", 2), me_ask(REFS, "Ping.unique_ping", 5) })
+	{
+		assert(mr_count(r, `"uri"`) == 2 && me_on_line(r, 6) && me_on_line(r, 10), "got: %s", r);
+	}
+	// Both Ping and Tag declare `id`: the untyped `y.id` only matches itself.
+	String r = me_ask(REFS, "y.id", 2);
+	assert(mr_count(r, `"uri"`) == 1 && me_on_line(r, 11), "got: %s", r);
+}
+
+fn void test_member_highlights_by_type() @test {
+	// `x.id` on a Ping marks Ping.id, not the same-spelled `x.id` on a Tag.
+	String r = me_ask(HIGHLIGHT, "x.id", 2);
+	assert(mr_count(r, `"range"`) == 2 && me_on_line(r, 5) && me_on_line(r, 12), "got: %s", r);
+	// An untyped receiver keeps matching by receiver text.
+	r = me_ask(HIGHLIGHT, "y.id", 2);
+	assert(mr_count(r, `"range"`) == 1 && me_on_line(r, 11), "got: %s", r);
+}

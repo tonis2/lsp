@@ -8,8 +8,10 @@ import std::io::path;
 import c3::lexer;
 
 // Encode document highlights (same-file occurrences of the symbol under cursor).
-// Output: JSON array of DocumentHighlight objects, or empty string if none.
-fn void encode_document_highlights(String content, sz offset, DString* out, TokenStream* cached = null)
+// Output: JSON array of DocumentHighlight objects, or empty string if none. Members are
+// matched by their declaring type when `docs` is given; otherwise by receiver text.
+fn void encode_document_highlights(String content, sz offset, DString* out, TokenStream* cached = null,
+	String uri = "", DocumentList* docs = null, String stdlib_path = "")
 {
 	TokenStream owned;
 	TokenStream* stream;
@@ -40,6 +42,30 @@ fn void encode_document_highlights(String content, sz offset, DString* out, Toke
 		out.append("]");
 		if (first) out.clear();
 		return;
+	}
+
+	// A member resolved to its declaring type: the same-typed uses in this file. An
+	// untyped receiver is not settled by name here — that takes a project-wide scan,
+	// too slow for a request sent on every cursor move.
+	if (docs != null)
+	{
+		if (try target = stream.tokens.member_target(cursor_idx, uri, docs, stdlib_path, false))
+		{
+			// Not init(): the owner's module only filters other files.
+			MemberQuery q = { .target = target, .origin_uri = uri, .docs = docs, .stdlib_path = stdlib_path,
+				.origin_toks = &stream.tokens, .include_decl = true, .no_name_fallback = true };
+			q.memo.tinit();
+			q.receivers.tinit();
+			List{Token} hits;
+			hits.tinit();
+			q.collect_in(&stream.tokens, uri, &hits);
+			bool first = true;
+			out.append("[");
+			foreach (tok : hits) append_highlight(tok, lo, out, &first);
+			out.append("]");
+			if (first) out.clear();
+			return;
+		}
 	}
 
 	// Detect if cursor is on a member access (preceded by DOT)
@@ -244,6 +270,8 @@ fn String TokenList.member_owner_type(&self, sz idx, String uri, DocumentList* d
 {
 	if (idx < 2 || self.entries[idx - 1].type != DOT) return "";
 	if (self.entries[idx - 2].type == TYPE_IDENT) return self.entries[idx - 2].text;
+	String decl_owner = self.method_decl_owner(idx);
+	if (decl_owner.len > 0) return decl_owner;
 	return self.resolve_receiver_type(idx, uri, docs, stdlib_path);
 }
 
@@ -281,9 +309,9 @@ fn void encode_rename(String uri, String content, sz offset, DocumentList* docs,
 	out.append(`{"changes":{`);
 	defer { if (first_uri) out.clear(); }
 
-	// A field or method: its declaration and every typed use across the project —
-	// unless only the stdlib declares it, where renaming would break the code.
-	if (ct == IDENT)
+	// A field, method or enum member: its declaration and every typed use across the
+	// project — unless only the stdlib declares it, where renaming would break the code.
+	if (ct == IDENT || ct == CONST_IDENT)
 	{
 		if (try target = stream.tokens.member_target(cursor_idx, uri, docs, stdlib_path))
 		{
